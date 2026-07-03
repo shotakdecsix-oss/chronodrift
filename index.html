@@ -111,6 +111,15 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
   box-shadow:0 0 12px rgba(160,96,255,0.5);
 }
 #mapBtn:hover { background:rgba(120,60,180,0.9); }
+#hopBtn {
+  position:fixed; bottom:24px; right:232px;
+  width:64px; height:64px; border-radius:50%;
+  background:rgba(40,90,160,0.7); color:#cfe8ff;
+  border:2px solid rgba(120,190,255,0.8);
+  font-size:28px; cursor:pointer; pointer-events:all; z-index:30;
+  touch-action:none; user-select:none;
+}
+#hopBtn:active { background:rgba(70,130,210,0.9); }
 </style>
 </head>
 <body>
@@ -124,13 +133,14 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
   <button id="mapCloseBtn">✕ 閉じる</button>
 </div>
 <div id="info">
-  PC: WASD移動 / マウスドラッグ回転<br>
-  スマホ: 左スティック移動 / 右スワイプ回転
+  PC: WASD移動 / Shiftダッシュ / Spaceジャンプ / ドラッグ回転<br>
+  スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ
 </div>
 <div id="status">🗺 伊勢原マップ読み込み中...</div>
 <a id="gpsDisplay" href="#" target="_blank">📍 座標取得中...</a>
 <div id="minimap"><canvas id="minimapCanvas" width="200" height="200"></canvas></div>
 <div id="joystick"><div id="joystickKnob"></div></div>
+<button id="hopBtn">⤴</button>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -535,9 +545,10 @@ function addBuilding(x, z, w, d, h, style) {
   }
 
   // Collision AABB — terrain-aware(chunkKey はアンロード時の掃除用)
+  // 上端は実際の屋根高さに(+5の余白があるとジャンプでの屋根着地位置がずれる)
   const cbox = new THREE.Box3(
     new THREE.Vector3(x-w/2, gy, z-d/2),
-    new THREE.Vector3(x+w/2, gy + h + 5, z+d/2)
+    new THREE.Vector3(x+w/2, gy + h, z+d/2)
   );
   cbox.chunkKey = currentChunkKey;
   collisionBoxes.push(cbox);
@@ -684,7 +695,15 @@ function addStation(x, z, name) {
 
 // ======= OSM DATA LOADER =======
 const statusEl = document.getElementById('status');
-const OSM_BOUNDS = { minLat:35.39, minLon:139.30, maxLat:35.43, maxLon:139.33 };
+// 初期スポーン: 神奈川県伊勢原市東成瀬2-2-11
+// (国土地理院ジオコーディング「東成瀬2番地」= 35.409103, 139.342331)
+const SPAWN_LAT = 35.409103, SPAWN_LON = 139.342331;
+// 初期OSM取得範囲と詳細地形はスポーン位置が中心になるよう定義(スパンは従来と同じ0.04°×0.03°)。
+// ワールド原点(0,0)=この範囲の中心=スポーン地点となり、以降の全計算が自動で整合する
+const OSM_BOUNDS = {
+  minLat: SPAWN_LAT - 0.02, minLon: SPAWN_LON - 0.015,
+  maxLat: SPAWN_LAT + 0.02, maxLon: SPAWN_LON + 0.015
+};
 const SCALE = 111000; // 1 game unit = 1 meter
 const MID_LAT = (OSM_BOUNDS.minLat + OSM_BOUNDS.maxLat) / 2;
 const MID_LON = (OSM_BOUNDS.minLon + OSM_BOUNDS.maxLon) / 2;
@@ -806,8 +825,8 @@ function getTerrainY(x, z) {
   return h11 + (h01 - h11) * (1 - fx) + (h10 - h11) * (1 - fz);
 }
 
-// 起伏の倍率 — 1.5は激しすぎ、1.0は物足りないとのことで1.25に
-const ELEV_SCALE = 1.25;
+// 起伏の倍率
+const ELEV_SCALE = 2.0;
 
 // ======= 「見えている地面」の高さ(生成物・プレイヤーはすべてこれを使う) =======
 // 画面に存在する地面は「詳細地形メッシュ」と「遠景地形メッシュ」の2枚。
@@ -1024,7 +1043,9 @@ async function loadOSM() {
   statusEl.textContent = `✨ 伊勢原ファンタジー世界へようこそ！ (建物:${buildingCount} 道路:${roadCount})`;
   setTimeout(()=>{ statusEl.style.display='none'; }, 4000);
 
-  const sp = findFreeSpawn();
+  // 東成瀬2-2-11(=ワールド原点付近)にスポーン。建物内なら最寄りの空き地点へ
+  const spw = latLonToXZ(SPAWN_LAT, SPAWN_LON);
+  const sp = findSpawnNear(spw.x, spw.z);
   player.position.set(sp.x, 0, sp.z);
   initialWorldLoaded = true; // ここからタイル取得を許可(標高は既に反映済み)
 }
@@ -1048,7 +1069,8 @@ function buildFallbackMap() {
   }
   statusEl.textContent = '✨ 伊勢原ファンタジー世界（フォールバック）へようこそ！';
   setTimeout(()=>{ statusEl.style.display='none'; }, 3000);
-  const sp2 = findFreeSpawn();
+  const spw2 = latLonToXZ(SPAWN_LAT, SPAWN_LON);
+  const sp2 = findSpawnNear(spw2.x, spw2.z);
   player.position.set(sp2.x, 0, sp2.z);
   initialWorldLoaded = true;
 }
@@ -1122,7 +1144,7 @@ function occlusionCamPos(targetPos, playerPos) {
   dir.normalize();
   for (let d = 1.5; d < dist; d += 0.4) {
     const tp = playerPos.clone().addScaledVector(dir, d);
-    if (wouldCollide(tp.x, tp.z)) {
+    if (wouldCollide(tp.x, tp.z, tp.y - 1.2)) {
       // Return a position just before the hit
       return playerPos.clone().addScaledVector(dir, Math.max(d - 0.8, 1.5));
     }
@@ -1131,19 +1153,17 @@ function occlusionCamPos(targetPos, playerPos) {
 }
 
 // ======= SPAWN FINDER =======
-function findFreeSpawn() {
-  // Try road midpoints first
-  for (const r of minimapRoads) {
-    const x = (r.x1 + r.x2) / 2, z = (r.z1 + r.z2) / 2;
-    if (!wouldCollide(x, z)) return { x, z };
-  }
-  // Fallback: grid scan in meter scale
-  for (let x = -2000; x <= 2000; x += 2) {
-    for (let z = -2000; z <= 2000; z += 2) {
-      if (!wouldCollide(x, z)) return { x, z };
+// 指定地点が建物内なら、螺旋状に周囲を探して最寄りの空き地点に立たせる
+function findSpawnNear(x0, z0) {
+  // スポーン時点ではプレイヤーyが未設定のため、その地点の地面高さで判定する
+  if (!wouldCollide(x0, z0, getGroundY(x0, z0))) return { x: x0, z: z0 };
+  for (let r = 2; r <= 200; r += 2) {
+    for (let a = 0; a < Math.PI * 2; a += Math.PI / 8) {
+      const x = x0 + Math.cos(a) * r, z = z0 + Math.sin(a) * r;
+      if (!wouldCollide(x, z, getGroundY(x, z))) return { x, z };
     }
   }
-  return { x: 0, z: 0 };
+  return { x: x0, z: z0 };
 }
 
 // ======= CAMERA CONTROL =======
@@ -1270,6 +1290,15 @@ const keys = {};
 document.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
 document.addEventListener('keyup',   e => { keys[e.key.toLowerCase()] = false; });
 
+// ======= JUMP STATE =======
+let velY = 0, airborne = false, hopQueued = false;
+const GRAVITY = -25;
+const hopBtn = document.getElementById('hopBtn');
+hopBtn.addEventListener('touchstart', () => { hopQueued = true; }, { passive: true });
+hopBtn.addEventListener('mousedown',  () => { hopQueued = true; });
+// Space: 押すたびに1回分(e.repeat除外で長押しの自動リピートは無効、連打は毎回有効)
+document.addEventListener('keydown', e => { if (e.key === ' ' && !e.repeat) hopQueued = true; });
+
 // Mouse drag for camera
 let mouseDown = false, lastMouseX = 0, lastMouseY = 0;
 canvas.addEventListener('mousedown', e => { mouseDown = true; lastMouseX = e.clientX; lastMouseY = e.clientY; });
@@ -1318,11 +1347,11 @@ document.addEventListener('touchmove', e => {
       const dx = t.clientX - joyCenterX;
       const dy = t.clientY - joyCenterY;
       const r2 = Math.sqrt(dx*dx+dy*dy);
-      const maxR = 50;
+      const maxR = 36; // 50pxでは端まで届きにくく最大速度が出なかった → 36pxで全開扱い
       const cx = r2 > maxR ? dx/r2*maxR : dx;
       const cy = r2 > maxR ? dy/r2*maxR : dy;
-      joystickKnob.style.left = (50 + cx/65*100) + '%';
-      joystickKnob.style.top  = (50 + cy/65*100) + '%';
+      joystickKnob.style.left = (50 + cx / 1.3) + '%'; // px→親幅130pxの%変換。全開(36px)でほぼ縁に届く
+      joystickKnob.style.top  = (50 + cy / 1.3) + '%';
       joyOx = cx / maxR;
       joyOz = cy / maxR;
     } else if (t.identifier === camTouchId) {
@@ -1354,10 +1383,15 @@ document.addEventListener('touchcancel', () => {
 const tempBox = new THREE.Box3();
 const playerRadius = 0.25; // small radius so player fits on narrow roads
 
-function wouldCollide(nx, nz) {
+// yBase 省略時はプレイヤーの現在高さで判定。
+// 【バグ修正】以前は y=0〜3 固定だったため、標高3m超の場所では建物AABB
+// (地形標高から始まる)と一切交差せず、当たり判定が実質無効だった。
+// 地面が平坦だった頃は偶然動いており、標高反映+ELEV_SCALE増で顕在化した。
+function wouldCollide(nx, nz, yBase) {
+  const y0 = (yBase !== undefined) ? yBase : player.position.y;
   tempBox.set(
-    new THREE.Vector3(nx - playerRadius, 0, nz - playerRadius),
-    new THREE.Vector3(nx + playerRadius, 3, nz + playerRadius)
+    new THREE.Vector3(nx - playerRadius, y0 + 0.1, nz - playerRadius),
+    new THREE.Vector3(nx + playerRadius, y0 + 2.4, nz + playerRadius)
   );
   // 空間グリッドで近傍セルのみ照合(ボックスは重なる全セルに登録済み)
   const x0 = Math.floor((nx - playerRadius) / COLL_CELL), x1 = Math.floor((nx + playerRadius) / COLL_CELL);
@@ -1368,6 +1402,20 @@ function wouldCollide(nx, nz) {
     for (const box of arr) if (box.intersectsBox(tempBox)) return true;
   }
   return false;
+}
+
+// その地点で立てる床の高さ(地形 or 足元以下にある建物の屋根の高い方)
+function floorHeightAt(x, z, fromY) {
+  let fy = getGroundY(x, z) + 0.35;
+  const arr = collGrid.get(Math.floor(x / COLL_CELL) + ',' + Math.floor(z / COLL_CELL));
+  if (arr) for (const b of arr) {
+    if (x >= b.min.x && x <= b.max.x && z >= b.min.z && z <= b.max.z) {
+      const top = b.max.y + 0.35;
+      // 現在高さ+0.5以下の屋根だけを床候補に(下から突き上げない)
+      if (b.max.y <= fromY + 0.5 && top > fy) fy = top;
+    }
+  }
+  return fy;
 }
 
 // ======= TILE-BASED DYNAMIC OSM FETCHING =======
@@ -1645,9 +1693,11 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.05);
   const t  = clock.getElapsedTime();
 
-  // Speed scales with joystick deflection: 5 m/s (idle) → 25 m/s (full stick)
+  // 速度: 通常5m/s、最大3倍(15m/s)。スマホ=スティックの倒し量で連続加速、PC=Shiftダッシュ
+  // 加速カーブを立たせ(pow0.7×1.15)、6割程度の倒しでも3倍近く出るように
   const joyMag = joyActive ? Math.min(1, Math.sqrt(joyOx*joyOx + joyOz*joyOz)) : 0;
-  const speed = 5 + joyMag * 20;
+  let speed = 5 + 40 * Math.min(1, Math.pow(joyMag, 0.7) * 1.15); // 最大45m/s
+  if (keys['shift']) speed = 45;
   const forward = new THREE.Vector3(-Math.sin(camYaw), 0, -Math.cos(camYaw));
   const right   = new THREE.Vector3( Math.cos(camYaw), 0, -Math.sin(camYaw));
 
@@ -1680,9 +1730,23 @@ function animate() {
   if (!wouldCollide(nx, player.position.z)) player.position.x = nx;
   if (!wouldCollide(player.position.x, nz)) player.position.z = nz;
 
-  // Player follows visible ground height (道路面は+0.35なので0.35m浮かせて道路上に立たせる)
-  const terrainY = getGroundY(player.position.x, player.position.z);
-  player.position.y = terrainY + 0.35;
+  // ======= ジャンプ・重力・着地(地形と建物屋根の両方に整合) =======
+  const floorY = floorHeightAt(player.position.x, player.position.z, player.position.y);
+  // 空中でも再ジャンプ可能(連打で高度を稼げる)。押すたびに上向き速度をリセット
+  if (hopQueued) { velY = 15.6; airborne = true; hopQueued = false; } // 到達高度 ≈ v²/2g ≈ 4.9m
+  if (airborne) {
+    velY += GRAVITY * dt;
+    player.position.y += velY * dt;
+    if (velY <= 0 && player.position.y <= floorY) {
+      player.position.y = floorY; velY = 0; airborne = false;
+    }
+  } else {
+    if (player.position.y - floorY > 1.5) {
+      airborne = true; velY = 0; // 屋根や崖から歩き出た → 落下開始
+    } else {
+      player.position.y = floorY; // 接地中は床に追従
+    }
+  }
 
   // Face movement direction
   if (isMoving) {
