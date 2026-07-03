@@ -1,0 +1,1787 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>伊勢原ファンタジー</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
+#canvas { display:block; width:100vw; height:100vh; }
+#ui {
+  position:fixed; top:0; left:0; width:100%; height:100%;
+  pointer-events:none; z-index:10;
+}
+#viewBtn {
+  position:fixed; top:16px; left:16px;
+  background:rgba(80,40,120,0.85); color:#e8c8ff;
+  border:1px solid #a060ff; border-radius:8px;
+  padding:8px 14px; font-size:14px; cursor:pointer;
+  pointer-events:all; z-index:20;
+  text-shadow:0 0 8px #c080ff;
+  box-shadow:0 0 12px rgba(160,96,255,0.5);
+}
+#viewBtn:hover { background:rgba(120,60,180,0.9); }
+#info {
+  position:fixed; top:16px; right:16px;
+  background:rgba(30,10,60,0.8); color:#c8a8ff;
+  border:1px solid #6040a0; border-radius:8px;
+  padding:10px 14px; font-size:12px; line-height:1.7;
+  pointer-events:none;
+}
+#status {
+  position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+  background:rgba(30,10,60,0.85); color:#e8c8ff;
+  border:1px solid #8060c0; border-radius:12px;
+  padding:10px 20px; font-size:13px;
+  pointer-events:none; text-align:center;
+}
+/* Touch joystick */
+#joystick {
+  position:fixed; bottom:100px; left:40px;
+  width:130px; height:130px;
+  background:rgba(80,40,120,0.45);
+  border:2px solid rgba(160,100,255,0.7);
+  border-radius:50%; pointer-events:all; z-index:30;
+  touch-action:none; user-select:none;
+}
+#joystickKnob {
+  position:absolute; top:50%; left:50%;
+  width:52px; height:52px;
+  background:rgba(160,100,255,0.8);
+  border:2px solid #e0a0ff;
+  border-radius:50%; transform:translate(-50%,-50%);
+  pointer-events:none;
+}
+/* Minimap */
+#minimap {
+  position:fixed; bottom:20px; right:16px;
+  width:200px; height:200px;
+  border:2px solid rgba(160,100,255,0.7);
+  border-radius:8px; overflow:hidden;
+  background:rgba(10,5,25,0.85);
+  z-index:25; pointer-events:none;
+}
+#gpsDisplay {
+  position:fixed; bottom:230px; right:16px;
+  background:rgba(10,30,60,0.85); color:#a0e0ff;
+  border:1px solid rgba(80,180,255,0.5); border-radius:8px;
+  padding:8px 12px; font-size:11px; line-height:1.8;
+  pointer-events:all; z-index:25;
+  text-decoration:none; display:block;
+}
+#gpsDisplay:hover { background:rgba(20,50,100,0.9); }
+#jumpBtn {
+  position:fixed; top:96px; left:16px;
+  background:rgba(20,80,40,0.85); color:#a0ffb0;
+  border:1px solid #40c060; border-radius:8px;
+  padding:8px 14px; font-size:14px; cursor:pointer;
+  pointer-events:all; z-index:20;
+  box-shadow:0 0 12px rgba(64,192,96,0.4);
+}
+#jumpBtn:hover { background:rgba(30,120,60,0.9); }
+/* Map overlay */
+#mapOverlay {
+  position:fixed; top:0; left:0; width:100%; height:100%;
+  background:rgba(0,0,0,0.9); z-index:200;
+  display:none; flex-direction:column;
+  align-items:center; justify-content:center; gap:12px;
+}
+#mapOverlay.active { display:flex; }
+#leafletMap {
+  width:90vw; height:75vh;
+  border:2px solid #40c0ff; border-radius:8px;
+}
+#mapCloseBtn {
+  background:rgba(80,40,120,0.9); color:#e8c8ff;
+  border:1px solid #a060ff; border-radius:8px;
+  padding:10px 28px; font-size:16px; cursor:pointer;
+  pointer-events:all;
+}
+#mapHint {
+  color:#80e0ff; font-size:13px; text-align:center;
+}
+#mapBtn {
+  position:fixed; top:56px; left:16px;
+  background:rgba(80,40,120,0.85); color:#e8c8ff;
+  border:1px solid #a060ff; border-radius:8px;
+  padding:8px 14px; font-size:14px; cursor:pointer;
+  pointer-events:all; z-index:20;
+  text-shadow:0 0 8px #c080ff;
+  box-shadow:0 0 12px rgba(160,96,255,0.5);
+}
+#mapBtn:hover { background:rgba(120,60,180,0.9); }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<button id="viewBtn">👁 一人称</button>
+<button id="mapBtn">🗺 上空</button>
+<button id="jumpBtn">📍 マップジャンプ</button>
+<div id="mapOverlay">
+  <div id="mapHint">タップした場所にジャンプします</div>
+  <div id="leafletMap"></div>
+  <button id="mapCloseBtn">✕ 閉じる</button>
+</div>
+<div id="info">
+  PC: WASD移動 / マウスドラッグ回転<br>
+  スマホ: 左スティック移動 / 右スワイプ回転
+</div>
+<div id="status">🗺 伊勢原マップ読み込み中...</div>
+<a id="gpsDisplay" href="#" target="_blank">📍 座標取得中...</a>
+<div id="minimap"><canvas id="minimapCanvas" width="200" height="200"></canvas></div>
+<div id="joystick"><div id="joystickKnob"></div></div>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// Prevent default touch scroll everywhere
+document.documentElement.style.touchAction = 'none';
+document.body.style.touchAction = 'none';
+
+// ======= SCENE SETUP =======
+const canvas = document.getElementById('canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+// 影を無効化 — 3000m範囲を1024pxで描く影は約3m/texelでほぼ視認できず、
+// シャドウパスで全建物を毎フレーム二重描画するコストだけが残るため
+renderer.shadowMap.enabled = false;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.9;
+
+const scene = new THREE.Scene();
+const WORLD_FOG = new THREE.FogExp2(0x3080b0, 0.0004); // 毎フレーム new しない(GC対策)
+scene.fog = WORLD_FOG;
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.5, 5000);
+
+// ======= FANTASY SKY =======
+// 半径はカメラの far(5000) より十分小さく。原点固定だったのをカメラ追従に変更
+// (以前は原点から100m以上離れると球の反対側がfarクリップされ、マップジャンプで
+//  球の外に出ると空が完全に消えていた)
+let skyMesh = null;
+function buildSky() {
+  const geo = new THREE.SphereGeometry(4000, 32, 32);
+  const canvas2 = document.createElement('canvas');
+  canvas2.width = 512; canvas2.height = 512;
+  const ctx = canvas2.getContext('2d');
+  const grad = ctx.createLinearGradient(0, 0, 0, 512);
+  grad.addColorStop(0,   '#0a2a60');
+  grad.addColorStop(0.4, '#1a5090');
+  grad.addColorStop(0.7, '#3090c0');
+  grad.addColorStop(1,   '#80d0f0');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0,0,512,512);
+  // Horizon glow
+  const hgrad = ctx.createRadialGradient(256,512,0,256,512,300);
+  hgrad.addColorStop(0, 'rgba(200,100,50,0.5)');
+  hgrad.addColorStop(1, 'rgba(200,100,50,0)');
+  ctx.fillStyle = hgrad;
+  ctx.fillRect(0,0,512,512);
+  const tex = new THREE.CanvasTexture(canvas2);
+  // fog:false — 半径4000ではFogExp2でほぼフォグ色に塗り潰されるため空はフォグ対象外に
+  const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide, fog: false, depthWrite: false });
+  skyMesh = new THREE.Mesh(geo, mat);
+  skyMesh.frustumCulled = false;
+  skyMesh.renderOrder = -2; // 最初に背景として描画
+  scene.add(skyMesh);
+}
+buildSky();
+
+// ======= STARS =======
+// カメラ追従。sizeAttenuation:false にしないと距離3800では1px未満で見えない
+let starMesh = null;
+(function buildStars() {
+  const geo = new THREE.BufferGeometry();
+  const count = 3000;
+  const pos = new Float32Array(count * 3);
+  for (let i = 0; i < count * 3; i += 3) {
+    const phi = Math.random() * Math.PI * 0.5; // 上半球のみ
+    const theta = Math.random() * Math.PI * 2;
+    const r = 3800;
+    pos[i]   = r * Math.sin(phi) * Math.cos(theta);
+    pos[i+1] = r * Math.cos(phi);
+    pos[i+2] = r * Math.sin(phi) * Math.sin(theta);
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const mat = new THREE.PointsMaterial({ color: 0xffffff, size: 1.6, sizeAttenuation: false, fog: false, transparent: true, opacity: 0.9 });
+  starMesh = new THREE.Points(geo, mat);
+  starMesh.frustumCulled = false;
+  starMesh.renderOrder = -1;
+  scene.add(starMesh);
+})();
+
+// ======= LIGHTS =======
+scene.add(new THREE.AmbientLight(0x9070d0, 2.5));
+const moonLight = new THREE.DirectionalLight(0xd0c0ff, 1.8);
+moonLight.position.set(-500, 1000, -300);
+moonLight.castShadow = false;
+moonLight.shadow.mapSize.set(1024, 1024);
+moonLight.shadow.camera.near = 1;
+moonLight.shadow.camera.far = 5000;
+moonLight.shadow.camera.left = moonLight.shadow.camera.bottom = -1500;
+moonLight.shadow.camera.right = moonLight.shadow.camera.top = 1500;
+scene.add(moonLight);
+
+// Warm torch point lights — 地形読み込み後に地表高さへ再配置する(下の loadElevations 参照)
+const torchColors = [0xff6a00, 0xff8c40, 0xffaa60];
+const torchLights = [];
+for (let i = 0; i < 6; i++) {
+  const pt = new THREE.PointLight(torchColors[i%3], 1.2, 300);
+  pt.position.set(Math.random()*2000-1000, 4, Math.random()*2000-1000);
+  scene.add(pt);
+  torchLights.push(pt);
+}
+
+// ======= GROUND / TERRAIN =======
+// Placeholder — actual terrain mesh is built after OSM_BOUNDS constants are defined
+let terrainMesh = null; // set up after OSM constants
+
+// ======= COLLISION BOXES =======
+let collisionBoxes = [];
+
+// 空間ハッシュグリッド — wouldCollide が全ボックスを線形走査していたため、
+// カメラ遮蔽判定(毎フレーム約40回呼ぶ)と合わせて数万判定/フレームになっていた。
+// 近傍セルのみの照合に変更して大幅軽量化。
+const COLL_CELL = 60;
+let collGrid = new Map();
+function collGridAdd(box) {
+  const x0 = Math.floor(box.min.x / COLL_CELL), x1 = Math.floor(box.max.x / COLL_CELL);
+  const z0 = Math.floor(box.min.z / COLL_CELL), z1 = Math.floor(box.max.z / COLL_CELL);
+  for (let gx = x0; gx <= x1; gx++) for (let gz = z0; gz <= z1; gz++) {
+    const k = gx + ',' + gz;
+    let arr = collGrid.get(k);
+    if (!arr) { arr = []; collGrid.set(k, arr); }
+    arr.push(box);
+  }
+}
+function rebuildCollGrid() {
+  collGrid = new Map();
+  for (const b of collisionBoxes) collGridAdd(b);
+}
+let currentChunkKey = null; // generateChunk 実行中のみセット(アンロード時の掃除タグ)
+
+// ======= MINIMAP DATA =======
+let minimapBuildings = []; // {x,z,w,d,ck}
+const minimapRoads = [];   // {x1,z1,x2,z2}
+let placedBuildings = [];  // {x,z,r,ck} for landuse de-duplication
+const landusePolygons = []; // {pts, lu, minX, maxX, minZ, maxZ} — stored during loadOSM for dynamic chunk generation
+const loadedChunks = new Set(); // "cx,cz" string keys of already-generated chunks
+const chunkMeshes = new Map();  // "cx,cz" → [THREE.Mesh, ...] for unloading
+const CHUNK_SIZE = 120;  // meters per chunk side
+// 半径2(±300m)ではフォグで隠れない距離で建物がポップイン/アウトして
+// 「途切れて」見えたため4(±480m、アンロードは±720m)に拡大
+const CHUNK_RADIUS = 4;
+
+function pointInPolygon(px, pz, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length-1; i < pts.length; j=i++) {
+    const xi=pts[i].x, zi=pts[i].z, xj=pts[j].x, zj=pts[j].z;
+    if (((zi>pz)!==(zj>pz)) && (px < (xj-xi)*(pz-zi)/(zj-zi)+xi)) inside=!inside;
+  }
+  return inside;
+}
+
+function hasBuildingNearby(cx, cz, minDist) {
+  const d2 = minDist*minDist;
+  for (const b of placedBuildings) {
+    const dx=cx-b.x, dz=cz-b.z;
+    if (dx*dx+dz*dz < d2) return true;
+  }
+  return false;
+}
+
+// ======= PLAYER CHARACTER (Wizard) =======
+const player = new THREE.Group();
+scene.add(player);
+
+// Body (robe)
+const bodyMat = new THREE.MeshLambertMaterial({ color: 0x3020a0 });
+const body = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.5, 1.4, 8), bodyMat);
+body.position.y = 0.7;
+body.castShadow = true;
+player.add(body);
+
+// Head
+const headMat = new THREE.MeshLambertMaterial({ color: 0xf5c8a0 });
+const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 12, 12), headMat);
+head.position.y = 1.65;
+head.castShadow = true;
+player.add(head);
+
+// Hat
+const hatMat = new THREE.MeshLambertMaterial({ color: 0x1a0a50 });
+const hatBrim = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 0.07, 12), hatMat);
+hatBrim.position.y = 1.9;
+player.add(hatBrim);
+const hatTop = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.38, 0.6, 12), hatMat);
+hatTop.position.y = 2.22;
+player.add(hatTop);
+
+// Cape
+const capeMat = new THREE.MeshLambertMaterial({ color: 0xc0001a, side: THREE.DoubleSide });
+const capeGeo = new THREE.PlaneGeometry(0.9, 1.2);
+const cape = new THREE.Mesh(capeGeo, capeMat);
+cape.position.set(0, 0.8, -0.38);
+cape.castShadow = true;
+player.add(cape);
+
+// Arms
+const armMat = new THREE.MeshLambertMaterial({ color: 0x2818a0 });
+const leftArm = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.7, 8), armMat);
+leftArm.position.set(-0.52, 0.9, 0);
+player.add(leftArm);
+const rightArm = leftArm.clone();
+rightArm.position.set(0.52, 0.9, 0);
+player.add(rightArm);
+
+// Staff
+const staffMat = new THREE.MeshLambertMaterial({ color: 0x8b5e2a });
+const staff = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 2.2, 8), staffMat);
+staff.position.set(0.55, 1.1, 0);
+player.add(staff);
+const orbMat = new THREE.MeshLambertMaterial({ color: 0x80ffff, emissive: 0x40c0ff, emissiveIntensity: 1.5 });
+const orb = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 10), orbMat);
+orb.position.set(0.55, 2.25, 0);
+player.add(orb);
+const orbLight = new THREE.PointLight(0x80ffff, 1.2, 8);
+orbLight.position.copy(orb.position);
+player.add(orbLight);
+
+player.position.set(0, 0, 0);
+
+// ======= BUILDING MATERIAL =======
+const buildingMats = [
+  new THREE.MeshLambertMaterial({ color: 0x9a7acc }),
+  new THREE.MeshLambertMaterial({ color: 0x8a6ab8 }),
+  new THREE.MeshLambertMaterial({ color: 0xaa80d8 }),
+  new THREE.MeshLambertMaterial({ color: 0x9880c8 }),
+];
+const roofMat = new THREE.MeshLambertMaterial({ color: 0x5030a0 });
+
+// マテリアルキャッシュ — 建物ごとに new していたのを同色で共有し、
+// チャンク生成でマテリアルが無限増殖するのを防ぐ
+const matCache = new Map();
+function lambertMat(color, emissive) {
+  const key = color + '_' + (emissive || 0);
+  let m = matCache.get(key);
+  if (!m) { m = new THREE.MeshLambertMaterial({ color, emissive: emissive || 0 }); matCache.set(key, m); }
+  return m;
+}
+
+// 装飾ポイントライトの上限 — ライトが増えるたびに全マテリアルのシェーダが
+// 再コンパイルされてカクつき、描画コストもライト数に比例して増えるため
+let decorLightCount = 0;
+const MAX_DECOR_LIGHTS = 6;
+function addDecorLight(color, intensity, range, x, y, z) {
+  if (decorLightCount >= MAX_DECOR_LIGHTS) return;
+  decorLightCount++;
+  const l = new THREE.PointLight(color, intensity, range);
+  l.position.set(x, y, z);
+  scene.add(l);
+}
+const windowMat = new THREE.MeshBasicMaterial({ color: 0xffee88, transparent: true, opacity: 0.85 });
+const glowMat  = new THREE.MeshBasicMaterial({ color: 0x8040ff, transparent: true, opacity: 0.3, side: THREE.DoubleSide });
+
+// Returns true if the rectangle (cx,cz,bw,bd) overlaps any road segment
+function isOnRoad(cx, cz, bw, bd) {
+  const halfDiag = Math.sqrt(bw*bw + bd*bd) / 2;
+  for (const r of minimapRoads) {
+    const dx = r.x2-r.x1, dz = r.z2-r.z1;
+    const len2 = dx*dx + dz*dz;
+    if (len2 < 0.01) continue;
+    const t = Math.max(0, Math.min(1, ((cx-r.x1)*dx + (cz-r.z1)*dz) / len2));
+    const nx = r.x1 + t*dx - cx, nz = r.z1 + t*dz - cz;
+    const dist = Math.sqrt(nx*nx + nz*nz);
+    if (dist < (r.rw||5)/2 + halfDiag + 1) return true; // 1m margin
+  }
+  return false;
+}
+
+// Determine building visual style from OSM tags
+function getBuildingStyle(tags) {
+  const am = tags.amenity || '', rel = tags.religion || '', bt = tags.building || '';
+  const name = (tags.name || '') + (tags['name:ja'] || '');
+  if (am === 'place_of_worship' || name.includes('神社') || name.includes('shrine')) {
+    if (rel === 'shinto' || name.includes('神社'))
+      return { color: 0xcc2200, roofColor: 0x880000, emissive: 0x440000, type: 'shrine' };
+    if (rel === 'buddhist' || name.includes('寺') || name.includes('院'))
+      return { color: 0x7a5020, roofColor: 0x4a3010, emissive: 0x221100, type: 'temple' };
+    return { color: 0xd4a0a0, roofColor: 0x883333, emissive: 0x220000, type: 'church' };
+  }
+  if (am === 'school' || am === 'university' || am === 'college' || bt === 'school')
+    return { color: 0xf0e060, roofColor: 0xa09020, emissive: 0x221100, type: 'school' };
+  if (am === 'hospital' || am === 'clinic' || name.includes('病院'))
+    return { color: 0xf8f8f8, roofColor: 0xdddddd, emissive: 0x111111, type: 'hospital' };
+  if (am === 'townhall' || am === 'police' || am === 'fire_station' || name.includes('市役所') || name.includes('役場'))
+    return { color: 0x6070a0, roofColor: 0x405080, emissive: 0x001133, type: 'government' };
+  if (tags.shop || bt === 'commercial' || am === 'supermarket' || am === 'convenience')
+    return { color: 0xff8840, roofColor: 0xcc5500, emissive: 0x221100, type: 'shop' };
+  if (bt === 'apartments')
+    return { color: 0x90a0c0, roofColor: 0x506080, emissive: 0x001122, type: 'apartment' };
+  if (bt === 'house' || bt === 'detached' || bt === 'residential')
+    return { color: 0xd4b070, roofColor: 0x886030, emissive: 0x110800, type: 'house' };
+  if (bt === 'industrial' || bt === 'warehouse' || bt === 'factory')
+    return { color: 0x808890, roofColor: 0x505860, emissive: 0x111111, type: 'industrial' };
+  return null; // use default purple
+}
+
+function addBuilding(x, z, w, d, h, style) {
+  // 4隅+中心の地形高さを見て、最低点を基礎にし最高点まで胴体を延長。
+  // (中心1点だけだと斜面で山側が埋まり、谷側が浮いていた)
+  const hs = [
+    getGroundY(x, z),
+    getGroundY(x - w/2, z - d/2), getGroundY(x + w/2, z - d/2),
+    getGroundY(x - w/2, z + d/2), getGroundY(x + w/2, z + d/2),
+  ];
+  const gy = Math.min(...hs);   // 基礎 = 最低点
+  h += Math.max(...hs) - gy;    // 斜面の高低差ぶん建物を延長して埋まりを防ぐ
+
+  // Body material — use style color or random purple
+  let mat;
+  if (style && style.color != null) {
+    mat = lambertMat(style.color, style.emissive || 0x000000);
+  } else {
+    mat = buildingMats[Math.floor(Math.random()*buildingMats.length)];
+  }
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(x, gy + h/2, z);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  mesh.renderOrder = 2;
+  scene.add(mesh);
+
+  // Roof — shape & color varies by type
+  const type = style ? style.type : 'default';
+  const roofC = (style && style.roofColor) ? style.roofColor : 0x5030a0;
+  const rm = lambertMat(roofC);
+
+  if (type === 'shrine') {
+    // Pagoda-style double roof
+    const r1 = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w,d)*0.8, h*0.4, 4), rm);
+    r1.position.set(x, gy+h+h*0.2, z); r1.rotation.y = Math.PI/4; r1.renderOrder=2; scene.add(r1);
+    const r2 = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w,d)*0.5, h*0.25, 4), rm);
+    r2.position.set(x, gy+h+h*0.55, z); r2.rotation.y = Math.PI/4; r2.renderOrder=2; scene.add(r2);
+    // Torii gate in front
+    const tMat = lambertMat(0xdd2200);
+    const pillarH = Math.min(h*0.8, 8);
+    const pr = 0.3;
+    [-1.5,1.5].forEach(ox => {
+      const p = new THREE.Mesh(new THREE.CylinderGeometry(pr,pr,pillarH,6), tMat);
+      p.position.set(x+ox, gy+pillarH/2, z+d/2+2); p.renderOrder=2; scene.add(p);
+    });
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(4.5,0.5,0.5), tMat);
+    bar.position.set(x, gy+pillarH-0.5, z+d/2+2); bar.renderOrder=2; scene.add(bar);
+    const bar2 = new THREE.Mesh(new THREE.BoxGeometry(3.8,0.4,0.4), tMat);
+    bar2.position.set(x, gy+pillarH-1.5, z+d/2+2); bar2.renderOrder=2; scene.add(bar2);
+  } else if (type === 'temple') {
+    // Wide curved roof
+    const r1 = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w,d)*0.9, h*0.3, 8), rm);
+    r1.position.set(x, gy+h+h*0.15, z); r1.renderOrder=2; scene.add(r1);
+    // Bell tower hint
+    const bellMat = lambertMat(0x4a3010);
+    const bell = new THREE.Mesh(new THREE.CylinderGeometry(0.8,1.0,h*0.6,8), bellMat);
+    bell.position.set(x+w/2+2, gy+h*0.3, z); bell.renderOrder=2; scene.add(bell);
+  } else if (type === 'hospital') {
+    // Flat roof + red cross
+    const r1 = new THREE.Mesh(new THREE.BoxGeometry(w+0.5, 0.5, d+0.5), rm);
+    r1.position.set(x, gy+h+0.25, z); r1.renderOrder=2; scene.add(r1);
+    const crossMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+    const cH = new THREE.Mesh(new THREE.BoxGeometry(3, 0.4, 1), crossMat);
+    cH.position.set(x, gy+h+0.7, z); cH.renderOrder=2; scene.add(cH);
+    const cV = new THREE.Mesh(new THREE.BoxGeometry(1, 0.4, 3), crossMat);
+    cV.position.set(x, gy+h+0.7, z); cV.renderOrder=2; scene.add(cV);
+  } else if (type === 'school') {
+    // Hip roof, wide
+    const r1 = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w,d)*0.7, h*0.2, 4), rm);
+    r1.position.set(x, gy+h+h*0.1, z); r1.rotation.y=Math.PI/4; r1.renderOrder=2; scene.add(r1);
+  } else if (type === 'government') {
+    // Dome
+    const r1 = new THREE.Mesh(new THREE.SphereGeometry(Math.min(w,d)*0.4,8,6,0,Math.PI*2,0,Math.PI/2), rm);
+    r1.position.set(x, gy+h, z); r1.renderOrder=2; scene.add(r1);
+  } else {
+    // Default cone roof
+    const roof = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w,d)*0.75, h*0.3, 4), rm);
+    roof.position.set(x, gy+h+h*0.15, z); roof.rotation.y=Math.PI/4; roof.renderOrder=2; scene.add(roof);
+  }
+
+  // Windows (random) — 窓は1枚ごとに1ドローコール。最大2段・35%出現に抑え、
+  // 建物が450棟を超えたら以降は省略(ドローコール爆発の防止)
+  const numW = minimapBuildings.length < 450 ? Math.min(2, Math.floor(h / 3)) : 0;
+  for (let lv = 0; lv < numW; lv++) {
+    const wy = gy + (lv+1) * (h / (numW+1));
+    [[w/2+0.01,0,'x'],[-(w/2+0.01),0,'x'],[0,d/2+0.01,'z'],[0,-(d/2+0.01),'z']].forEach(([ox,oz,ax]) => {
+      if (Math.random() > 0.35) return;
+      const wm = new THREE.Mesh(new THREE.PlaneGeometry(0.35,0.5), windowMat);
+      wm.position.set(x+ox, wy, z+oz);
+      if (ax==='x') wm.rotation.y = ox>0 ? 0 : Math.PI;
+      else           wm.rotation.y = oz>0 ? Math.PI/2 : -Math.PI/2;
+      scene.add(wm);
+    });
+  }
+
+  // Special glow for shrines/temples
+  if (type === 'shrine') {
+    addDecorLight(0xff4400, 1.5, 30, x, gy+h*0.8, z);
+  } else if (type === 'temple') {
+    addDecorLight(0xffaa00, 1.2, 25, x, gy+h*0.8, z);
+  } else if (Math.random() < 0.06) {
+    const aura = new THREE.Mesh(new THREE.SphereGeometry(Math.max(w,d)*0.8, 8, 8), glowMat);
+    aura.position.set(x, gy + h*0.6, z); scene.add(aura);
+    addDecorLight(0x8040ff, 0.8, 15, x, gy + h*0.6, z);
+  }
+
+  // Collision AABB — terrain-aware(chunkKey はアンロード時の掃除用)
+  const cbox = new THREE.Box3(
+    new THREE.Vector3(x-w/2, gy, z-d/2),
+    new THREE.Vector3(x+w/2, gy + h + 5, z+d/2)
+  );
+  cbox.chunkKey = currentChunkKey;
+  collisionBoxes.push(cbox);
+  collGridAdd(cbox);
+
+  // Minimap record
+  minimapBuildings.push({x, z, w, d, ck: currentChunkKey});
+  // Spatial index for landuse fill de-duplication
+  placedBuildings.push({x, z, r: Math.max(w,d)/2, ck: currentChunkKey});
+}
+
+// Shared road materials (created once, reused)
+const ROAD_MAT = {
+  trunk:      new THREE.MeshBasicMaterial({ color: 0xffee00, side: THREE.DoubleSide }),
+  primary:    new THREE.MeshBasicMaterial({ color: 0xffdd00, side: THREE.DoubleSide }),
+  secondary:  new THREE.MeshBasicMaterial({ color: 0xff9922, side: THREE.DoubleSide }),
+  tertiary:   new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide }),
+  railway:    new THREE.MeshBasicMaterial({ color: 0xaa22ff, side: THREE.DoubleSide }),
+  rail_white: new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide }),
+  road:       new THREE.MeshBasicMaterial({ color: 0xe8e8e8, side: THREE.DoubleSide }),
+};
+
+// Build a terrain-following road ribbon as a single BufferGeometry mesh
+function makeRoadGeo(x1, z1, x2, z2, width, yOffset) {
+  const dx = x2-x1, dz = z2-z1;
+  const len = Math.sqrt(dx*dx+dz*dz);
+  if (len < 0.1) return null;
+  const nx = dx/len, nz = dz/len; // forward
+  const px = -nz, pz = nx;        // left perpendicular
+  const hw = width / 2;
+  const segs = Math.max(1, Math.round(len)); // 1 vertex per meter
+
+  const verts = [], idxs = [];
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs;
+    const cx = x1 + dx*t, cz = z1 + dz*t;
+    // 左右の端で個別に地形高さをサンプリング。
+    // (以前は中心線の高さを両端に使っていたため、道路を横切る斜面では
+    //  山側の端が地形に埋まって途切れて見えた)
+    const lx = cx + px*hw, lz = cz + pz*hw;
+    const rx = cx - px*hw, rz = cz - pz*hw;
+    verts.push(lx, getGroundY(lx, lz) + yOffset, lz); // left
+    verts.push(rx, getGroundY(rx, rz) + yOffset, rz); // right
+    if (i < segs) {
+      const b = i*2;
+      idxs.push(b, b+1, b+2, b+1, b+3, b+2);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  geo.setIndex(idxs);
+  return geo;
+}
+
+function addRoad(x1, z1, x2, z2, width, type='road') {
+  const dx = x2-x1, dz = z2-z1;
+  const totalLen = Math.sqrt(dx*dx+dz*dz);
+  if (totalLen < 0.5) return;
+
+  let w = width, isRailway = false;
+  switch(type) {
+    case 'trunk':     w = Math.max(width, 10); break;
+    case 'primary':   w = Math.max(width, 8);  break;
+    case 'secondary': w = Math.max(width, 6);  break;
+    case 'tertiary':  w = Math.max(width, 4);  break;
+    case 'railway':   w = 5; isRailway = true; break;
+    default:          w = Math.max(width, 3);  break;
+  }
+
+  const mat = ROAD_MAT[type] || ROAD_MAT.road;
+  // 0.15→0.35: 幅広道路は左右端の間で地形(バイリニア面)が盛り上がることがあるため余裕を持たせる
+  const geo = makeRoadGeo(x1, z1, x2, z2, w, 0.35);
+  if (!geo) return;
+  const road = new THREE.Mesh(geo, mat);
+  road.renderOrder = 1;
+  scene.add(road);
+
+  if (isRailway) {
+    const rg = makeRoadGeo(x1, z1, x2, z2, 1.5, 0.5);
+    if (rg) {
+      const rail = new THREE.Mesh(rg, ROAD_MAT.rail_white);
+      rail.renderOrder = 2;
+      scene.add(rail);
+    }
+  }
+
+  minimapRoads.push({x1, z1, x2, z2, type, rw: w});
+}
+
+// ======= STATION LANDMARKS =======
+const stationLabels = []; // for billboard update each frame
+
+function addStation(x, z, name) {
+  const gy = getGroundY(x, z); // 地表基準にしないと高地の駅ランドマークが埋まる
+  // Golden pillar
+  const pillarMat = new THREE.MeshLambertMaterial({ color: 0xffcc00, emissive: 0xff8800, emissiveIntensity: 0.6 });
+  const pillar = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 2.5, 50, 8), pillarMat);
+  pillar.position.set(x, gy + 25, z);
+  pillar.castShadow = true;
+  scene.add(pillar);
+
+  // Glowing star orb on top
+  const starMat = new THREE.MeshBasicMaterial({ color: 0xffee44 });
+  const star = new THREE.Mesh(new THREE.SphereGeometry(5, 12, 12), starMat);
+  star.position.set(x, gy + 53, z);
+  scene.add(star);
+
+  // Rotating ring
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0xffaa00, side: THREE.DoubleSide });
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(8, 0.8, 8, 32), ringMat);
+  ring.position.set(x, gy + 45, z);
+  scene.add(ring);
+  // animate the ring each frame
+  stationLabels.push({ type: 'ring', mesh: ring, x, z });
+
+  // Bright light
+  const light = new THREE.PointLight(0xffdd44, 4, 600);
+  light.position.set(x, gy + 53, z);
+  scene.add(light);
+
+  // Name label (canvas texture billboard)
+  const cvs = document.createElement('canvas');
+  cvs.width = 512; cvs.height = 96;
+  const ctx2d = cvs.getContext('2d');
+  ctx2d.fillStyle = 'rgba(20,10,0,0.85)';
+  ctx2d.fillRect(0, 0, 512, 96);
+  ctx2d.strokeStyle = '#ffcc00';
+  ctx2d.lineWidth = 4;
+  ctx2d.strokeRect(2, 2, 508, 92);
+  ctx2d.fillStyle = '#ffee44';
+  ctx2d.font = 'bold 52px sans-serif';
+  ctx2d.textAlign = 'center';
+  ctx2d.textBaseline = 'middle';
+  ctx2d.fillText(name, 256, 48);
+  const tex = new THREE.CanvasTexture(cvs);
+  const labelMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(40, 8),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide, depthTest: false })
+  );
+  labelMesh.position.set(x, gy + 62, z);
+  scene.add(labelMesh);
+  stationLabels.push({ type: 'label', mesh: labelMesh, x, z });
+}
+
+// ======= OSM DATA LOADER =======
+const statusEl = document.getElementById('status');
+const OSM_BOUNDS = { minLat:35.39, minLon:139.30, maxLat:35.43, maxLon:139.33 };
+const SCALE = 111000; // 1 game unit = 1 meter
+const MID_LAT = (OSM_BOUNDS.minLat + OSM_BOUNDS.maxLat) / 2;
+const MID_LON = (OSM_BOUNDS.minLon + OSM_BOUNDS.maxLon) / 2;
+const COS_LAT = Math.cos(OSM_BOUNDS.minLat * Math.PI / 180);
+
+function latLonToXZ(lat, lon) {
+  const x = (lon - MID_LON) * SCALE * COS_LAT;
+  const z = -((lat - MID_LAT) * SCALE);
+  return { x, z };
+}
+
+// ======= TERRAIN SYSTEM =======
+const TERRAIN_SEGS = 24; // 25x25 = 625 vertices, ~170m grid
+const WORLD_W = (OSM_BOUNDS.maxLon - OSM_BOUNDS.minLon) * SCALE * COS_LAT;
+const WORLD_D = (OSM_BOUNDS.maxLat - OSM_BOUNDS.minLat) * SCALE;
+const SEGS1 = TERRAIN_SEGS + 1;
+
+// Build terrain mesh (detailed, covers OSM area)
+// 高さ別の頂点カラーで起伏を視覚化するマテリアル(遠景地形と共用)
+const terrainGeo = new THREE.PlaneGeometry(WORLD_W, WORLD_D, TERRAIN_SEGS, TERRAIN_SEGS);
+const terrainCols = new Float32Array(SEGS1 * SEGS1 * 3);
+for (let i = 0; i < SEGS1 * SEGS1; i++) { terrainCols[i*3] = 0.23; terrainCols[i*3+1] = 0.33; terrainCols[i*3+2] = 0.21; }
+terrainGeo.setAttribute('color', new THREE.BufferAttribute(terrainCols, 3));
+const terrainMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+terrainMesh = new THREE.Mesh(terrainGeo, terrainMat);
+terrainMesh.rotation.x = -Math.PI / 2;
+terrainMesh.receiveShadow = true;
+terrainMesh.renderOrder = 0;
+scene.add(terrainMesh);
+
+// ======= 遠景地形メッシュ(プレイヤー追従) =======
+// 以前は y=-0.3 の平坦な巨大平面だったため、OSM_BOUNDS 外に動的生成された
+// 道路・建物(getTerrainY はエッジの標高にクランプされる)が宙に浮き、
+// 下に地面が無い状態になっていた。道路・建物と同じ getTerrainY を
+// サンプリングする粗いメッシュをプレイヤーに追従させることで、
+// 生成物のある場所には必ず一致した高さの地面が存在するようにする。
+const FAR_SIZE = 12000, FAR_SEGS = 60, FAR_SEGS1 = FAR_SEGS + 1; // 半径6km > far(5000) なので端は見えない
+const farGeo = new THREE.PlaneGeometry(FAR_SIZE, FAR_SIZE, FAR_SEGS, FAR_SEGS);
+farGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(FAR_SEGS1 * FAR_SEGS1 * 3), 3));
+const farMesh = new THREE.Mesh(farGeo, terrainMat);
+farMesh.rotation.x = -Math.PI / 2;
+farMesh.frustumCulled = false; // 頂点変位+移動するためカリングさせない
+farMesh.renderOrder = 0;
+scene.add(farMesh);
+
+// --- 遠景メッシュの高さは farNodeY / farSurfaceY に一本化する ---
+// 頂点は世界座標に固定された FAR_STEP(200m) 格子上にあり(中心スナップも FAR_STEP 単位)、
+// 「描画される遠景メッシュ表面」= farSurfaceY が返す値、が厳密に成り立つ。
+const FAR_STEP = FAR_SIZE / FAR_SEGS; // 200m
+const FAR_Y = -0.15;                  // メッシュ全体のyオフセット(詳細地形とのz-fighting回避)
+const FAR_SINK_MARGIN = 250, FAR_SINK = 5; // 詳細地形の内側では5m沈めて重なりを防ぐ
+
+// 格子ノード(i,j)の高さ(メッシュ頂点とクエリの両方がこの1つの関数を使う)
+function farNodeY(i, j) {
+  const x = i * FAR_STEP, z = j * FAR_STEP;
+  let h = getTerrainY(x, z);
+  if (x > -WORLD_W/2 + FAR_SINK_MARGIN && x < WORLD_W/2 - FAR_SINK_MARGIN &&
+      z > -WORLD_D/2 + FAR_SINK_MARGIN && z < WORLD_D/2 - FAR_SINK_MARGIN) h -= FAR_SINK;
+  return h;
+}
+
+// 描画される遠景メッシュ表面と厳密に一致する高さ(三角形分割もPlaneGeometryと同一)
+function farSurfaceY(x, z) {
+  const i = Math.floor(x / FAR_STEP), j = Math.floor(z / FAR_STEP);
+  const u = x / FAR_STEP - i, v = z / FAR_STEP - j;
+  const ha = farNodeY(i, j),     hb = farNodeY(i, j + 1);
+  const hc = farNodeY(i + 1, j + 1), hd = farNodeY(i + 1, j);
+  const s = (u + v <= 1)
+    ? ha + (hd - ha) * u + (hb - ha) * v
+    : hc + (hb - hc) * (1 - u) + (hd - hc) * (1 - v);
+  return s + FAR_Y;
+}
+
+let farLastX = Infinity, farLastZ = Infinity;
+function updateFarMesh(force) {
+  const cx = Math.round(player.position.x / FAR_STEP) * FAR_STEP;
+  const cz = Math.round(player.position.z / FAR_STEP) * FAR_STEP;
+  if (!force && cx === farLastX && cz === farLastZ) return;
+  farLastX = cx; farLastZ = cz;
+  farMesh.position.set(cx, FAR_Y, cz);
+  const i0 = Math.round((cx - FAR_SIZE / 2) / FAR_STEP);
+  const j0 = Math.round((cz - FAR_SIZE / 2) / FAR_STEP);
+  const pos = farGeo.attributes.position, col = farGeo.attributes.color;
+  for (let jz = 0; jz < FAR_SEGS1; jz++) {
+    for (let jx = 0; jx < FAR_SEGS1; jx++) {
+      const idx = jz * FAR_SEGS1 + jx;
+      const h = farNodeY(i0 + jx, j0 + jz); // クエリと同じノード関数を使用
+      pos.setZ(idx, h);
+      const c = terrainColorRGB(h);
+      col.setXYZ(idx, c[0], c[1], c[2]);
+    }
+  }
+  pos.needsUpdate = true;
+  col.needsUpdate = true;
+  farGeo.computeVertexNormals();
+}
+
+let elevData = null;  // flat array [iz * SEGS1 + ix]
+let elevBase = 0;
+
+// 詳細地形メッシュの「描画される表面」と厳密に一致する高さを返す。
+// 修正点1: 以前はバイリニア補間だったが、実際のメッシュは三角形で描画されるため
+//   急斜面ではセル対角線上で最大数mズレて道路が埋まっていた。
+//   → PlaneGeometry と同じ対角線(b-d)の区分線形補間に変更し、ズレをゼロに。
+// 修正点2: 範囲外で fx>1 のまま線形外挿され高さが暴走していた → [0,1]にクランプ。
+function getTerrainY(x, z) {
+  if (!elevData) return 0;
+  const nx = (x + WORLD_W / 2) / WORLD_W * TERRAIN_SEGS;
+  const nz = (z + WORLD_D / 2) / WORLD_D * TERRAIN_SEGS;
+  const ix = Math.max(0, Math.min(TERRAIN_SEGS - 1, Math.floor(nx)));
+  const iz = Math.max(0, Math.min(TERRAIN_SEGS - 1, Math.floor(nz)));
+  const fx = Math.max(0, Math.min(1, nx - ix));
+  const fz = Math.max(0, Math.min(1, nz - iz));
+  const h00 = elevData[ iz    * SEGS1 + ix    ];
+  const h10 = elevData[ iz    * SEGS1 + ix + 1];
+  const h01 = elevData[(iz+1) * SEGS1 + ix    ];
+  const h11 = elevData[(iz+1) * SEGS1 + ix + 1];
+  if (fx + fz <= 1) return h00 + (h10 - h00) * fx + (h01 - h00) * fz;
+  return h11 + (h01 - h11) * (1 - fx) + (h10 - h11) * (1 - fz);
+}
+
+// 起伏の倍率 — 1.5は激しすぎ、1.0は物足りないとのことで1.25に
+const ELEV_SCALE = 1.25;
+
+// ======= 「見えている地面」の高さ(生成物・プレイヤーはすべてこれを使う) =======
+// 画面に存在する地面は「詳細地形メッシュ」と「遠景地形メッシュ」の2枚。
+// getTerrainY / farSurfaceY はどちらも描画される三角形と厳密に一致するので、
+// その上側包絡線(max)に置けば、どちらのメッシュにも埋まることは構造上あり得ない。
+function getGroundY(x, z) {
+  const inside = x >= -WORLD_W/2 && x <= WORLD_W/2 && z >= -WORLD_D/2 && z <= WORLD_D/2;
+  const fy = farSurfaceY(x, z);
+  return inside ? Math.max(getTerrainY(x, z), fy) : fy;
+}
+
+// 高さ→頂点カラー: 緑(低地) → 黄土(丘) → 灰(山)。詳細地形と遠景地形で共用
+let terrainMaxH = 1;
+function terrainColorRGB(h) {
+  const t = Math.max(0, Math.min(1, h / terrainMaxH));
+  if (t < 0.25)      { const k = t / 0.25;         return [0.23 + 0.12*k, 0.33 + 0.05*k, 0.21 - 0.04*k]; }
+  else if (t < 0.6)  { const k = (t - 0.25) / 0.35; return [0.35 + 0.10*k, 0.38 - 0.10*k, 0.17 + 0.02*k]; }
+  else               { const k = (t - 0.6) / 0.4;   return [0.45 + 0.15*k, 0.28 + 0.22*k, 0.19 + 0.31*k]; }
+}
+// 起動直後も緑の地面で初期化(elevData ロード後に applyTerrain が再サンプリングする)
+updateFarMesh(true);
+
+// elevData を terrainGeo に反映(頂点高さ+高さ別カラー+法線+バウンディング再計算)
+function applyTerrain() {
+  const posAttr = terrainGeo.attributes.position;
+  const colAttr = terrainGeo.attributes.color;
+  terrainMaxH = 1;
+  for (const h of elevData) terrainMaxH = Math.max(terrainMaxH, h);
+  for (let i = 0; i < elevData.length; i++) {
+    const h = elevData[i];
+    posAttr.setZ(i, h); // メッシュ回転前のローカルZ → ワールドY
+    const c = terrainColorRGB(h);
+    colAttr.setXYZ(i, c[0], c[1], c[2]);
+  }
+  posAttr.needsUpdate = true;
+  colAttr.needsUpdate = true;
+  terrainGeo.computeVertexNormals();
+  terrainGeo.computeBoundingSphere(); // 頂点変位後に再計算しないとカリング判定が狂う
+  updateFarMesh(true); // 遠景地形も新しい標高で再サンプリング
+}
+
+// API失敗時のフォールバック — 北西(大山方面)に向かって高くなる擬似地形
+function proceduralElevs(elevs) {
+  for (let iz = 0; iz < SEGS1; iz++) {
+    for (let ix = 0; ix < SEGS1; ix++) {
+      const wx = -WORLD_W/2 + ix * WORLD_W / TERRAIN_SEGS;
+      const wz = -WORLD_D/2 + iz * WORLD_D / TERRAIN_SEGS;
+      const fx = (wx + WORLD_W/2) / WORLD_W; // 0=西
+      const fz = (wz + WORLD_D/2) / WORLD_D; // 0=北
+      const mountain = Math.pow(Math.max(0, 1 - (fx*1.4 + fz*0.9)), 2) * 350;
+      const rolling = (Math.sin(wx*0.004)*Math.cos(wz*0.003) + Math.sin(wx*0.011+1.7)*Math.cos(wz*0.009+0.6)*0.5) * 12 + 14;
+      elevs[iz * SEGS1 + ix] = Math.max(0, mountain + rolling);
+    }
+  }
+}
+
+async function loadElevations() {
+  statusEl.textContent = '🏔 地形データ取得中...';
+  // Build lat/lon for each vertex
+  // PlaneGeometry vertex (ix, iz): worldX = -W/2 + ix*W/SEGS, worldZ = -D/2 + iz*D/SEGS
+  const latlons = [];
+  for (let iz = 0; iz < SEGS1; iz++) {
+    for (let ix = 0; ix < SEGS1; ix++) {
+      const wx = -WORLD_W/2 + ix * WORLD_W / TERRAIN_SEGS;
+      const wz = -WORLD_D/2 + iz * WORLD_D / TERRAIN_SEGS;
+      latlons.push(xzToLatLon(wx, wz));
+    }
+  }
+  const elevs = new Array(latlons.length).fill(0);
+  let ok = true;
+  try {
+    for (let i = 0; i < latlons.length; i += 100) {
+      const batch = latlons.slice(i, i + 100);
+      const locStr = batch.map(ll => `${ll.lat.toFixed(6)},${ll.lon.toFixed(6)}`).join('|');
+      const res = await fetch(`https://api.opentopodata.org/v1/srtm30m?locations=${encodeURIComponent(locStr)}`);
+      const json = await res.json();
+      if (json.results) json.results.forEach((r, j) => { elevs[i+j] = r.elevation || 0; });
+      else { ok = false; break; } // 429等 — 以前はここで平坦のままreturnしていた
+      // opentopodata公式レート制限は1リクエスト/秒。以前の300msでは2発目以降が429で
+      // 必ず失敗し、地形が常に平坦になっていた
+      if (i + 100 < latlons.length) await new Promise(r => setTimeout(r, 1100));
+    }
+  } catch(e) { ok = false; }
+
+  if (!ok) {
+    statusEl.textContent = '⚠️ 地形API失敗 - 擬似地形を生成';
+    proceduralElevs(elevs);
+  }
+
+  elevBase = Math.min(...elevs);
+  elevData = elevs.map(e => Math.max(0, e - elevBase) * ELEV_SCALE);
+  applyTerrain();
+  // 地形確定後、松明ライトを地表の高さに再配置(固定y=4のままだと丘に埋まる)
+  torchLights.forEach(l => { l.position.y = getGroundY(l.position.x, l.position.z) + 4; });
+  if (ok) statusEl.textContent = '🏔 地形反映完了';
+}
+
+async function loadOSM() {
+  const bb = `${OSM_BOUNDS.minLat},${OSM_BOUNDS.minLon},${OSM_BOUNDS.maxLat},${OSM_BOUNDS.maxLon}`;
+  const query = `[out:json][timeout:40];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use"](${bb});way["leisure"="park"](${bb});way["railway"="rail"](${bb});node["railway"="station"](${bb});node["railway"="halt"](${bb});node["public_transport"="station"](${bb}););out geom;`;
+  const url = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
+
+  let data = null;
+  try {
+    statusEl.textContent = '🗺 伊勢原マップ取得中... (最大30秒)';
+    const res = await Promise.race([
+      fetch(url).then(r=>r.json()),
+      new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')), 32000))
+    ]);
+    data = res;
+    statusEl.textContent = `✅ OSMデータ取得完了 (${data.elements.length} 要素)`;
+  } catch(e) {
+    statusEl.textContent = '⚠️ OSM取得失敗 - フォールバックマップ使用';
+    buildFallbackMap();
+    return;
+  }
+
+  if (!data || !data.elements) { buildFallbackMap(); return; }
+
+  const nodeMap = {};
+  data.elements.forEach(el => {
+    if (el.type === 'node') nodeMap[el.id] = { lat: el.lat, lon: el.lon };
+  });
+
+  let buildingCount = 0;
+  let roadCount = 0;
+
+  // === PASS 1: Roads & railways first ===
+  data.elements.forEach(el => {
+    if (el.type !== 'way') return;
+    const tags = el.tags || {};
+
+    if (tags.highway && el.geometry && el.geometry.length >= 2) {
+      const hw = tags.highway;
+      const isImportant = hw==='trunk' || hw==='primary' || hw==='secondary';
+      if (!isImportant && roadCount >= 2500) return; // 800では市街地の細街路が途中で打ち切られ歯抜けになっていた
+      const width = hw==='trunk'||hw==='primary' ? 8 : hw==='secondary' ? 6 : hw==='tertiary'||hw==='residential' ? 4 : 2.5;
+      const type = (hw==='trunk'||hw==='primary'||hw==='secondary'||hw==='tertiary') ? hw : 'road';
+      for (let i = 0; i < el.geometry.length-1; i++) {
+        const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
+        const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
+        addRoad(a.x, a.z, b.x, b.z, width, type);
+      }
+      roadCount++;
+    }
+
+    if (tags.railway === 'rail' && el.geometry && el.geometry.length >= 2) {
+      for (let i = 0; i < el.geometry.length-1; i++) {
+        const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
+        const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
+        addRoad(a.x, a.z, b.x, b.z, 4, 'railway');
+      }
+    }
+  });
+
+  // === PASS 2: Buildings — skip any that overlap a road ===
+  data.elements.forEach(el => {
+    if (el.type !== 'way') return;
+    const tags = el.tags || {};
+
+    if (tags.building && buildingCount < 1200 && el.geometry && el.geometry.length >= 4) { // 700では初期エリア内でも歯抜けが出ていた
+      const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
+      let cx = 0, cz = 0;
+      pts.forEach(p => { cx += p.x; cz += p.z; });
+      cx /= pts.length; cz /= pts.length;
+
+      let maxDx = 0, maxDz = 0;
+      pts.forEach(p => {
+        maxDx = Math.max(maxDx, Math.abs(p.x - cx));
+        maxDz = Math.max(maxDz, Math.abs(p.z - cz));
+      });
+      const w = Math.max(maxDx * 2, 2);
+      const d = Math.max(maxDz * 2, 2);
+
+      if (isOnRoad(cx, cz, w, d)) return; // road takes priority
+
+      const style = getBuildingStyle(tags);
+      const levels = parseInt(tags['building:levels']) || 1 + Math.floor(Math.random()*3);
+      const h = Math.max(levels * 3, 3) + Math.random()*2;
+      addBuilding(cx, cz, w, d, h, style);
+      buildingCount++;
+    }
+  });
+
+  // === PASS 3: Collect landuse polygons for dynamic chunk generation ===
+  data.elements.forEach(el => {
+    if (el.type !== 'way') return;
+    const tags = el.tags || {};
+    const lu = tags.landuse;
+    if (!lu || !['residential','commercial','industrial','retail','mixed_use'].includes(lu)) return;
+    if (!el.geometry || el.geometry.length < 4) return;
+    const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
+    let minX=Infinity, maxX=-Infinity, minZ=Infinity, maxZ=-Infinity;
+    pts.forEach(p => { minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minZ=Math.min(minZ,p.z); maxZ=Math.max(maxZ,p.z); });
+    landusePolygons.push({ pts, lu, minX, maxX, minZ, maxZ });
+  });
+
+  // Station landmarks
+  const seenStations = new Set();
+  data.elements.forEach(el => {
+    if (el.type !== 'node' || !el.tags) return;
+    const isStation = el.tags.railway === 'station' || el.tags.railway === 'halt' || el.tags.public_transport === 'station';
+    if (!isStation) return;
+    const name = el.tags.name || el.tags['name:ja'] || '駅';
+    if (seenStations.has(name)) return;
+    seenStations.add(name);
+    const pos = latLonToXZ(el.lat, el.lon);
+    addStation(pos.x, pos.z, name);
+  });
+
+  // 初期ロードで処理したway IDを記録(境界タイルの再取得時に二重生成しないため)
+  data.elements.forEach(el => { if (el.type === 'way') seenOSMWays.add(el.id); });
+
+  statusEl.textContent = `✨ 伊勢原ファンタジー世界へようこそ！ (建物:${buildingCount} 道路:${roadCount})`;
+  setTimeout(()=>{ statusEl.style.display='none'; }, 4000);
+
+  const sp = findFreeSpawn();
+  player.position.set(sp.x, 0, sp.z);
+  initialWorldLoaded = true; // ここからタイル取得を許可(標高は既に反映済み)
+}
+
+function buildFallbackMap() {
+  // Grid of buildings (meter scale)
+  for (let x = -1000; x <= 1000; x += 40) {
+    for (let z = -1000; z <= 1000; z += 40) {
+      if (Math.random() < 0.6) {
+        const w = 8 + Math.random()*20;
+        const d = 8 + Math.random()*20;
+        const h = 4 + Math.random()*20;
+        addBuilding(x + (Math.random()-0.5)*15, z + (Math.random()-0.5)*15, w, d, h);
+      }
+    }
+  }
+  // Roads (6m wide)
+  for (let i = -1000; i <= 1000; i += 40) {
+    addRoad(-1200, i, 1200, i, 6);
+    addRoad(i, -1200, i, 1200, 6);
+  }
+  statusEl.textContent = '✨ 伊勢原ファンタジー世界（フォールバック）へようこそ！';
+  setTimeout(()=>{ statusEl.style.display='none'; }, 3000);
+  const sp2 = findFreeSpawn();
+  player.position.set(sp2.x, 0, sp2.z);
+  initialWorldLoaded = true;
+}
+
+// Load terrain first, then place OSM world on top
+(async () => { await loadElevations(); await loadOSM(); })();
+
+// ======= REAL-WORLD COORDINATES =======
+const gpsEl = document.getElementById('gpsDisplay');
+let lastGpsUpdate = 0;
+
+function xzToLatLon(x, z) {
+  return { lat: MID_LAT - z / SCALE, lon: MID_LON + x / (SCALE * COS_LAT) };
+}
+
+// ======= MAP JUMP (Leaflet overlay) =======
+let leafletMap = null, playerMarker = null;
+const mapOverlay = document.getElementById('mapOverlay');
+
+function openMapJump() {
+  mapOverlay.classList.add('active');
+  const { lat, lon } = xzToLatLon(player.position.x, player.position.z);
+
+  if (!leafletMap) {
+    leafletMap = L.map('leafletMap').setView([lat, lon], 16);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap'
+    }).addTo(leafletMap);
+
+    // Player marker
+    const wizIcon = L.divIcon({ html: '🧙', className: '', iconSize: [28,28], iconAnchor:[14,14] });
+    playerMarker = L.marker([lat, lon], { icon: wizIcon }).addTo(leafletMap)
+      .bindPopup('現在地').openPopup();
+
+    // Tap to jump
+    leafletMap.on('click', e => {
+      const { lat: toLat, lng: toLon } = e.latlng;
+      const pos = latLonToXZ(toLat, toLon);
+      player.position.set(pos.x, 0, pos.z);
+      playerMarker.setLatLng([toLat, toLon]);
+      playerMarker.openPopup();
+      setTimeout(() => mapOverlay.classList.remove('active'), 300);
+    });
+  } else {
+    playerMarker.setLatLng([lat, lon]);
+    leafletMap.setView([lat, lon], leafletMap.getZoom());
+    leafletMap.invalidateSize();
+  }
+}
+
+document.getElementById('jumpBtn').addEventListener('click', openMapJump);
+document.getElementById('mapCloseBtn').addEventListener('click', () => {
+  mapOverlay.classList.remove('active');
+});
+
+function updateGPS(t) {
+  if (t - lastGpsUpdate < 0.5) return;
+  lastGpsUpdate = t;
+  const { lat, lon } = xzToLatLon(player.position.x, player.position.z);
+  const latStr = lat.toFixed(5), lonStr = lon.toFixed(5);
+  gpsEl.href = `https://www.google.com/maps?q=${latStr},${lonStr}&z=17`;
+  gpsEl.innerHTML = `📍 ${latStr}, ${lonStr}<br>🗺 Googleマップで開く`;
+  if (leafletMap && playerMarker) playerMarker.setLatLng([lat, lon]);
+}
+
+// ======= CAMERA OCCLUSION =======
+// If a building is between camera and player, pull camera closer
+function occlusionCamPos(targetPos, playerPos) {
+  const dir = new THREE.Vector3().subVectors(targetPos, playerPos);
+  const dist = dir.length();
+  dir.normalize();
+  for (let d = 1.5; d < dist; d += 0.4) {
+    const tp = playerPos.clone().addScaledVector(dir, d);
+    if (wouldCollide(tp.x, tp.z)) {
+      // Return a position just before the hit
+      return playerPos.clone().addScaledVector(dir, Math.max(d - 0.8, 1.5));
+    }
+  }
+  return targetPos;
+}
+
+// ======= SPAWN FINDER =======
+function findFreeSpawn() {
+  // Try road midpoints first
+  for (const r of minimapRoads) {
+    const x = (r.x1 + r.x2) / 2, z = (r.z1 + r.z2) / 2;
+    if (!wouldCollide(x, z)) return { x, z };
+  }
+  // Fallback: grid scan in meter scale
+  for (let x = -2000; x <= 2000; x += 2) {
+    for (let z = -2000; z <= 2000; z += 2) {
+      if (!wouldCollide(x, z)) return { x, z };
+    }
+  }
+  return { x: 0, z: 0 };
+}
+
+// ======= CAMERA CONTROL =======
+// viewMode: 0=三人称, 1=一人称, 2=上空
+let viewMode = 0;
+let camYaw = 0, camPitch = 0.25;
+const camDist = 15, camHeight = 8; // meters
+const viewBtnLabels = ['👁 一人称', '👁 三人称', '🗺 上空'];
+
+function setViewMode(mode) {
+  viewMode = mode % 3;
+  document.getElementById('viewBtn').textContent = viewBtnLabels[viewMode];
+  const showBody = (viewMode !== 1); // hide body in first-person
+  body.visible = cape.visible = leftArm.visible = rightArm.visible = staff.visible =
+  hatBrim.visible = hatTop.visible = head.visible = orb.visible = showBody;
+}
+
+document.getElementById('viewBtn').addEventListener('click', () => setViewMode(viewMode + 1));
+document.getElementById('mapBtn').addEventListener('click', () => setViewMode(2));
+
+// ======= MINIMAP =======
+const minimapCanvas = document.getElementById('minimapCanvas');
+const mctx = minimapCanvas.getContext('2d');
+const MM = 200; // minimap size in px
+const MM_RANGE = 200; // 200 meters radius visible on minimap
+
+let _mmFrame = 0;
+function drawMinimap() {
+  // 3フレームに1回だけ再描画(2Dキャンバス描画も無視できない負荷のため)
+  if (++_mmFrame % 3 !== 0) return;
+  mctx.clearRect(0,0,MM,MM);
+  mctx.fillStyle = 'rgba(10,5,25,0.9)';
+  mctx.fillRect(0,0,MM,MM);
+
+  const px = player.position.x, pz = player.position.z;
+  const scale = MM / (MM_RANGE * 2);
+
+  function toMap(wx, wz) {
+    return {
+      mx: MM/2 + (wx - px) * scale,
+      my: MM/2 + (wz - pz) * scale
+    };
+  }
+
+  // Roads (color-coded by type)
+  const mmRoadColor = { trunk:'#ffcc00', primary:'#ffcc00', secondary:'#ffaa40', tertiary:'#aabbcc', railway:'#cc44ff', road:'#505878' };
+  const mmRoadWidth = { trunk:3, primary:2.5, secondary:2, tertiary:1.5, railway:2, road:1 };
+  const R = MM_RANGE + 60; // 表示範囲外の要素は描画コマンド自体を発行しない
+  for (const r of minimapRoads) {
+    if ((r.x1-px > R && r.x2-px > R) || (px-r.x1 > R && px-r.x2 > R) ||
+        (r.z1-pz > R && r.z2-pz > R) || (pz-r.z1 > R && pz-r.z2 > R)) continue;
+    const t = r.type || 'road';
+    mctx.strokeStyle = mmRoadColor[t] || '#505878';
+    mctx.lineWidth = mmRoadWidth[t] || 1;
+    const a = toMap(r.x1, r.z1), b = toMap(r.x2, r.z2);
+    mctx.beginPath(); mctx.moveTo(a.mx, a.my); mctx.lineTo(b.mx, b.my); mctx.stroke();
+  }
+
+  // Buildings
+  mctx.fillStyle = '#5a3a8a';
+  for (const b of minimapBuildings) {
+    if (Math.abs(b.x - px) > R || Math.abs(b.z - pz) > R) continue;
+    const c = toMap(b.x, b.z);
+    const bw = b.w * scale, bd = b.d * scale;
+    mctx.fillRect(c.mx - bw/2, c.my - bd/2, bw, bd);
+  }
+
+  // Camera FOV cone (blue) — shows what the player sees on screen
+  const fov = Math.PI / 2.5; // ~72° FOV
+  mctx.save();
+  mctx.translate(MM/2, MM/2);
+  mctx.rotate(-camYaw); // camera view direction
+  mctx.fillStyle = 'rgba(80, 200, 255, 0.18)';
+  mctx.beginPath();
+  mctx.moveTo(0, 0);
+  const cr = MM / 2 - 4;
+  mctx.arc(0, 0, cr, -Math.PI/2 - fov/2, -Math.PI/2 + fov/2);
+  mctx.closePath();
+  mctx.fill();
+  // Camera direction tick
+  mctx.strokeStyle = '#50c8ff';
+  mctx.lineWidth = 1.5;
+  mctx.beginPath(); mctx.moveTo(0, 0); mctx.lineTo(0, -10); mctx.stroke();
+  mctx.restore();
+
+  // Player arrow — arrowhead points in facing direction, feathers at back
+  const py2 = player.rotation.y;
+  mctx.save();
+  mctx.translate(MM/2, MM/2);
+  mctx.rotate(Math.PI - py2); // corrected: tip points in movement direction
+  mctx.fillStyle = '#ff4040';
+  mctx.strokeStyle = '#ffffff';
+  mctx.lineWidth = 1;
+  mctx.beginPath();
+  // Arrowhead tip (up = forward)
+  mctx.moveTo(0, -10);
+  mctx.lineTo(5, -2);
+  mctx.lineTo(2, -2);
+  // Shaft
+  mctx.lineTo(2, 5);
+  // Right feather
+  mctx.lineTo(5, 9);
+  mctx.lineTo(0, 6);
+  // Left feather
+  mctx.lineTo(-5, 9);
+  mctx.lineTo(-2, 5);
+  mctx.lineTo(-2, -2);
+  mctx.lineTo(-5, -2);
+  mctx.closePath();
+  mctx.fill();
+  mctx.stroke();
+  mctx.restore();
+
+  // Range circle
+  mctx.strokeStyle = 'rgba(160,100,255,0.3)';
+  mctx.lineWidth = 1;
+  mctx.beginPath();
+  mctx.arc(MM/2, MM/2, MM/2-1, 0, Math.PI*2);
+  mctx.stroke();
+}
+
+// ======= INPUT =======
+const keys = {};
+document.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
+document.addEventListener('keyup',   e => { keys[e.key.toLowerCase()] = false; });
+
+// Mouse drag for camera
+let mouseDown = false, lastMouseX = 0, lastMouseY = 0;
+canvas.addEventListener('mousedown', e => { mouseDown = true; lastMouseX = e.clientX; lastMouseY = e.clientY; });
+canvas.addEventListener('mouseup',   () => { mouseDown = false; });
+canvas.addEventListener('mousemove', e => {
+  if (!mouseDown) return;
+  camYaw   -= (e.clientX - lastMouseX) * 0.004;
+  camPitch -= (e.clientY - lastMouseY) * 0.003;
+  camPitch = Math.max(-0.2, Math.min(1.2, camPitch));
+  lastMouseX = e.clientX; lastMouseY = e.clientY;
+});
+
+// ======= TOUCH CONTROLS (document-level, position-based) =======
+const joystickKnob = document.getElementById('joystickKnob');
+let joyActive = false, joyId = null, joyOx = 0, joyOz = 0;
+let joyCenterX = 0, joyCenterY = 0;
+let camTouchId = null, camLastX = 0, camLastY = 0;
+
+// Joystick zone: bottom-left corner
+function getJoyBounds() {
+  const el = document.getElementById('joystick');
+  const r = el.getBoundingClientRect();
+  return { cx: r.left + r.width/2, cy: r.top + r.height/2, radius: r.width/2 + 30 };
+}
+
+// touchstart: passive:true so buttons still fire click events
+document.addEventListener('touchstart', e => {
+  for (const t of e.changedTouches) {
+    if (t.target.closest('button')) continue; // let buttons work normally
+    const joy = getJoyBounds();
+    const dx = t.clientX - joy.cx, dy = t.clientY - joy.cy;
+    if (Math.sqrt(dx*dx+dy*dy) < joy.radius && joyId === null) {
+      joyId = t.identifier; joyActive = true;
+      joyCenterX = joy.cx; joyCenterY = joy.cy;
+    } else if (camTouchId === null) {
+      camTouchId = t.identifier; camLastX = t.clientX; camLastY = t.clientY;
+    }
+  }
+}, { passive: true });
+
+// touchmove: passive:false to prevent page scroll during gameplay
+document.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier === joyId) {
+      const dx = t.clientX - joyCenterX;
+      const dy = t.clientY - joyCenterY;
+      const r2 = Math.sqrt(dx*dx+dy*dy);
+      const maxR = 50;
+      const cx = r2 > maxR ? dx/r2*maxR : dx;
+      const cy = r2 > maxR ? dy/r2*maxR : dy;
+      joystickKnob.style.left = (50 + cx/65*100) + '%';
+      joystickKnob.style.top  = (50 + cy/65*100) + '%';
+      joyOx = cx / maxR;
+      joyOz = cy / maxR;
+    } else if (t.identifier === camTouchId) {
+      camYaw   -= (t.clientX - camLastX) * 0.005;
+      camPitch -= (t.clientY - camLastY) * 0.004;
+      camPitch = Math.max(-0.3, Math.min(1.4, camPitch));
+      camLastX = t.clientX; camLastY = t.clientY;
+    }
+  }
+}, { passive: false });
+
+document.addEventListener('touchend', e => {
+  for (const t of e.changedTouches) {
+    if (t.identifier === joyId) {
+      joyActive = false; joyId = null; joyOx = 0; joyOz = 0;
+      joystickKnob.style.left = '50%'; joystickKnob.style.top = '50%';
+    }
+    if (t.identifier === camTouchId) camTouchId = null;
+  }
+}, { passive: true });
+
+document.addEventListener('touchcancel', () => {
+  joyActive = false; joyId = null; joyOx = 0; joyOz = 0;
+  joystickKnob.style.left = '50%'; joystickKnob.style.top = '50%';
+  camTouchId = null;
+});
+
+// ======= COLLISION =======
+const tempBox = new THREE.Box3();
+const playerRadius = 0.25; // small radius so player fits on narrow roads
+
+function wouldCollide(nx, nz) {
+  tempBox.set(
+    new THREE.Vector3(nx - playerRadius, 0, nz - playerRadius),
+    new THREE.Vector3(nx + playerRadius, 3, nz + playerRadius)
+  );
+  // 空間グリッドで近傍セルのみ照合(ボックスは重なる全セルに登録済み)
+  const x0 = Math.floor((nx - playerRadius) / COLL_CELL), x1 = Math.floor((nx + playerRadius) / COLL_CELL);
+  const z0 = Math.floor((nz - playerRadius) / COLL_CELL), z1 = Math.floor((nz + playerRadius) / COLL_CELL);
+  for (let gx = x0; gx <= x1; gx++) for (let gz = z0; gz <= z1; gz++) {
+    const arr = collGrid.get(gx + ',' + gz);
+    if (!arr) continue;
+    for (const box of arr) if (box.intersectsBox(tempBox)) return true;
+  }
+  return false;
+}
+
+// ======= TILE-BASED DYNAMIC OSM FETCHING =======
+// Each tile is 700m x 700m. When the player enters a new tile, fetch its OSM data.
+const OSM_TILE_M = 700;
+const fetchedOSMTiles = new Set();
+const osmTileQueue = [];
+let osmTileFetching = false;
+const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
+// 【重要】標高データ+初期OSMのロード完了までタイル取得を止めるゲート。
+// 以前は起動直後からタイル取得が走り、標高ロード(約8秒)より先に完了した
+// 境界タイルの道路が「平坦な地面の高さ」で生成され、その後地形が持ち上がると
+// 地面の下に埋まって「道路がスパッと途切れる」症状になっていた。
+// (ミニマップには道路が残るのに3Dでは見えない、という報告と厳密に一致する)
+let initialWorldLoaded = false;
+const seenOSMWays = new Set();      // 処理済みway ID(タイル境界をまたぐ要素の二重生成防止)
+const pendingBuildings = [];        // タイル取得分の建物はフレーム分割して生成
+let pendingBuildingIdx = 0;
+
+// Mark tiles that the initial loadOSM already covered (OSM_BOUNDS rectangle)
+// タイルが初期範囲に「完全に」含まれる場合のみ取得済み扱いにする。
+// 以前は境界に部分的にかかるタイルも取得済み扱いになり、範囲外部分が
+// 永久に歯抜けになっていた(境界沿いで道路・建物が途切れる主因)。
+// 重複ロードは seenOSMWays のway ID重複排除で防ぐ。
+(function markInitialTiles() {
+  const pt1 = latLonToXZ(OSM_BOUNDS.minLat, OSM_BOUNDS.minLon);
+  const pt2 = latLonToXZ(OSM_BOUNDS.maxLat, OSM_BOUNDS.maxLon);
+  const x0 = Math.min(pt1.x, pt2.x), x1 = Math.max(pt1.x, pt2.x);
+  const z0 = Math.min(pt1.z, pt2.z), z1 = Math.max(pt1.z, pt2.z);
+  for (let tx = Math.floor(x0/OSM_TILE_M); tx <= Math.floor(x1/OSM_TILE_M); tx++)
+    for (let tz = Math.floor(z0/OSM_TILE_M); tz <= Math.floor(z1/OSM_TILE_M); tz++) {
+      if (tx*OSM_TILE_M >= x0 && (tx+1)*OSM_TILE_M <= x1 &&
+          tz*OSM_TILE_M >= z0 && (tz+1)*OSM_TILE_M <= z1)
+        fetchedOSMTiles.add(`${tx},${tz}`);
+    }
+})();
+
+function processTileData(data) {
+  if (!data || !data.elements) return;
+  // Roads
+  data.elements.forEach(el => {
+    if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) return;
+    if (seenOSMWays.has(el.id)) return; // 隣接タイル/初期ロードで処理済み
+    const tags = el.tags || {};
+    if (tags.highway) {
+      const hw = tags.highway;
+      const width = hw==='trunk'||hw==='primary' ? 8 : hw==='secondary' ? 6 : hw==='tertiary'||hw==='residential' ? 4 : 2.5;
+      const type = (hw==='trunk'||hw==='primary'||hw==='secondary'||hw==='tertiary') ? hw : 'road';
+      for (let i = 0; i < el.geometry.length-1; i++) {
+        const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
+        const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
+        addRoad(a.x, a.z, b.x, b.z, width, type);
+      }
+    }
+    if (tags.railway === 'rail') {
+      for (let i = 0; i < el.geometry.length-1; i++) {
+        const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
+        const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
+        addRoad(a.x, a.z, b.x, b.z, 4, 'railway');
+      }
+    }
+  });
+  // Buildings — 直接生成せずキューに積み、フレーム分割して生成する
+  // (以前は1タイル分の建物を1フレームで同期生成し、大きなカクつきの原因だった)
+  data.elements.forEach(el => {
+    if (el.type !== 'way' || !el.geometry || el.geometry.length < 4) return;
+    if (seenOSMWays.has(el.id)) return;
+    const tags = el.tags || {};
+    if (!tags.building) return;
+    const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
+    let cx=0, cz=0;
+    pts.forEach(p => { cx+=p.x; cz+=p.z; });
+    cx/=pts.length; cz/=pts.length;
+    let maxDx=0, maxDz=0;
+    pts.forEach(p => { maxDx=Math.max(maxDx,Math.abs(p.x-cx)); maxDz=Math.max(maxDz,Math.abs(p.z-cz)); });
+    const w=Math.max(maxDx*2,2), d=Math.max(maxDz*2,2);
+    const style = getBuildingStyle(tags);
+    const levels = parseInt(tags['building:levels']) || 1+Math.floor(Math.random()*3);
+    pendingBuildings.push({ x: cx, z: cz, w, d, h: Math.max(levels*3,3)+Math.random()*2, style });
+  });
+  // Landuse polygons for chunk system
+  data.elements.forEach(el => {
+    if (el.type !== 'way' || !el.geometry || el.geometry.length < 4) return;
+    if (seenOSMWays.has(el.id)) return;
+    const tags = el.tags || {};
+    const lu = tags.landuse;
+    if (!lu || !['residential','commercial','industrial','retail','mixed_use'].includes(lu)) return;
+    const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
+    let minX=Infinity, maxX=-Infinity, minZ=Infinity, maxZ=-Infinity;
+    pts.forEach(p => { minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minZ=Math.min(minZ,p.z); maxZ=Math.max(maxZ,p.z); });
+    landusePolygons.push({ pts, lu, minX, maxX, minZ, maxZ });
+  });
+  // 最後にway IDを記録(カテゴリ別の3パスが終わってから)
+  data.elements.forEach(el => { if (el.type === 'way') seenOSMWays.add(el.id); });
+}
+
+async function processOSMTileQueue() {
+  if (osmTileFetching || osmTileQueue.length === 0) return;
+  osmTileFetching = true;
+  // プレイヤーに近いタイルを優先(以前はキュー投入順で、進行方向の
+  // タイルが後回しになり目の前で道路が途切れたまま待たされていた)
+  const ptx = player.position.x / OSM_TILE_M, ptz = player.position.z / OSM_TILE_M;
+  osmTileQueue.sort((a, b) =>
+    (Math.abs(a.tx + 0.5 - ptx) + Math.abs(a.tz + 0.5 - ptz)) -
+    (Math.abs(b.tx + 0.5 - ptx) + Math.abs(b.tz + 0.5 - ptz)));
+  const { tx, tz } = osmTileQueue.shift();
+  const key = `${tx},${tz}`;
+  const worldX0 = tx * OSM_TILE_M, worldZ0 = tz * OSM_TILE_M;
+  const ll00 = xzToLatLon(worldX0, worldZ0);
+  const ll11 = xzToLatLon(worldX0 + OSM_TILE_M, worldZ0 + OSM_TILE_M);
+  const minLat = Math.min(ll00.lat, ll11.lat), maxLat = Math.max(ll00.lat, ll11.lat);
+  const minLon = Math.min(ll00.lon, ll11.lon), maxLon = Math.max(ll00.lon, ll11.lon);
+  const bb = `${minLat.toFixed(5)},${minLon.toFixed(5)},${maxLat.toFixed(5)},${maxLon.toFixed(5)}`;
+  const query = `[out:json][timeout:20];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use"](${bb});way["railway"="rail"](${bb}););out geom;`;
+  let failed = false;
+  try {
+    const res = await fetch('https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query));
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!data || !data.elements) throw new Error('no elements');
+    processTileData(data);
+    osmTileFailCount.delete(key);
+  } catch(e) {
+    // 以前は失敗タイルが fetchedOSMTiles に残ったまま二度と再試行されず、
+    // レート制限(429)等で永久に歯抜けになっていた → 3回まで再試行
+    failed = true;
+    const n = (osmTileFailCount.get(key) || 0) + 1;
+    osmTileFailCount.set(key, n);
+    if (n < 4) fetchedOSMTiles.delete(key); // checkOSMTiles が再度キューに積む
+  }
+  await new Promise(r => setTimeout(r, failed ? 6000 : 1500)); // 失敗時は長く待ってレート制限回復
+  osmTileFetching = false;
+  processOSMTileQueue();
+}
+
+let _osmCheckFrame = 0;
+function checkOSMTiles() {
+  if (!initialWorldLoaded) return; // 標高+初期OSMが揃うまで開始しない(高さ競合防止)
+  _osmCheckFrame++;
+  if (_osmCheckFrame % 60 !== 0) return; // check every ~1s at 60fps
+  const px = player.position.x, pz = player.position.z;
+  // Check 5x5 tile grid around player (2 tiles in each direction = ~1400m radius)
+  for (let dx = -2; dx <= 2; dx++) {
+    for (let dz = -2; dz <= 2; dz++) {
+      const tx = Math.floor((px + dx * OSM_TILE_M) / OSM_TILE_M);
+      const tz = Math.floor((pz + dz * OSM_TILE_M) / OSM_TILE_M);
+      const key = `${tx},${tz}`;
+      if (!fetchedOSMTiles.has(key)) {
+        fetchedOSMTiles.add(key);
+        osmTileQueue.push({ tx, tz });
+      }
+    }
+  }
+  if (osmTileQueue.length > 0 && !osmTileFetching) processOSMTileQueue();
+}
+
+// ======= CHUNK-BASED DYNAMIC BUILDING GENERATION =======
+function generateChunk(chunkX, chunkZ) {
+  if (landusePolygons.length === 0) return; // OSM not yet loaded
+  const key = `${chunkX},${chunkZ}`;
+  currentChunkKey = key; // addBuilding が記録に掃除用タグを付ける
+  const worldX = chunkX * CHUNK_SIZE;
+  const worldZ = chunkZ * CHUNK_SIZE;
+
+  const beforeCount = scene.children.length; // snapshot to track added meshes
+
+  for (const poly of landusePolygons) {
+    // Broad-phase bounding box cull
+    if (worldX + CHUNK_SIZE < poly.minX || worldX > poly.maxX) continue;
+    if (worldZ + CHUNK_SIZE < poly.minZ || worldZ > poly.maxZ) continue;
+
+    const lu = poly.lu;
+    const isRes = lu === 'residential';
+    const isCom = lu === 'commercial' || lu === 'retail' || lu === 'mixed_use';
+    const step     = isRes ? 18 : isCom ? 24 : 40;
+    const fillRate = isRes ? 0.60 : isCom ? 0.65 : 0.45;
+
+    for (let bx = worldX; bx < worldX + CHUNK_SIZE; bx += step) {
+      for (let bz = worldZ; bz < worldZ + CHUNK_SIZE; bz += step) {
+        if (!pointInPolygon(bx, bz, poly.pts)) continue;
+        if (Math.random() > fillRate) continue;
+        const jx = bx + (Math.random()-0.5)*step*0.4;
+        const jz = bz + (Math.random()-0.5)*step*0.4;
+        const bw = isRes ? 8+Math.random()*8 : isCom ? 12+Math.random()*16 : 25+Math.random()*25;
+        const bd = isRes ? 7+Math.random()*8 : isCom ? 10+Math.random()*14 : 20+Math.random()*20;
+        if (isOnRoad(jx, jz, bw, bd)) continue;
+        if (hasBuildingNearby(jx, jz, Math.max(bw,bd)/2+2)) continue;
+        const bh = isRes ? 4+Math.random()*8 : isCom ? 8+Math.random()*18 : 6+Math.random()*8;
+        const style = isRes
+          ? { color:0xc8a060, roofColor:0x8a5828, type:'house' }
+          : isCom
+          ? { color:0xf09050, roofColor:0xb05020, type:'shop' }
+          : { color:0x909898, roofColor:0x606868, type:'industrial' };
+        addBuilding(jx, jz, bw, bd, bh, style);
+      }
+    }
+  }
+
+  // Store all meshes added during this chunk for future unloading
+  const added = scene.children.slice(beforeCount);
+  chunkMeshes.set(key, added);
+  currentChunkKey = null;
+}
+
+let _lastChunkX = null, _lastChunkZ = null;
+const chunkGenQueue = [];
+
+function updateChunks() {
+  if (landusePolygons.length === 0) return;
+  const cx = Math.floor(player.position.x / CHUNK_SIZE);
+  const cz = Math.floor(player.position.z / CHUNK_SIZE);
+
+  // Only process when the player enters a new chunk
+  if (cx === _lastChunkX && cz === _lastChunkZ) return;
+  _lastChunkX = cx; _lastChunkZ = cz;
+
+  // 未生成チャンクをキューに積む(生成自体は1フレーム1個ずつ processChunkQueue で行う。
+  // 以前は境界越えの瞬間に複数チャンクを同期生成して大きなカクつきの原因だった)
+  for (let dx = -CHUNK_RADIUS; dx <= CHUNK_RADIUS; dx++) {
+    for (let dz = -CHUNK_RADIUS; dz <= CHUNK_RADIUS; dz++) {
+      const key = `${cx+dx},${cz+dz}`;
+      if (!loadedChunks.has(key)) {
+        loadedChunks.add(key);
+        chunkGenQueue.push({ x: cx+dx, z: cz+dz, key });
+      }
+    }
+  }
+  // 近い順に生成(足元が歯抜けのまま遠くが先に生成されるのを防ぐ)
+  chunkGenQueue.sort((a,b) => (Math.abs(a.x-cx)+Math.abs(a.z-cz)) - (Math.abs(b.x-cx)+Math.abs(b.z-cz)));
+
+  // Unload distant chunks (geometry + lights freed from GPU)
+  const unloadR = CHUNK_RADIUS + 2;
+  let removedAny = false;
+  for (const [key, meshes] of chunkMeshes.entries()) {
+    const [kcx, kcz] = key.split(',').map(Number);
+    if (Math.abs(kcx - cx) > unloadR || Math.abs(kcz - cz) > unloadR) {
+      meshes.forEach(m => {
+        scene.remove(m);
+        if (m.geometry) m.geometry.dispose();
+      });
+      chunkMeshes.delete(key);
+      loadedChunks.delete(key); // allow re-generation if player returns
+      // 【重要】以前はメッシュだけ消して記録が残っていたため、
+      //  - 再訪時に hasBuildingNearby が幽霊建物を検出 → チャンクが空のまま(=途切れ)
+      //  - 幽霊の当たり判定(見えない壁)とミニマップ表示も残留
+      collisionBoxes = collisionBoxes.filter(b => b.chunkKey !== key);
+      minimapBuildings = minimapBuildings.filter(b => b.ck !== key);
+      placedBuildings = placedBuildings.filter(b => b.ck !== key);
+      removedAny = true;
+    }
+  }
+  if (removedAny) rebuildCollGrid();
+}
+
+// 1フレームに1チャンクだけ生成するフレーム分割処理
+function processChunkQueue() {
+  if (chunkGenQueue.length === 0) return;
+  const c = chunkGenQueue.shift();
+  const ccx = Math.floor(player.position.x / CHUNK_SIZE);
+  const ccz = Math.floor(player.position.z / CHUNK_SIZE);
+  // キュー待ちの間に遠ざかったチャンクは破棄(再訪時に再キューされる)
+  if (Math.abs(c.x - ccx) > CHUNK_RADIUS + 1 || Math.abs(c.z - ccz) > CHUNK_RADIUS + 1) {
+    loadedChunks.delete(c.key);
+    return;
+  }
+  generateChunk(c.x, c.z);
+}
+
+// ======= ANIMATION LOOP =======
+const clock = new THREE.Clock();
+let walkCycle = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t  = clock.getElapsedTime();
+
+  // Speed scales with joystick deflection: 5 m/s (idle) → 25 m/s (full stick)
+  const joyMag = joyActive ? Math.min(1, Math.sqrt(joyOx*joyOx + joyOz*joyOz)) : 0;
+  const speed = 5 + joyMag * 20;
+  const forward = new THREE.Vector3(-Math.sin(camYaw), 0, -Math.cos(camYaw));
+  const right   = new THREE.Vector3( Math.cos(camYaw), 0, -Math.sin(camYaw));
+
+  let moveX = 0, moveZ = 0;
+  let isMoving = false;
+
+  // Keyboard
+  if (keys['w'] || keys['arrowup'])    { moveX += forward.x; moveZ += forward.z; isMoving = true; }
+  if (keys['s'] || keys['arrowdown'])  { moveX -= forward.x; moveZ -= forward.z; isMoving = true; }
+  if (keys['a'] || keys['arrowleft'])  { moveX -= right.x;   moveZ -= right.z;   isMoving = true; }
+  if (keys['d'] || keys['arrowright']) { moveX += right.x;   moveZ += right.z;   isMoving = true; }
+  // Mouse keys for camera
+  if (keys['q']) { camYaw += dt; }
+  if (keys['e']) { camYaw -= dt; }
+
+  // Joystick
+  if (joyActive && (Math.abs(joyOx) > 0.1 || Math.abs(joyOz) > 0.1)) {
+    moveX += forward.x * (-joyOz) + right.x * joyOx;
+    moveZ += forward.z * (-joyOz) + right.z * joyOx;
+    isMoving = true;
+  }
+
+  // Normalize
+  const mLen = Math.sqrt(moveX*moveX + moveZ*moveZ);
+  if (mLen > 0) { moveX /= mLen; moveZ /= mLen; }
+
+  // Apply movement with collision
+  const nx = player.position.x + moveX * speed * dt;
+  const nz = player.position.z + moveZ * speed * dt;
+  if (!wouldCollide(nx, player.position.z)) player.position.x = nx;
+  if (!wouldCollide(player.position.x, nz)) player.position.z = nz;
+
+  // Player follows visible ground height (道路面は+0.35なので0.35m浮かせて道路上に立たせる)
+  const terrainY = getGroundY(player.position.x, player.position.z);
+  player.position.y = terrainY + 0.35;
+
+  // Face movement direction
+  if (isMoving) {
+    const targetAngle = Math.atan2(moveX, moveZ);
+    let diff = targetAngle - player.rotation.y;
+    while (diff >  Math.PI) diff -= Math.PI*2;
+    while (diff < -Math.PI) diff += Math.PI*2;
+    player.rotation.y += diff * 8 * dt;
+  }
+
+  // Walk animation
+  if (isMoving) {
+    walkCycle += dt * 5;
+    leftArm.rotation.x  =  Math.sin(walkCycle) * 0.5;
+    rightArm.rotation.x = -Math.sin(walkCycle) * 0.5;
+  } else {
+    leftArm.rotation.x  = 0;
+    rightArm.rotation.x = 0;
+  }
+
+  // Orb pulse
+  orbMat.emissiveIntensity = 1.2 + Math.sin(t*3)*0.5;
+  orbLight.intensity = 1.0 + Math.sin(t*3)*0.4;
+
+  // Camera
+  if (viewMode === 1) {
+    // First person
+    scene.fog = WORLD_FOG;
+    camera.position.set(
+      player.position.x + Math.sin(player.rotation.y + Math.PI) * 0.1,
+      player.position.y + 1.65,
+      player.position.z + Math.cos(player.rotation.y + Math.PI) * 0.1
+    );
+    camera.rotation.order = 'YXZ';
+    camera.rotation.y = camYaw + Math.PI;
+    camera.rotation.x = -camPitch + 0.3;
+  } else if (viewMode === 2) {
+    // Overhead / top-down — disable fog so buildings are visible
+    scene.fog = null;
+    // プレイヤーの標高基準にしないと山岳部で地形がカメラより高くなる
+    camera.position.set(player.position.x, player.position.y + 800, player.position.z + 0.001);
+    camera.up.set(0, 0, -1);
+    camera.lookAt(player.position.x, player.position.y, player.position.z);
+    camera.up.set(0, 1, 0); // restore after lookAt
+  } else {
+    // Third person
+    scene.fog = WORLD_FOG;
+    const camX = player.position.x + Math.sin(camYaw) * camDist * Math.cos(camPitch);
+    const camY = player.position.y + camHeight + camDist * Math.sin(camPitch);
+    const camZ = player.position.z + Math.cos(camYaw) * camDist * Math.cos(camPitch);
+    const idealCam = new THREE.Vector3(camX, camY, camZ);
+    const safeCam = occlusionCamPos(idealCam, new THREE.Vector3(player.position.x, player.position.y + 1.5, player.position.z));
+    camera.position.lerp(safeCam, 0.2);
+    camera.lookAt(player.position.x, player.position.y + 1.5, player.position.z);
+  }
+
+  // Station labels: billboard + ring spin
+  for (const sl of stationLabels) {
+    if (sl.type === 'label') {
+      sl.mesh.quaternion.copy(camera.quaternion);
+    } else if (sl.type === 'ring') {
+      sl.mesh.rotation.y = t * 0.8;
+      sl.mesh.rotation.x = Math.sin(t * 0.5) * 0.3;
+    }
+  }
+
+  // Dynamic chunk streaming — generates buildings around player as they explore
+  updateChunks();
+  processChunkQueue(); // フレーム分割: 1チャンク/フレーム
+  // タイル取得分の建物もフレーム分割(20棟/フレーム)で生成
+  for (let n = 0; n < 20 && pendingBuildingIdx < pendingBuildings.length; n++) {
+    const b = pendingBuildings[pendingBuildingIdx++];
+    if (!isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style);
+  }
+  if (pendingBuildingIdx > 0 && pendingBuildingIdx === pendingBuildings.length) {
+    pendingBuildings.length = 0; pendingBuildingIdx = 0;
+  }
+  // Tile-based OSM fetch — loads roads/buildings for newly entered areas
+  checkOSMTiles();
+
+  // 空・星・遠景地形をカメラ/プレイヤーに追従させる
+  // (固定のままだと移動やマップジャンプで far クリップ外に出て「空が消える」)
+  skyMesh.position.copy(camera.position);
+  starMesh.position.copy(camera.position);
+  updateFarMesh(); // 200mグリッドをまたいだ時だけ再サンプリング(それ以外は即return)
+
+  renderer.render(scene, camera);
+  drawMinimap();
+  updateGPS(t);
+}
+
+animate();
+
+// ======= RESIZE =======
+window.addEventListener('resize', () => {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+});
+</script>
+</body>
+</html>

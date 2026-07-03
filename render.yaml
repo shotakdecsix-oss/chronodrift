@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: isehara-game
+    runtime: node
+    plan: free
+    buildCommand: "echo no build"
+    startCommand: node server/server.js

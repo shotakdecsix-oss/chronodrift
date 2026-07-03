@@ -1,0 +1,7 @@
+# APIキャッシュ (実行時に自動生成)
+server/cache/
+
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
