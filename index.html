@@ -395,6 +395,81 @@ function addDecorLight(color, intensity, range, x, y, z) {
 const windowMat = new THREE.MeshBasicMaterial({ color: 0xffee88, transparent: true, opacity: 0.85 });
 const glowMat  = new THREE.MeshBasicMaterial({ color: 0x8040ff, transparent: true, opacity: 0.3, side: THREE.DoubleSide });
 
+// 特徴建物用の共有マテリアル
+const STOREFRONT_MAT = new THREE.MeshBasicMaterial({ color: 0xfff6cc }); // コンビニ等の明るい店構え
+const SIGN_BAND_MATS = [0xe83020, 0x2255dd, 0x11a04a, 0xff8800].map(c => new THREE.MeshBasicMaterial({ color: c }));
+const YARD_MAT = new THREE.MeshLambertMaterial({ color: 0xb89868 }); // 校庭の土
+const HOUSE_PALETTE = [ // 手続き生成住宅の色バリエーション
+  { w: 0xd8cdb8, r: 0x555a66 }, { w: 0xe8e0d0, r: 0x7a4a3a },
+  { w: 0xc8b898, r: 0x4a5a3a }, { w: 0xd0c0a0, r: 0x69463c },
+  { w: 0xbfae94, r: 0x3f4c59 },
+];
+
+// ======= 小物インスタンシング基盤 =======
+// 電柱・木・自販機・ガードレール等は種類ごとに1つの InstancedMesh(=1ドローコール)。
+// 上限(max)を超えた分は追加されないため、負荷は上限で頭打ちになる。
+const _dummy = new THREE.Object3D();
+const _tmpColor = new THREE.Color();
+function makePool(geo, mat, max) {
+  const m = new THREE.InstancedMesh(geo, mat, max);
+  m.count = 0;
+  m.frustumCulled = false; // インスタンスが広域に散るため全体カリング無効(1ドローコールなので安い)
+  scene.add(m);
+  return { mesh: m, max, n: 0 };
+}
+// 注意: 同じプールでは color を「常に渡す」か「常に渡さない」かを統一する
+// (instanceColor バッファは初期値0=黒のため混在させると未設定分が黒くなる)
+function poolAdd(pool, x, y, z, ry, sx, sy, sz, color) {
+  if (pool.n >= pool.max) return;
+  _dummy.position.set(x, y, z);
+  _dummy.rotation.set(0, ry || 0, 0);
+  _dummy.scale.set(sx || 1, sy || 1, sz || 1);
+  _dummy.updateMatrix();
+  pool.mesh.setMatrixAt(pool.n, _dummy.matrix);
+  if (color !== undefined) pool.mesh.setColorAt(pool.n, _tmpColor.setHex(color));
+  pool.n++;
+  pool.mesh.count = pool.n;
+  pool.mesh.instanceMatrix.needsUpdate = true;
+  if (pool.mesh.instanceColor) pool.mesh.instanceColor.needsUpdate = true;
+}
+const poleP      = makePool(new THREE.CylinderGeometry(0.11, 0.16, 8, 6), new THREE.MeshLambertMaterial({ color: 0x776a5c }), 3000);
+const treeTrunkP = makePool(new THREE.CylinderGeometry(0.14, 0.24, 1.6, 5), new THREE.MeshLambertMaterial({ color: 0x5a4028 }), 3500);
+const treeTopP   = makePool(new THREE.SphereGeometry(1.3, 6, 5), new THREE.MeshLambertMaterial({ color: 0xffffff }), 3500);
+const vendP      = makePool(new THREE.BoxGeometry(1.0, 1.8, 0.75), new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x555544 }), 400);
+const guardP     = makePool(new THREE.BoxGeometry(1, 0.32, 0.12), new THREE.MeshLambertMaterial({ color: 0xffffff }), 2500);
+const benchP     = makePool(new THREE.BoxGeometry(1.7, 0.4, 0.55), new THREE.MeshLambertMaterial({ color: 0x8a6a40 }), 400);
+const signBoardP = makePool(new THREE.BoxGeometry(1.0, 0.75, 0.06), new THREE.MeshLambertMaterial({ color: 0x2255cc, emissive: 0x112244 }), 400);
+const lampP      = makePool(new THREE.BoxGeometry(0.3, 0.3, 0.3), new THREE.MeshBasicMaterial({ color: 0xffffff }), 700); // 信号灯・街灯(色instance指定)
+const signalP    = makePool(new THREE.BoxGeometry(1.1, 0.38, 0.35), new THREE.MeshLambertMaterial({ color: 0x333338 }), 300);
+const TREE_GREENS = [0x2e6b2e, 0x3a7a33, 0x27632f];
+
+// 電線 — プリアロケートした単一 LineSegments に追記(1ドローコール)
+const WIRE_MAX = 6000; // 線分数上限
+const wirePos = new Float32Array(WIRE_MAX * 6);
+const wireGeo = new THREE.BufferGeometry();
+wireGeo.setAttribute('position', new THREE.BufferAttribute(wirePos, 3));
+wireGeo.setDrawRange(0, 0);
+const wireMesh = new THREE.LineSegments(wireGeo, new THREE.LineBasicMaterial({ color: 0x1a1a26 }));
+wireMesh.frustumCulled = false;
+scene.add(wireMesh);
+let wireN = 0;
+function addWireSeg(x1, y1, z1, x2, y2, z2) {
+  if (wireN >= WIRE_MAX) return;
+  const o = wireN * 6;
+  wirePos[o] = x1; wirePos[o+1] = y1; wirePos[o+2] = z1;
+  wirePos[o+3] = x2; wirePos[o+4] = y2; wirePos[o+5] = z2;
+  wireN++;
+  wireGeo.setDrawRange(0, wireN * 2);
+  wireGeo.attributes.position.needsUpdate = true;
+}
+
+function addTree(x, z, s) {
+  const gy = getGroundY(x, z);
+  poolAdd(treeTrunkP, x, gy + 0.8 * s, z, 0, s, s, s);
+  poolAdd(treeTopP, x, gy + 2.3 * s, z, Math.random() * 3, s, s * (0.9 + Math.random() * 0.5), s,
+          TREE_GREENS[(Math.random() * 3) | 0]);
+}
+
 // Returns true if the rectangle (cx,cz,bw,bd) overlaps any road segment
 function isOnRoad(cx, cz, bw, bd) {
   const halfDiag = Math.sqrt(bw*bw + bd*bd) / 2;
@@ -518,6 +593,25 @@ function addBuilding(x, z, w, d, h, style) {
     roof.position.set(x, gy+h+h*0.15, z); roof.rotation.y=Math.PI/4; roof.renderOrder=2; scene.add(roof);
   }
 
+  // コンビニ・商店: 明るい店構え+色付き看板帯で夜でも判別しやすく(共有マテリアル2メッシュのみ)
+  if (type === 'shop' && h <= 12) {
+    const front = new THREE.Mesh(new THREE.PlaneGeometry(Math.min(w * 0.85, 10), 1.6), STOREFRONT_MAT);
+    front.position.set(x, gy + 1.1, z + d / 2 + 0.06);
+    front.renderOrder = 2;
+    scene.add(front);
+    const band = new THREE.Mesh(new THREE.BoxGeometry(Math.min(w, 12) * 0.95, 0.7, 0.25),
+      SIGN_BAND_MATS[(Math.random() * SIGN_BAND_MATS.length) | 0]);
+    band.position.set(x, gy + 2.4, z + d / 2 + 0.2);
+    band.renderOrder = 2;
+    scene.add(band);
+  } else if (type === 'school') {
+    // 校庭(土色の広場)
+    const yard = new THREE.Mesh(new THREE.PlaneGeometry(w + 18, d + 18), YARD_MAT);
+    yard.rotation.x = -Math.PI / 2;
+    yard.position.set(x, gy + 0.12, z);
+    scene.add(yard);
+  }
+
   // Windows (random) — 窓は1枚ごとに1ドローコール。最大2段・35%出現に抑え、
   // 建物が450棟を超えたら以降は省略(ドローコール爆発の防止)
   const numW = minimapBuildings.length < 450 ? Math.min(2, Math.floor(h / 3)) : 0;
@@ -569,6 +663,7 @@ const ROAD_MAT = {
   railway:    new THREE.MeshBasicMaterial({ color: 0xaa22ff, side: THREE.DoubleSide }),
   rail_white: new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide }),
   road:       new THREE.MeshBasicMaterial({ color: 0xe8e8e8, side: THREE.DoubleSide }),
+  water:      new THREE.MeshBasicMaterial({ color: 0x2277bb, side: THREE.DoubleSide }),
 };
 
 // Build a terrain-following road ribbon as a single BufferGeometry mesh
@@ -615,12 +710,14 @@ function addRoad(x1, z1, x2, z2, width, type='road') {
     case 'secondary': w = Math.max(width, 6);  break;
     case 'tertiary':  w = Math.max(width, 4);  break;
     case 'railway':   w = 5; isRailway = true; break;
+    case 'water':     w = Math.max(width, 3);  break; // 川・水路(青いリボン)
     default:          w = Math.max(width, 3);  break;
   }
 
   const mat = ROAD_MAT[type] || ROAD_MAT.road;
   // 0.15→0.35: 幅広道路は左右端の間で地形(バイリニア面)が盛り上がることがあるため余裕を持たせる
-  const geo = makeRoadGeo(x1, z1, x2, z2, w, 0.35);
+  // 水面は道路より低く(橋の交差で道路が上に見えるように)
+  const geo = makeRoadGeo(x1, z1, x2, z2, w, type === 'water' ? 0.12 : 0.35);
   if (!geo) return;
   const road = new THREE.Mesh(geo, mat);
   road.renderOrder = 1;
@@ -636,6 +733,73 @@ function addRoad(x1, z1, x2, z2, width, type='road') {
   }
 
   minimapRoads.push({x1, z1, x2, z2, type, rw: w});
+  decorateRoad(x1, z1, x2, z2, type, w);
+}
+
+// ======= 道路沿いの小物自動配置 =======
+// すべてインスタンスプールへの追記なのでメッシュ・マテリアルは増えない
+function decorateRoad(x1, z1, x2, z2, type, w) {
+  if (type === 'water' || type === 'railway') return;
+  const dx = x2 - x1, dz = z2 - z1;
+  const len = Math.sqrt(dx * dx + dz * dz);
+  if (len < 18) return;
+  const nx = dx / len, nz = dz / len, px = -nz, pz = nx;
+  const ry = Math.atan2(-nz, nx); // boxのX軸を道路方向に向ける回転
+  const minor = (type === 'road' || type === 'tertiary');
+  if (minor) {
+    // 電柱(約35m間隔、道路の左側で統一)+ 電線(たるみ付き)
+    const n = Math.floor(len / 35);
+    let prevTop = null;
+    for (let i = 0; i <= n; i++) {
+      const t = (i + 0.5) / (n + 1);
+      const cx = x1 + dx * t + px * (w / 2 + 0.9);
+      const cz = z1 + dz * t + pz * (w / 2 + 0.9);
+      const gy = getGroundY(cx, cz);
+      poolAdd(poleP, cx, gy + 4, cz);
+      const top = { x: cx, y: gy + 7.6, z: cz };
+      if (prevTop) {
+        const mx = (prevTop.x + top.x) / 2, mz = (prevTop.z + top.z) / 2;
+        const my = (prevTop.y + top.y) / 2 - 0.6;
+        addWireSeg(prevTop.x, prevTop.y, prevTop.z, mx, my, mz);
+        addWireSeg(mx, my, mz, top.x, top.y, top.z);
+      }
+      prevTop = top;
+    }
+    // 自販機(たまに、光る箱)
+    if (Math.random() < 0.13) {
+      const t = 0.2 + Math.random() * 0.6;
+      const vx = x1 + dx * t + px * (w / 2 + 1.2);
+      const vz = z1 + dz * t + pz * (w / 2 + 1.2);
+      poolAdd(vendP, vx, getGroundY(vx, vz) + 0.9, vz, ry + Math.PI / 2, 1, 1, 1,
+              [0xff4444, 0x4488ff, 0xffffff][(Math.random() * 3) | 0]);
+    }
+  } else {
+    // 幹線(secondary以上): ガードレール(8m毎、両側)
+    for (let s = 4; s < len - 4; s += 8) {
+      for (const side of [-1, 1]) {
+        const gx = x1 + nx * s + px * side * (w / 2 + 0.4);
+        const gz = z1 + nz * s + pz * side * (w / 2 + 0.4);
+        poolAdd(guardP, gx, getGroundY(gx, gz) + 0.7, gz, ry, 8, 1, 1, 0xf0f0f0);
+      }
+    }
+    // 信号機(長い区間にたまに)
+    if (len > 60 && Math.random() < 0.1) {
+      const sx = x1 + dx * 0.5 + px * (w / 2 + 0.8), sz = z1 + dz * 0.5 + pz * (w / 2 + 0.8);
+      const gy = getGroundY(sx, sz);
+      poolAdd(poleP, sx, gy + 3, sz, 0, 0.8, 0.72, 0.8);
+      poolAdd(signalP, sx - px * 1.2, gy + 5.6, sz - pz * 1.2, ry);
+      poolAdd(lampP, sx - px * 1.2, gy + 5.6, sz - pz * 1.2, ry, 0.9, 0.9, 0.9,
+              Math.random() < 0.6 ? 0x33ff66 : 0xff4433);
+    }
+    // 青看板・標識
+    if (Math.random() < 0.12) {
+      const t = Math.random();
+      const sx = x1 + dx * t + px * (w / 2 + 0.7), sz = z1 + dz * t + pz * (w / 2 + 0.7);
+      const gy = getGroundY(sx, sz);
+      poolAdd(poleP, sx, gy + 1.8, sz, 0, 0.5, 0.45, 0.5);
+      poolAdd(signBoardP, sx, gy + 3.3, sz, ry);
+    }
+  }
 }
 
 // ======= STATION LANDMARKS =======
@@ -713,6 +877,93 @@ function latLonToXZ(lat, lon) {
   const x = (lon - MID_LON) * SCALE * COS_LAT;
   const z = -((lat - MID_LAT) * SCALE);
   return { x, z };
+}
+
+// ======= 面フィーチャ(公園・水域・田畑・森) =======
+const avoidPolygons = []; // 手続き生成の建物を建ててはいけない領域
+const areaPolyBudget = { park: 80, water: 80, farm: 250 }; // 面メッシュのドローコール予算
+const lawnMat  = new THREE.MeshLambertMaterial({ color: 0x4a8a3d, side: THREE.DoubleSide });
+const waterAreaMat = new THREE.MeshLambertMaterial({ color: 0x2277bb, side: THREE.DoubleSide });
+// 田畑: あぜ縞のcanvasテクスチャ(uv=世界座標なので repeat で約9m周期の縞になる)
+const farmMat = (() => {
+  const c = document.createElement('canvas'); c.width = 32; c.height = 32;
+  const g = c.getContext('2d');
+  g.fillStyle = '#6a8a3a'; g.fillRect(0, 0, 32, 32);
+  g.fillStyle = '#8a7a4a'; g.fillRect(0, 12, 32, 8);
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(1 / 9, 1 / 9);
+  return new THREE.MeshLambertMaterial({ map: tex, side: THREE.DoubleSide });
+})();
+
+// ポリゴンから地形に沿った面メッシュを1枚生成(三角形分割はShapeGeometry=earcut)
+function buildAreaPoly(pts, mat, yOff) {
+  const shape = new THREE.Shape();
+  shape.moveTo(pts[0].x, pts[0].z);
+  for (let i = 1; i < pts.length; i++) shape.lineTo(pts[i].x, pts[i].z);
+  const geo = new THREE.ShapeGeometry(shape);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = pos.getY(i); // ShapeのXY平面 → XZ平面へ
+    pos.setXYZ(i, x, getGroundY(x, z) + yOff, z);
+  }
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.renderOrder = 1;
+  scene.add(mesh);
+}
+
+function scatterTreesIn(poly, sqmPerTree, cap) {
+  const area = (poly.maxX - poly.minX) * (poly.maxZ - poly.minZ);
+  const n = Math.min(cap, Math.max(2, Math.floor(area / sqmPerTree)));
+  for (let i = 0; i < n; i++) {
+    const x = poly.minX + Math.random() * (poly.maxX - poly.minX);
+    const z = poly.minZ + Math.random() * (poly.maxZ - poly.minZ);
+    if (!pointInPolygon(x, z, poly.pts)) continue;
+    addTree(x, z, 0.7 + Math.random() * 0.9);
+  }
+}
+
+// OSM要素が面フィーチャなら処理して true を返す(初期ロード・タイル両方から呼ばれる)
+function handleAreaFeature(el) {
+  if (el.type !== 'way' || !el.geometry || el.geometry.length < 4) return false;
+  const tags = el.tags || {};
+  const lu = tags.landuse || '';
+  const isPark   = tags.leisure === 'park' || tags.leisure === 'garden' || tags.leisure === 'playground';
+  const isWater  = tags.natural === 'water';
+  const isFarm   = ['farmland','farm','orchard','meadow','allotments','vineyard'].includes(lu);
+  const isForest = lu === 'forest' || tags.natural === 'wood';
+  if (!isPark && !isWater && !isFarm && !isForest) return false;
+  const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  pts.forEach(p => { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); });
+  const poly = { pts, minX, maxX, minZ, maxZ };
+  avoidPolygons.push(poly);
+  // 巨大ポリゴンの面メッシュは張らない(頂点間で地形を突き抜けるため)。木は個別に接地するのでOK
+  // また面メッシュ=1ドローコールなので種類ごとに総数予算を設ける(超過分は回避領域としてのみ機能)
+  const span = Math.max(maxX - minX, maxZ - minZ);
+  if (isPark) {
+    if (span < 400 && areaPolyBudget.park-- > 0) buildAreaPoly(pts, lawnMat, 0.14);
+    scatterTreesIn(poly, 170, 40);
+    const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
+    for (let i = 0; i < 3; i++) { // ベンチ
+      const bx = cx + (Math.random() - 0.5) * (maxX - minX) * 0.5;
+      const bz = cz + (Math.random() - 0.5) * (maxZ - minZ) * 0.5;
+      if (pointInPolygon(bx, bz, pts)) poolAdd(benchP, bx, getGroundY(bx, bz) + 0.35, bz, Math.random() * Math.PI);
+    }
+    if (pointInPolygon(cx, cz, pts)) { // 公園灯
+      const gy = getGroundY(cx, cz);
+      poolAdd(poleP, cx, gy + 2, cz, 0, 0.6, 0.5, 0.6);
+      poolAdd(lampP, cx, gy + 4.1, cz, 0, 1, 1, 1, 0xffcc77);
+    }
+  } else if (isWater) {
+    if (span < 800 && areaPolyBudget.water-- > 0) buildAreaPoly(pts, waterAreaMat, 0.1);
+  } else if (isFarm) {
+    if (span >= 15 && span < 500 && areaPolyBudget.farm-- > 0) buildAreaPoly(pts, farmMat, 0.1);
+  } else if (isForest) {
+    scatterTreesIn(poly, 380, 70);
+  }
+  return true;
 }
 
 // ======= TERRAIN SYSTEM =======
@@ -926,7 +1177,7 @@ async function loadElevations() {
 
 async function loadOSM() {
   const bb = `${OSM_BOUNDS.minLat},${OSM_BOUNDS.minLon},${OSM_BOUNDS.maxLat},${OSM_BOUNDS.maxLon}`;
-  const query = `[out:json][timeout:40];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use"](${bb});way["leisure"="park"](${bb});way["railway"="rail"](${bb});node["railway"="station"](${bb});node["railway"="halt"](${bb});node["public_transport"="station"](${bb}););out geom;`;
+  const query = `[out:json][timeout:40];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal"](${bb});way["railway"="rail"](${bb});node["railway"="station"](${bb});node["railway"="halt"](${bb});node["public_transport"="station"](${bb}););out geom;`;
   const url = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
 
   let data = null;
@@ -978,6 +1229,16 @@ async function loadOSM() {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
         addRoad(a.x, a.z, b.x, b.z, 4, 'railway');
+      }
+    }
+
+    // 川・水路(青いリボン。isOnRoad判定で川の上への建物生成も防げる)
+    if (tags.waterway && el.geometry && el.geometry.length >= 2) {
+      const ww = tags.waterway === 'river' ? 8 : 3;
+      for (let i = 0; i < el.geometry.length-1; i++) {
+        const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
+        const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
+        addRoad(a.x, a.z, b.x, b.z, ww, 'water');
       }
     }
   });
@@ -1036,6 +1297,9 @@ async function loadOSM() {
     const pos = latLonToXZ(el.lat, el.lon);
     addStation(pos.x, pos.z, name);
   });
+
+  // === PASS 4: 公園・水域・田畑・森 ===
+  data.elements.forEach(el => { handleAreaFeature(el); });
 
   // 初期ロードで処理したway IDを記録(境界タイルの再取得時に二重生成しないため)
   data.elements.forEach(el => { if (el.type === 'way') seenOSMWays.add(el.id); });
@@ -1209,8 +1473,8 @@ function drawMinimap() {
   }
 
   // Roads (color-coded by type)
-  const mmRoadColor = { trunk:'#ffcc00', primary:'#ffcc00', secondary:'#ffaa40', tertiary:'#aabbcc', railway:'#cc44ff', road:'#505878' };
-  const mmRoadWidth = { trunk:3, primary:2.5, secondary:2, tertiary:1.5, railway:2, road:1 };
+  const mmRoadColor = { trunk:'#ffcc00', primary:'#ffcc00', secondary:'#ffaa40', tertiary:'#aabbcc', railway:'#cc44ff', road:'#505878', water:'#3388cc' };
+  const mmRoadWidth = { trunk:3, primary:2.5, secondary:2, tertiary:1.5, railway:2, road:1, water:2.5 };
   const R = MM_RANGE + 60; // 表示範囲外の要素は描画コマンド自体を発行しない
   for (const r of minimapRoads) {
     if ((r.x1-px > R && r.x2-px > R) || (px-r.x1 > R && px-r.x2 > R) ||
@@ -1477,6 +1741,19 @@ function processTileData(data) {
         addRoad(a.x, a.z, b.x, b.z, 4, 'railway');
       }
     }
+    if (tags.waterway) {
+      const ww = tags.waterway === 'river' ? 8 : 3;
+      for (let i = 0; i < el.geometry.length-1; i++) {
+        const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
+        const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
+        addRoad(a.x, a.z, b.x, b.z, ww, 'water');
+      }
+    }
+  });
+  // 公園・水域・田畑・森
+  data.elements.forEach(el => {
+    if (el.type === 'way' && el.id && seenOSMWays.has(el.id)) return;
+    handleAreaFeature(el);
   });
   // Buildings — 直接生成せずキューに積み、フレーム分割して生成する
   // (以前は1タイル分の建物を1フレームで同期生成し、大きなカクつきの原因だった)
@@ -1529,7 +1806,7 @@ async function processOSMTileQueue() {
   const minLat = Math.min(ll00.lat, ll11.lat), maxLat = Math.max(ll00.lat, ll11.lat);
   const minLon = Math.min(ll00.lon, ll11.lon), maxLon = Math.max(ll00.lon, ll11.lon);
   const bb = `${minLat.toFixed(5)},${minLon.toFixed(5)},${maxLat.toFixed(5)},${maxLon.toFixed(5)}`;
-  const query = `[out:json][timeout:20];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use"](${bb});way["railway"="rail"](${bb}););out geom;`;
+  const query = `[out:json][timeout:20];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal"](${bb});way["railway"="rail"](${bb}););out geom;`;
   let failed = false;
   try {
     const res = await fetch('https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query));
@@ -1582,16 +1859,50 @@ function generateChunk(chunkX, chunkZ) {
 
   const beforeCount = scene.children.length; // snapshot to track added meshes
 
-  for (const poly of landusePolygons) {
-    // Broad-phase bounding box cull
-    if (worldX + CHUNK_SIZE < poly.minX || worldX > poly.maxX) continue;
-    if (worldZ + CHUNK_SIZE < poly.minZ || worldZ > poly.maxZ) continue;
+  const x0 = worldX, z0 = worldZ, x1 = worldX + CHUNK_SIZE, z1 = worldZ + CHUNK_SIZE;
+  // チャンク周辺のポリゴンだけに絞る(以降の判定を軽く)
+  const nearAvoid = avoidPolygons.filter(p => !(x1 < p.minX || x0 > p.maxX || z1 < p.minZ || z0 > p.maxZ));
+  const inAvoid = (x, z) => nearAvoid.some(p =>
+    x >= p.minX && x <= p.maxX && z >= p.minZ && z <= p.maxZ && pointInPolygon(x, z, p.pts));
+  const nearLanduse = landusePolygons.filter(p => !(x1 + 30 < p.minX || x0 - 30 > p.maxX || z1 + 30 < p.minZ || z0 - 30 > p.maxZ));
+  const inLanduse = (x, z) => nearLanduse.some(p =>
+    x >= p.minX && x <= p.maxX && z >= p.minZ && z <= p.maxZ && pointInPolygon(x, z, p.pts));
 
+  // --- 1) 道路沿いの住宅補完(日本の住宅街らしく道路に面して並べる) ---
+  // 住宅系landuse内・田畑/森/公園/水域の外・既存建物や道路と非重複、の空き地だけ埋める
+  for (const r of minimapRoads) {
+    if (r.type !== 'road' && r.type !== 'tertiary') continue;
+    if (Math.max(r.x1, r.x2) < x0 - 25 || Math.min(r.x1, r.x2) > x1 + 25 ||
+        Math.max(r.z1, r.z2) < z0 - 25 || Math.min(r.z1, r.z2) > z1 + 25) continue;
+    const dx = r.x2 - r.x1, dz = r.z2 - r.z1;
+    const len = Math.sqrt(dx * dx + dz * dz);
+    if (len < 12) continue;
+    const px = -dz / len, pz = dx / len;
+    for (let s = 6; s < len - 5; s += 13 + Math.random() * 5) {
+      for (const side of [-1, 1]) {
+        if (Math.random() < 0.25) continue; // 適度に空き地を残す
+        const off = (r.rw || 4) / 2 + 5 + Math.random() * 2;
+        const hx = r.x1 + dx * (s / len) + px * side * off;
+        const hz = r.z1 + dz * (s / len) + pz * side * off;
+        if (hx < x0 || hx >= x1 || hz < z0 || hz >= z1) continue; // このチャンク担当分のみ(二重生成防止)
+        if (!inLanduse(hx, hz) || inAvoid(hx, hz)) continue;
+        const bw = 6.5 + Math.random() * 3.5, bd = 6 + Math.random() * 3;
+        if (isOnRoad(hx, hz, bw, bd)) continue;
+        if (hasBuildingNearby(hx, hz, Math.max(bw, bd) / 2 + 1.5)) continue;
+        const pal = HOUSE_PALETTE[(Math.random() * HOUSE_PALETTE.length) | 0];
+        addBuilding(hx, hz, bw, bd, 3.5 + Math.random() * 3.5,
+                    { color: pal.w, roofColor: pal.r, type: 'house' });
+      }
+    }
+  }
+
+  // --- 2) 区画内のグリッド充填(道路沿い分ができたのでレートを低減) ---
+  for (const poly of nearLanduse) {
     const lu = poly.lu;
     const isRes = lu === 'residential';
     const isCom = lu === 'commercial' || lu === 'retail' || lu === 'mixed_use';
-    const step     = isRes ? 18 : isCom ? 24 : 40;
-    const fillRate = isRes ? 0.60 : isCom ? 0.65 : 0.45;
+    const step     = isRes ? 22 : isCom ? 24 : 40;
+    const fillRate = isRes ? 0.30 : isCom ? 0.55 : 0.45;
 
     for (let bx = worldX; bx < worldX + CHUNK_SIZE; bx += step) {
       for (let bz = worldZ; bz < worldZ + CHUNK_SIZE; bz += step) {
@@ -1599,6 +1910,7 @@ function generateChunk(chunkX, chunkZ) {
         if (Math.random() > fillRate) continue;
         const jx = bx + (Math.random()-0.5)*step*0.4;
         const jz = bz + (Math.random()-0.5)*step*0.4;
+        if (inAvoid(jx, jz)) continue; // 田畑・森・公園・水域は埋めない
         const bw = isRes ? 8+Math.random()*8 : isCom ? 12+Math.random()*16 : 25+Math.random()*25;
         const bd = isRes ? 7+Math.random()*8 : isCom ? 10+Math.random()*14 : 20+Math.random()*20;
         if (isOnRoad(jx, jz, bw, bd)) continue;
