@@ -2380,14 +2380,17 @@ const WIDE_HALF_LAT = 0.13, WIDE_HALF_LON = 0.13;   // ≈ ±14km
 const WIDE_SEGS = 28, WIDE_SEGS1 = WIDE_SEGS + 1;
 const WIDE_W = 2 * WIDE_HALF_LON * SCALE * COS_LAT;
 const WIDE_D = 2 * WIDE_HALF_LAT * SCALE;
+// 遠景標高グリッドの中心(ワールド座標)。プレイヤーが遠くへジャンプしたら中心を移して取り直す。
+// これで富士山など伊勢原から離れた場所でも実際の地形・標高が出る。
+let wideCX = 0, wideCZ = 0, wideLoading = false;
 let seaLevelM = 5;            // 海面の実標高(m)。スライダーで変更可(elevBase確定時に初期値を上書き)
 // wideElev は上方(遠景地形メッシュ定義の前)で宣言済み。flat [iz*WIDE_SEGS1+ix] = ゲーム高さ(実標高で固定)
 let SEA_Y = 0;                // 海面(seaLevelM)のゲーム高さ。SEA_Y = (seaLevelM - elevBase) * ELEV_SCALE
 
 function getWideTerrainY(x, z) {
   if (!wideElev) return 0;
-  const nx = (x + WIDE_W / 2) / WIDE_W * WIDE_SEGS;
-  const nz = (z + WIDE_D / 2) / WIDE_D * WIDE_SEGS;
+  const nx = (x - wideCX + WIDE_W / 2) / WIDE_W * WIDE_SEGS; // グリッド中心 (wideCX,wideCZ) 基準
+  const nz = (z - wideCZ + WIDE_D / 2) / WIDE_D * WIDE_SEGS;
   const ix = Math.max(0, Math.min(WIDE_SEGS - 1, Math.floor(nx)));
   const iz = Math.max(0, Math.min(WIDE_SEGS - 1, Math.floor(nz)));
   const fx = Math.max(0, Math.min(1, nx - ix));
@@ -2399,12 +2402,16 @@ function getWideTerrainY(x, z) {
   return h00*(1-fx)*(1-fz) + h10*fx*(1-fz) + h01*(1-fx)*fz + h11*fx*fz;
 }
 
-async function loadWideTerrain() {
+async function loadWideTerrain(centerX = 0, centerZ = 0) {
+  if (wideLoading) return;
+  wideLoading = true;
+  const reCenter = (wideElev !== null); // 2回目以降(=別地域へ移動しての取り直し)
+  if (reCenter) { statusEl.style.display = 'block'; statusEl.textContent = '🏔 この地域の地形を取得中...'; }
   const pts = [];
   for (let iz = 0; iz < WIDE_SEGS1; iz++)
     for (let ix = 0; ix < WIDE_SEGS1; ix++) {
-      const wx = -WIDE_W/2 + ix * WIDE_W / WIDE_SEGS;
-      const wz = -WIDE_D/2 + iz * WIDE_D / WIDE_SEGS;
+      const wx = centerX - WIDE_W/2 + ix * WIDE_W / WIDE_SEGS;
+      const wz = centerZ - WIDE_D/2 + iz * WIDE_D / WIDE_SEGS;
       pts.push(xzToLatLon(wx, wz));
     }
   const raw = new Array(pts.length).fill(null);
@@ -2414,18 +2421,32 @@ async function loadWideTerrain() {
       const loc = batch.map(ll => `${ll.lat.toFixed(6)},${ll.lon.toFixed(6)}`).join('|');
       const res = await fetch(`https://api.opentopodata.org/v1/srtm30m?locations=${encodeURIComponent(loc)}`);
       const j = await res.json();
-      if (!j.results) return; // 失敗時は遠景実地形なし = 従来のクランプ動作のまま(安全なフォールバック)
+      if (!j.results) { wideLoading = false; return; } // 失敗時は現状維持(安全なフォールバック)
       j.results.forEach((r, k) => { raw[i + k] = r.elevation; });
       if (i + 100 < pts.length) await new Promise(r => setTimeout(r, 1100));
     }
-  } catch (e) { return; }
-  wideElev = new Float32Array(pts.length);
+  } catch (e) { wideLoading = false; return; }
+  const arr = new Float32Array(pts.length);
   const oceanFloor = (0 - elevBase) * ELEV_SCALE - 10; // データ無しノードは海底(海面より十分下)扱い
   for (let i = 0; i < raw.length; i++) {
     const m = raw[i];
-    wideElev[i] = (m == null) ? oceanFloor : (m - elevBase) * ELEV_SCALE; // 実標高で固定(海面とは無関係)
+    arr[i] = (m == null) ? oceanFloor : (m - elevBase) * ELEV_SCALE; // 実標高で固定(海面とは無関係)
   }
-  updateFarMesh(true); // 遠景メッシュを実地形で1回だけ構築。以後、海面変更では作り直さない
+  wideElev = arr; wideCX = centerX; wideCZ = centerZ; // データと中心を同時に更新
+  wideLoading = false;
+  updateFarMesh(true); // 遠景メッシュを新しい実地形で再構築
+  if (reCenter) { statusEl.textContent = '🏔 地形反映完了'; setTimeout(() => { statusEl.style.display = 'none'; }, 2500); }
+}
+
+// プレイヤーが遠景グリッドの中心から離れすぎたら、その場所を中心に取り直す(富士山などへ飛んでも地形が出る)
+let _wideCheckFrame = 0;
+function checkWideTerrain() {
+  if (wideLoading || !wideElev) return; // 初回ロード中/未取得は何もしない
+  if ((++_wideCheckFrame) % 120 !== 0) return; // ~2秒ごと
+  if (Math.abs(player.position.x - wideCX) > WIDE_W * 0.32 ||
+      Math.abs(player.position.z - wideCZ) > WIDE_D * 0.32) {
+    loadWideTerrain(player.position.x, player.position.z);
+  }
 }
 
 // 海面標高の変更は「水面プレーンの上下」だけにする。地形・道路・建物は一切動かさない。
@@ -2688,14 +2709,37 @@ function buildFallbackMap() {
   initialWorldLoaded = true;
 }
 
+// 起動時の初期位置: スマホ等の位置情報から取得。取得不可(非対応/拒否/タイムアウト)は東京駅。
+const TOKYO_STATION = { lat: 35.681236, lon: 139.767125 };
+function getStartLocation() {
+  return new Promise((resolve) => {
+    if (!('geolocation' in navigator)) { resolve(TOKYO_STATION); return; }
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const timer = setTimeout(() => finish(TOKYO_STATION), 8000); // 応答が無ければ東京駅
+    navigator.geolocation.getCurrentPosition(
+      (p) => { clearTimeout(timer); finish({ lat: p.coords.latitude, lon: p.coords.longitude }); },
+      () => { clearTimeout(timer); finish(TOKYO_STATION); }, // 拒否・失敗も東京駅
+      { enableHighAccuracy: true, timeout: 7000, maximumAge: 60000 }
+    );
+  });
+}
+
 // Load terrain first, then place OSM world on top
 // 明治モードは迅速測図の土地利用データを先に読む(チャンク生成が依存)
 (async () => {
+  const startLocP = getStartLocation(); // 位置情報の取得を本編ロードと並行で開始
+  // モード切替リロード(江戸↔現実など)では切替前の位置に戻す。その時は現在地ジャンプしない。
+  let isModeSwitch = false;
+  try { isModeSwitch = !!localStorage.getItem('iseharaResumePos'); } catch (e) {}
   await loadElevations();
   if (IS_MEIJI) await loadMeijiLanduse();
-  await loadOSM();
-  // 本編ロード後、遠景の実地形(大山・海岸)をバックグラウンドで取得(失敗しても本編に影響なし)
-  loadWideTerrain();
+  await loadOSM(); // モード切替時はここで切替前の位置に復帰する
+  // 通常起動のみ初期位置へ移動(現在地、取れなければ東京駅)。伊勢原の詳細地形は座標基準として残し、
+  // 現在地の地形は遠景グリッド(約1km間隔)+ OSMタイルで表示する。
+  const loc = await startLocP;
+  if (!isModeSwitch) jumpToLatLon(loc.lat, loc.lon);
+  loadWideTerrain(player.position.x, player.position.z); // 最終的なプレイヤー位置を中心に遠景地形を取得
 })();
 
 // ======= REAL-WORLD COORDINATES =======
@@ -2717,6 +2761,9 @@ function jumpToLatLon(toLat, toLon) {
   player.position.set(pos.x, 0, pos.z); // yはanimateの床追従が合わせる
   if (playerMarker) { playerMarker.setLatLng([toLat, toLon]); playerMarker.openPopup(); }
   if (leafletMap) leafletMap.setView([toLat, toLon], leafletMap.getZoom());
+  // 遠景グリッドの外へ飛んだら、その場を中心に地形を取り直す(富士山などでも地形・標高が出る)
+  if (wideElev && (Math.abs(pos.x - wideCX) > WIDE_W * 0.32 || Math.abs(pos.z - wideCZ) > WIDE_D * 0.32))
+    loadWideTerrain(pos.x, pos.z);
   setTimeout(() => mapOverlay.classList.remove('active'), 300);
 }
 
@@ -3812,6 +3859,8 @@ function animate() {
   }
   // Tile-based OSM fetch — loads roads/buildings for newly entered areas
   checkOSMTiles();
+  // 遠景標高グリッドをプレイヤーに追従(遠くへジャンプしても実地形・標高が出る)
+  checkWideTerrain();
 
   // 山の森(プレイヤー周囲だけ・移動で作り直し)
   updateForest();
