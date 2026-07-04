@@ -23,7 +23,7 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
 }
 #viewBtn:hover { background:rgba(120,60,180,0.9); }
 #info {
-  position:fixed; top:16px; right:16px;
+  position:fixed; top:64px; right:16px;
   background:rgba(30,10,60,0.8); color:#c8a8ff;
   border:1px solid #6040a0; border-radius:8px;
   padding:10px 14px; font-size:12px; line-height:1.7;
@@ -142,6 +142,28 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
   box-shadow:0 0 12px rgba(208,144,64,0.4);
 }
 #modeBtn:hover { background:rgba(160,100,40,0.9); }
+#camDirBtn {
+  position:fixed; top:176px; left:16px;
+  background:rgba(50,50,70,0.85); color:#c8d0e8;
+  border:1px solid #8090c0; border-radius:8px;
+  padding:8px 14px; font-size:14px; cursor:pointer;
+  pointer-events:all; z-index:20;
+}
+#camDirBtn:hover { background:rgba(70,70,100,0.9); }
+/* UI非表示トグル(常時表示。スティック・ジャンプ・このボタン以外を隠す) */
+#uiToggleBtn {
+  position:fixed; top:16px; right:16px;
+  width:40px; height:40px; border-radius:50%;
+  background:rgba(30,10,60,0.55); color:#e8c8ff;
+  border:1px solid rgba(160,96,255,0.5);
+  font-size:18px; cursor:pointer;
+  pointer-events:all; z-index:40;
+}
+body.uiHidden #info, body.uiHidden #viewBtn, body.uiHidden #mapBtn,
+body.uiHidden #jumpBtn, body.uiHidden #modeBtn, body.uiHidden #camDirBtn,
+body.uiHidden #gpsDisplay, body.uiHidden #minimap, body.uiHidden #credit,
+body.uiHidden #status { display:none !important; }
+body.uiHidden #uiToggleBtn { opacity:0.45; }
 </style>
 </head>
 <body>
@@ -150,6 +172,8 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
 <button id="mapBtn">🗺 上空</button>
 <button id="jumpBtn">📍 マップジャンプ</button>
 <button id="modeBtn">🏙 現実</button>
+<button id="camDirBtn">🔄 視点</button>
+<button id="uiToggleBtn" title="UI表示/非表示">🙈</button>
 <div id="credit" style="display:none; position:fixed; bottom:2px; left:8px; font-size:10px; color:rgba(255,255,255,0.65); z-index:30; pointer-events:all;"></div>
 <div id="mapOverlay">
   <div id="mapHint">タップした場所にジャンプします</div>
@@ -2593,6 +2617,7 @@ document.getElementById('geoBtn').addEventListener('click', () => {
 });
 
 function updateGPS(t) {
+  if (uiHidden) return; // UI非表示中は更新不要
   if (t - lastGpsUpdate < 0.5) return;
   lastGpsUpdate = t;
   const { lat, lon } = xzToLatLon(player.position.x, player.position.z);
@@ -2658,6 +2683,7 @@ const MM_RANGE = 200; // 200 meters radius visible on minimap
 
 let _mmFrame = 0;
 function drawMinimap() {
+  if (uiHidden) return; // UI非表示中は2Dキャンバス描画ごと省略
   // 3フレームに1回だけ再描画(2Dキャンバス描画も無視できない負荷のため)
   if (++_mmFrame % 3 !== 0) return;
   mctx.clearRect(0,0,MM,MM);
@@ -2768,6 +2794,34 @@ function drawMinimap() {
   mctx.stroke();
 }
 
+// ======= カメラ回転の向き / UI非表示モード =======
+// 視点操作は「反転」が新デフォルト(CAM_DIR=+1)。🔄ボタンで従来の向き(-1)に戻せる
+let CAM_DIR = 1;
+try { if (localStorage.getItem('iseharaCamDir') === 'legacy') CAM_DIR = -1; } catch (e) {}
+const camDirBtn = document.getElementById('camDirBtn');
+function updateCamDirBtn() { camDirBtn.textContent = CAM_DIR === 1 ? '🔄 視点:反転' : '🔄 視点:標準'; }
+camDirBtn.addEventListener('click', () => {
+  CAM_DIR = -CAM_DIR;
+  try { localStorage.setItem('iseharaCamDir', CAM_DIR === -1 ? 'legacy' : 'inverted'); } catch (e) {}
+  updateCamDirBtn();
+});
+updateCamDirBtn();
+
+// UI非表示: スティック・ジャンプ・👁トグル以外を隠して景色を全画面で楽しむモード
+let uiHidden = false;
+try { uiHidden = localStorage.getItem('iseharaUIHidden') === '1'; } catch (e) {}
+const uiToggleBtn = document.getElementById('uiToggleBtn');
+function applyUIHidden() {
+  document.body.classList.toggle('uiHidden', uiHidden);
+  uiToggleBtn.textContent = uiHidden ? '👁' : '🙈';
+}
+uiToggleBtn.addEventListener('click', () => {
+  uiHidden = !uiHidden;
+  try { localStorage.setItem('iseharaUIHidden', uiHidden ? '1' : '0'); } catch (e) {}
+  applyUIHidden();
+});
+applyUIHidden();
+
 // ======= INPUT =======
 const keys = {};
 document.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
@@ -2788,8 +2842,9 @@ canvas.addEventListener('mousedown', e => { mouseDown = true; lastMouseX = e.cli
 canvas.addEventListener('mouseup',   () => { mouseDown = false; });
 canvas.addEventListener('mousemove', e => {
   if (!mouseDown) return;
-  camYaw   -= (e.clientX - lastMouseX) * 0.004;
-  camPitch -= (e.clientY - lastMouseY) * 0.003;
+  // CAM_DIR=+1(新デフォルト)で従来と上下左右が反転した向きになる
+  camYaw   += (e.clientX - lastMouseX) * 0.004 * CAM_DIR;
+  camPitch += (e.clientY - lastMouseY) * 0.003 * CAM_DIR;
   camPitch = Math.max(-0.2, Math.min(1.2, camPitch));
   lastMouseX = e.clientX; lastMouseY = e.clientY;
 });
@@ -2838,8 +2893,9 @@ document.addEventListener('touchmove', e => {
       joyOx = cx / maxR;
       joyOz = cy / maxR;
     } else if (t.identifier === camTouchId) {
-      camYaw   -= (t.clientX - camLastX) * 0.005;
-      camPitch -= (t.clientY - camLastY) * 0.004;
+      // CAM_DIR=+1(新デフォルト)で従来と上下左右が反転した向きになる
+      camYaw   += (t.clientX - camLastX) * 0.005 * CAM_DIR;
+      camPitch += (t.clientY - camLastY) * 0.004 * CAM_DIR;
       camPitch = Math.max(-0.3, Math.min(1.4, camPitch));
       camLastX = t.clientX; camLastY = t.clientY;
     }
