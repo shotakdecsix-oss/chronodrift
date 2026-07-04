@@ -270,7 +270,8 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.9;
 
 const scene = new THREE.Scene();
-const WORLD_FOG = new THREE.FogExp2(MODE_CONF.fog, 0.0004); // 毎フレーム new しない(GC対策)
+// フォグ: 高密度モード(明治以外)は生成半径を狭めた分だけ濃くして、ポップインを隠す
+const WORLD_FOG = new THREE.FogExp2(MODE_CONF.fog, MODE === 'meiji' ? 0.0004 : 0.00056); // 毎フレーム new しない(GC対策)
 scene.fog = WORLD_FOG;
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.5, 5000);
@@ -411,9 +412,10 @@ const landusePolygons = []; // {pts, lu, minX, maxX, minZ, maxZ} — stored duri
 const loadedChunks = new Set(); // "cx,cz" string keys of already-generated chunks
 const chunkMeshes = new Map();  // "cx,cz" → [THREE.Mesh, ...] for unloading
 const CHUNK_SIZE = 120;  // meters per chunk side
-// 半径2(±300m)ではフォグで隠れない距離で建物がポップイン/アウトして
-// 「途切れて」見えたため4(±480m、アンロードは±720m)に拡大
-const CHUNK_RADIUS = 4;
+// 建物密度を大幅に上げた(ぎゅうぎゅうの日本の街並み)ため、生成半径は
+// ±480m→±360mに縮小し、代わりにフォグを濃く(0.0004→0.00056)して
+// ポップインが目立たない距離バランスを維持する。明治は低密度なので従来の±480mのまま
+const CHUNK_RADIUS = IS_MEIJI ? 4 : 3;
 
 function pointInPolygon(px, pz, pts) {
   let inside = false;
@@ -846,8 +848,9 @@ function detailMesh(geo, mat, x, y, z, sx, sy, sz, ry) {
   return m;
 }
 // 追加ディテール(玄関庇・屋上設備等)は建物が多い時は自動で省略(ドローコール抑制。
-// minimapBuildings はチャンクアンロードで減るため自動的に釣り合う)
-const detailOK = () => minimapBuildings.length < 700;
+// minimapBuildings はチャンクアンロードで減るため自動的に釣り合う)。
+// 高密度化(現実モード)に合わせて閾値を700→850に微増(プレイヤー近傍の建物が優先的に得る)
+const detailOK = () => minimapBuildings.length < 850;
 const ROOF_COLS = [0x555a66, 0x7a4a3a, 0x4a5a3a, 0x69463c, 0x3f4c59, 0x8a4038]; // 住宅屋根の色バリエーション
 const ENTRANCE_MAT = new THREE.MeshBasicMaterial({ color: 0x1a2430 }); // ビル1階の玄関ガラス
 const TANK_MAT = new THREE.MeshLambertMaterial({ color: 0xd8d4c8 });   // 屋上貯水槽
@@ -2801,41 +2804,45 @@ function generateChunk(chunkX, chunkZ) {
     generateMeijiCells(x0, z0, x1, z1, inAvoid);
   } else {
 
-  // --- 1) 道路沿いの住宅補完(日本の住宅街らしく道路に面して並べる) ---
-  // 住宅系landuse内・田畑/森/公園/水域の外・既存建物や道路と非重複、の空き地だけ埋める
+  // --- 1) 道路沿いの住宅補完(日本の住宅街らしく道路に面してぎっしり並べる) ---
+  // 住宅系landuse内・田畑/森/公園/水域の外・既存建物や道路と非重複、の空き地を埋める。
+  // 敷地幅≈10m間隔で両側に並べ、奥の2列目・3列目にも生成(奥ほど生成率を下げ路地の抜けを残す)
   for (const r of minimapRoads) {
     if (r.type !== 'road' && r.type !== 'tertiary') continue;
-    if (Math.max(r.x1, r.x2) < x0 - 25 || Math.min(r.x1, r.x2) > x1 + 25 ||
-        Math.max(r.z1, r.z2) < z0 - 25 || Math.min(r.z1, r.z2) > z1 + 25) continue;
+    if (Math.max(r.x1, r.x2) < x0 - 40 || Math.min(r.x1, r.x2) > x1 + 40 ||
+        Math.max(r.z1, r.z2) < z0 - 40 || Math.min(r.z1, r.z2) > z1 + 40) continue;
     const dx = r.x2 - r.x1, dz = r.z2 - r.z1;
     const len = Math.sqrt(dx * dx + dz * dz);
     if (len < 12) continue;
     const px = -dz / len, pz = dx / len;
-    for (let s = 6; s < len - 5; s += 13 + Math.random() * 5) {
+    const ROW_SKIP = [0.08, 0.2, 0.45]; // 列ごとの空き地率(手前ほど密)
+    for (let s = 5; s < len - 4; s += 9.5 + Math.random() * 2) {
       for (const side of [-1, 1]) {
-        if (Math.random() < 0.25) continue; // 適度に空き地を残す
-        const off = (r.rw || 4) / 2 + 5 + Math.random() * 2;
-        const hx = r.x1 + dx * (s / len) + px * side * off;
-        const hz = r.z1 + dz * (s / len) + pz * side * off;
-        if (hx < x0 || hx >= x1 || hz < z0 || hz >= z1) continue; // このチャンク担当分のみ(二重生成防止)
-        if (!inLanduse(hx, hz) || inAvoid(hx, hz)) continue;
-        const bw = 6.5 + Math.random() * 3.5, bd = 6 + Math.random() * 3;
-        if (isOnRoad(hx, hz, bw, bd)) continue;
-        if (hasBuildingNearby(hx, hz, Math.max(bw, bd) / 2 + 1.5)) continue;
-        const pal = HOUSE_PALETTE[(Math.random() * HOUSE_PALETTE.length) | 0];
-        addBuilding(hx, hz, bw, bd, 3.5 + Math.random() * 3.5,
-                    { color: pal.w, roofColor: pal.r, type: 'house' });
+        for (let row = 0; row < 3; row++) {
+          if (Math.random() < ROW_SKIP[row]) continue;
+          const off = (r.rw || 4) / 2 + 4.2 + Math.random() * 1.5 + row * (11 + Math.random() * 2);
+          const hx = r.x1 + dx * (s / len) + px * side * off;
+          const hz = r.z1 + dz * (s / len) + pz * side * off;
+          if (hx < x0 || hx >= x1 || hz < z0 || hz >= z1) continue; // このチャンク担当分のみ(二重生成防止)
+          if (!inLanduse(hx, hz) || inAvoid(hx, hz)) continue;
+          const bw = 6.5 + Math.random() * 3, bd = 6 + Math.random() * 2.5;
+          if (isOnRoad(hx, hz, bw, bd)) continue;
+          if (hasBuildingNearby(hx, hz, Math.max(bw, bd) / 2 + 2.5)) continue; // 隣家との隙間は狭く
+          const pal = HOUSE_PALETTE[(Math.random() * HOUSE_PALETTE.length) | 0];
+          addBuilding(hx, hz, bw, bd, 3.5 + Math.random() * 3.5,
+                      { color: pal.w, roofColor: pal.r, type: 'house' });
+        }
       }
     }
   }
 
-  // --- 2) 区画内のグリッド充填(道路沿い分ができたのでレートを低減) ---
+  // --- 2) 区画内のグリッド充填(道路沿いの列の隙間・奥地を中密度で埋める) ---
   for (const poly of nearLanduse) {
     const lu = poly.lu;
     const isRes = lu === 'residential';
     const isCom = lu === 'commercial' || lu === 'retail' || lu === 'mixed_use';
-    const step     = isRes ? 22 : isCom ? 24 : 40;
-    const fillRate = isRes ? 0.30 : isCom ? 0.55 : 0.45;
+    const step     = isRes ? 14 : isCom ? 17 : 34;
+    const fillRate = isRes ? 0.65 : isCom ? 0.65 : 0.5;
 
     for (let bx = worldX; bx < worldX + CHUNK_SIZE; bx += step) {
       for (let bz = worldZ; bz < worldZ + CHUNK_SIZE; bz += step) {
@@ -2844,11 +2851,13 @@ function generateChunk(chunkX, chunkZ) {
         const jx = bx + (Math.random()-0.5)*step*0.4;
         const jz = bz + (Math.random()-0.5)*step*0.4;
         if (inAvoid(jx, jz)) continue; // 田畑・森・公園・水域は埋めない
-        const bw = isRes ? 8+Math.random()*8 : isCom ? 12+Math.random()*16 : 25+Math.random()*25;
-        const bd = isRes ? 7+Math.random()*8 : isCom ? 10+Math.random()*14 : 20+Math.random()*20;
+        const bw = isRes ? 7+Math.random()*5 : isCom ? 12+Math.random()*14 : 25+Math.random()*25;
+        const bd = isRes ? 6.5+Math.random()*4.5 : isCom ? 10+Math.random()*12 : 20+Math.random()*20;
         if (isOnRoad(jx, jz, bw, bd)) continue;
-        if (hasBuildingNearby(jx, jz, Math.max(bw,bd)/2+2)) continue;
-        const bh = isRes ? 4+Math.random()*8 : isCom ? 8+Math.random()*18 : 6+Math.random()*8;
+        if (hasBuildingNearby(jx, jz, Math.max(bw,bd)/2+1.5)) continue;
+        // 住宅地はほぼ2階建て、たまに低層アパート(日本の郊外の実感に寄せる)
+        const bh = isRes ? (Math.random() < 0.15 ? 8+Math.random()*6 : 4+Math.random()*3.5)
+                 : isCom ? 8+Math.random()*16 : 6+Math.random()*8;
         const style = isRes
           ? { color:0xc8a060, roofColor:0x8a5828, type:'house' }
           : isCom
