@@ -120,6 +120,15 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
   touch-action:none; user-select:none;
 }
 #hopBtn:active { background:rgba(70,130,210,0.9); }
+#modeBtn {
+  position:fixed; top:136px; left:16px;
+  background:rgba(120,80,30,0.85); color:#ffe0b0;
+  border:1px solid #d09040; border-radius:8px;
+  padding:8px 14px; font-size:14px; cursor:pointer;
+  pointer-events:all; z-index:20;
+  box-shadow:0 0 12px rgba(208,144,64,0.4);
+}
+#modeBtn:hover { background:rgba(160,100,40,0.9); }
 </style>
 </head>
 <body>
@@ -127,6 +136,8 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
 <button id="viewBtn">👁 一人称</button>
 <button id="mapBtn">🗺 上空</button>
 <button id="jumpBtn">📍 マップジャンプ</button>
+<button id="modeBtn">🏙 現実</button>
+<div id="credit" style="display:none; position:fixed; bottom:2px; left:8px; font-size:10px; color:rgba(255,255,255,0.65); z-index:30; pointer-events:all;"></div>
 <div id="mapOverlay">
   <div id="mapHint">タップした場所にジャンプします</div>
   <div id="leafletMap"></div>
@@ -150,6 +161,67 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
 document.documentElement.style.touchAction = 'none';
 document.body.style.touchAction = 'none';
 
+// ======= 表示モード =======
+// 地形・道路・当たり判定・ゲームロジックは全モード共通。見た目(マテリアル/ジオメトリ/環境色)のみ差し替える。
+// 切替は localStorage に保存してリロード=ワールド全体をそのモードで再生成(最も安全な「チャンク再構築」)。
+const VISUAL_MODES = [
+  { id: 'real',    label: '🏙 現実' },
+  { id: 'meiji',   label: '🌾 明治' },
+  { id: 'edo',     label: '🏯 江戸' },
+  { id: 'marchen', label: '🍭 メルヘン' },
+  { id: 'space',   label: '🛸 宇宙' },
+];
+let MODE = 'real';
+try {
+  const m = localStorage.getItem('iseharaVisualMode');
+  if (VISUAL_MODES.some(v => v.id === m)) MODE = m;
+} catch (e) {}
+(function initModeBtn() {
+  const btn = document.getElementById('modeBtn');
+  const idx = VISUAL_MODES.findIndex(v => v.id === MODE);
+  btn.textContent = VISUAL_MODES[idx].label;
+  btn.addEventListener('click', () => {
+    const next = VISUAL_MODES[(idx + 1) % VISUAL_MODES.length].id;
+    try { localStorage.setItem('iseharaVisualMode', next); } catch (e) {}
+    location.reload();
+  });
+})();
+// モード別の環境パレット
+const MODE_CONF = {
+  real: {
+    fog: 0x3080b0, ambient: 0x9070d0, ambInt: 2.5, moon: 0xd0c0ff,
+    sky: ['#0a2a60', '#1a5090', '#3090c0', '#80d0f0'], glow: 'rgba(200,100,50,0.5)',
+    water: 0x2277bb, lawn: 0x4a8a3d, roadMinor: 0xe8e8e8, windowC: 0xffee88,
+  },
+  meiji: { // 明治(迅速測図)— 落ち着いた自然色・薄暮
+    fog: 0x8a9a88, ambient: 0xb8b8a0, ambInt: 2.4, moon: 0xe8dcc0,
+    sky: ['#1a2a3a', '#3a5a6a', '#7a9a8a', '#d8c8a0'], glow: 'rgba(220,170,90,0.45)',
+    water: 0x3a6a8a, lawn: 0x5a7a3a, roadMinor: 0x907a55, windowC: 0xffcc77,
+  },
+  edo: { // セピア・和
+    fog: 0x8a7a5a, ambient: 0xc0a878, ambInt: 2.3, moon: 0xffe8c0,
+    sky: ['#2a2018', '#4a3a28', '#7a6040', '#c8a870'], glow: 'rgba(255,180,80,0.5)',
+    water: 0x4a7a8a, lawn: 0x6a7a40, roadMinor: 0xcabc9a, windowC: 0xffd890,
+  },
+  marchen: { // 明るいパステル
+    fog: 0x88c8e8, ambient: 0xd0c0f0, ambInt: 3.2, moon: 0xfff0d0,
+    sky: ['#3a70c8', '#5a9ae0', '#90c8f0', '#ffd8e8'], glow: 'rgba(255,160,220,0.6)',
+    water: 0x55ccff, lawn: 0x66d060, roadMinor: 0xf2e2e8, windowC: 0xfff0a0,
+  },
+  space: { // 宇宙コロニー
+    fog: 0x0a0e1a, ambient: 0x8090c0, ambInt: 2.2, moon: 0xa0c0ff,
+    sky: ['#000006', '#01020e', '#040820', '#0a1030'], glow: 'rgba(80,120,255,0.35)',
+    water: 0x113355, lawn: 0x3a4450, roadMinor: 0x556070, windowC: 0x66eeff,
+  },
+}[MODE];
+const IS_MEIJI = MODE === 'meiji';
+// 明治モードのデータ出典表記(CC BY 4.0 の帰属表示)
+if (IS_MEIJI) {
+  const cr = document.getElementById('credit');
+  cr.style.display = 'block';
+  cr.innerHTML = '明治期土地利用: 出典 <a href="https://habs.rad.naro.go.jp/" target="_blank" style="color:#cdb">農研機構農業環境研究部門</a>(迅速測図・CC BY 4.0)';
+}
+
 // ======= SCENE SETUP =======
 const canvas = document.getElementById('canvas');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -162,7 +234,7 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.9;
 
 const scene = new THREE.Scene();
-const WORLD_FOG = new THREE.FogExp2(0x3080b0, 0.0004); // 毎フレーム new しない(GC対策)
+const WORLD_FOG = new THREE.FogExp2(MODE_CONF.fog, 0.0004); // 毎フレーム new しない(GC対策)
 scene.fog = WORLD_FOG;
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.5, 5000);
@@ -178,16 +250,16 @@ function buildSky() {
   canvas2.width = 512; canvas2.height = 512;
   const ctx = canvas2.getContext('2d');
   const grad = ctx.createLinearGradient(0, 0, 0, 512);
-  grad.addColorStop(0,   '#0a2a60');
-  grad.addColorStop(0.4, '#1a5090');
-  grad.addColorStop(0.7, '#3090c0');
-  grad.addColorStop(1,   '#80d0f0');
+  grad.addColorStop(0,   MODE_CONF.sky[0]);
+  grad.addColorStop(0.4, MODE_CONF.sky[1]);
+  grad.addColorStop(0.7, MODE_CONF.sky[2]);
+  grad.addColorStop(1,   MODE_CONF.sky[3]);
   ctx.fillStyle = grad;
   ctx.fillRect(0,0,512,512);
   // Horizon glow
   const hgrad = ctx.createRadialGradient(256,512,0,256,512,300);
-  hgrad.addColorStop(0, 'rgba(200,100,50,0.5)');
-  hgrad.addColorStop(1, 'rgba(200,100,50,0)');
+  hgrad.addColorStop(0, MODE_CONF.glow);
+  hgrad.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = hgrad;
   ctx.fillRect(0,0,512,512);
   const tex = new THREE.CanvasTexture(canvas2);
@@ -197,6 +269,27 @@ function buildSky() {
   skyMesh.frustumCulled = false;
   skyMesh.renderOrder = -2; // 最初に背景として描画
   scene.add(skyMesh);
+
+  // 宇宙モード: 地球と衛星を空に浮かべる(skyMeshの子なのでカメラ追従も自動)
+  if (MODE === 'space') {
+    const ec = document.createElement('canvas'); ec.width = 64; ec.height = 64;
+    const eg = ec.getContext('2d');
+    eg.fillStyle = '#1a55cc'; eg.fillRect(0, 0, 64, 64);
+    eg.fillStyle = '#2a8a3a';
+    for (let i = 0; i < 7; i++) { eg.beginPath(); eg.arc(Math.random()*64, Math.random()*64, 5+Math.random()*9, 0, 7); eg.fill(); }
+    eg.fillStyle = 'rgba(255,255,255,0.7)';
+    for (let i = 0; i < 9; i++) { eg.beginPath(); eg.arc(Math.random()*64, Math.random()*64, 3+Math.random()*7, 0, 7); eg.fill(); }
+    const earth = new THREE.Mesh(new THREE.SphereGeometry(420, 24, 18),
+      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(ec), fog: false }));
+    earth.position.set(1600, 1500, -2600);
+    earth.frustumCulled = false;
+    skyMesh.add(earth);
+    const moon2 = new THREE.Mesh(new THREE.SphereGeometry(140, 16, 12),
+      new THREE.MeshBasicMaterial({ color: 0xc8b8e8, fog: false }));
+    moon2.position.set(-2200, 900, 1500);
+    moon2.frustumCulled = false;
+    skyMesh.add(moon2);
+  }
 }
 buildSky();
 
@@ -205,10 +298,11 @@ buildSky();
 let starMesh = null;
 (function buildStars() {
   const geo = new THREE.BufferGeometry();
-  const count = 3000;
+  // 宇宙モードは星を濃く、メルヘンは控えめに
+  const count = MODE === 'space' ? 7000 : MODE === 'marchen' ? 1200 : 3000;
   const pos = new Float32Array(count * 3);
   for (let i = 0; i < count * 3; i += 3) {
-    const phi = Math.random() * Math.PI * 0.5; // 上半球のみ
+    const phi = Math.random() * Math.PI * (MODE === 'space' ? 0.85 : 0.5);
     const theta = Math.random() * Math.PI * 2;
     const r = 3800;
     pos[i]   = r * Math.sin(phi) * Math.cos(theta);
@@ -216,7 +310,7 @@ let starMesh = null;
     pos[i+2] = r * Math.sin(phi) * Math.sin(theta);
   }
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  const mat = new THREE.PointsMaterial({ color: 0xffffff, size: 1.6, sizeAttenuation: false, fog: false, transparent: true, opacity: 0.9 });
+  const mat = new THREE.PointsMaterial({ color: 0xffffff, size: MODE === 'space' ? 2.2 : 1.6, sizeAttenuation: false, fog: false, transparent: true, opacity: 0.9 });
   starMesh = new THREE.Points(geo, mat);
   starMesh.frustumCulled = false;
   starMesh.renderOrder = -1;
@@ -224,8 +318,8 @@ let starMesh = null;
 })();
 
 // ======= LIGHTS =======
-scene.add(new THREE.AmbientLight(0x9070d0, 2.5));
-const moonLight = new THREE.DirectionalLight(0xd0c0ff, 1.8);
+scene.add(new THREE.AmbientLight(MODE_CONF.ambient, MODE_CONF.ambInt));
+const moonLight = new THREE.DirectionalLight(MODE_CONF.moon, 1.8);
 moonLight.position.set(-500, 1000, -300);
 moonLight.castShadow = false;
 moonLight.shadow.mapSize.set(1024, 1024);
@@ -363,13 +457,8 @@ player.add(orbLight);
 player.position.set(0, 0, 0);
 
 // ======= BUILDING MATERIAL =======
-const buildingMats = [
-  new THREE.MeshLambertMaterial({ color: 0x9a7acc }),
-  new THREE.MeshLambertMaterial({ color: 0x8a6ab8 }),
-  new THREE.MeshLambertMaterial({ color: 0xaa80d8 }),
-  new THREE.MeshLambertMaterial({ color: 0x9880c8 }),
-];
-const roofMat = new THREE.MeshLambertMaterial({ color: 0x5030a0 });
+// スタイル不明のOSM建物の壁色(現実モード=幻想紫のまま。窓はファサードテクスチャで表現)
+const DEFAULT_WALLS = [0x9a7acc, 0x8a6ab8, 0xaa80d8, 0x9880c8];
 
 // マテリアルキャッシュ — 建物ごとに new していたのを同色で共有し、
 // チャンク生成でマテリアルが無限増殖するのを防ぐ
@@ -392,18 +481,342 @@ function addDecorLight(color, intensity, range, x, y, z) {
   l.position.set(x, y, z);
   scene.add(l);
 }
-const windowMat = new THREE.MeshBasicMaterial({ color: 0xffee88, transparent: true, opacity: 0.85 });
+// 窓ガラスの個別メッシュは廃止 — 窓はファサードテクスチャ+emissiveMapに焼き込む(下記 facadeMat)
 const glowMat  = new THREE.MeshBasicMaterial({ color: 0x8040ff, transparent: true, opacity: 0.3, side: THREE.DoubleSide });
 
 // 特徴建物用の共有マテリアル
 const STOREFRONT_MAT = new THREE.MeshBasicMaterial({ color: 0xfff6cc }); // コンビニ等の明るい店構え
 const SIGN_BAND_MATS = [0xe83020, 0x2255dd, 0x11a04a, 0xff8800].map(c => new THREE.MeshBasicMaterial({ color: c }));
 const YARD_MAT = new THREE.MeshLambertMaterial({ color: 0xb89868 }); // 校庭の土
-const HOUSE_PALETTE = [ // 手続き生成住宅の色バリエーション
+const HOUSE_PALETTE = [ // 手続き生成住宅の色バリエーション(現実モード用。他モードは addBuilding 内で置換)
   { w: 0xd8cdb8, r: 0x555a66 }, { w: 0xe8e0d0, r: 0x7a4a3a },
   { w: 0xc8b898, r: 0x4a5a3a }, { w: 0xd0c0a0, r: 0x69463c },
   { w: 0xbfae94, r: 0x3f4c59 },
 ];
+// モード別の壁・屋根・発光パレット(lambertMatキャッシュを通すのでマテリアルは増殖しない)
+const EDO_WALLS    = [0xcfc0a0, 0x8a6a4a, 0xe8e0d0, 0x7a5a3a];
+const PASTEL_WALLS = [0xffc0cb, 0xb0e0ff, 0xfff0a0, 0xc8ffc0, 0xe0c0ff, 0xffd8b0];
+const PASTEL_ROOFS = [0xff6090, 0x40a0ff, 0xffa040, 0x9060ff];
+const SPACE_WALLS  = [0x9aa8b8, 0x7a8898, 0x5a6878, 0xa8b8c8];
+const NEON_MATS = [0x00ffee, 0xff00cc, 0x7788ff, 0x00ff88].map(c => new THREE.MeshBasicMaterial({ color: c }));
+const SPACE_GLASS = new THREE.MeshLambertMaterial({ color: 0x88ccff, transparent: true, opacity: 0.45, emissive: 0x113355 });
+const NOREN_MAT = new THREE.MeshBasicMaterial({ color: 0x2a3a7a, side: THREE.DoubleSide }); // 暖簾(藍)
+const CANDY_BAND_MATS = [0xffa0c0, 0xa0d8ff, 0xffe090].map(c => new THREE.MeshBasicMaterial({ color: c }));
+
+// ======= 手続き生成ファサード(Canvasテクスチャ) =======
+// 窓の列・サッシ・軒下の影・基礎の帯・ベランダ・1階の玄関などをテクスチャに焼き込み、
+// (種類×壁色×バリアント)ごとに1度だけ生成してキャッシュ共有する。
+// 窓明かりは emissiveMap に焼くため、旧実装の「窓1枚=1メッシュ」が丸ごと不要になった。
+// 種類: house=一戸建て(1枚絵) / apt=集合住宅(1マス=1フロア、ベランダ付き)
+//       office=ビル(1マス=1フロア) / ind=工場・倉庫(1マス=約8m)
+// 描画ルール: キャンバス左上12px四方には何も描かない
+// (BoxGeometryの天面/底面UVをこの無地部に向けるため。setBoxFacadeUVs 参照)
+const _hex6 = c => '#' + ('00000' + c.toString(16)).slice(-6);
+function shadeHex(c, f) {
+  const r = Math.min(255, ((c >> 16 & 255) * f) | 0),
+        g = Math.min(255, ((c >> 8 & 255) * f) | 0),
+        b = Math.min(255, ((c & 255) * f) | 0);
+  return r << 16 | g << 8 | b;
+}
+const _shadeCss = (c, f) => _hex6(shadeHex(c, f));
+const facadeCache = new Map();
+function facadeMat(kind, color, variant) {
+  const key = kind + '_' + color + '_' + variant;
+  const hit = facadeCache.get(key);
+  if (hit) return hit;
+  const S = 128;
+  const cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const g = cv.getContext('2d');
+  const ec = document.createElement('canvas'); ec.width = ec.height = S;
+  const e = ec.getContext('2d');
+  e.fillStyle = '#000'; e.fillRect(0, 0, S, S);
+  // 決定的乱数 — 同じキーは常に同じ絵(チャンク再生成でも見た目が揺れない)
+  let sd = 2166136261 ^ (variant * 977);
+  for (let i = 0; i < key.length; i++) sd = (sd ^ key.charCodeAt(i)) * 16777619 | 0;
+  const rnd = () => ((sd = (sd * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const wc = _hex6(MODE_CONF.windowC);
+
+  g.fillStyle = _hex6(color); g.fillRect(0, 0, S, S);
+  // 壁のむら・汚れ
+  for (let i = 0; i < 26; i++) {
+    g.fillStyle = rnd() < 0.5 ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.05)';
+    g.fillRect((rnd() * S) | 0, (14 + rnd() * (S - 18)) | 0, (2 + rnd() * 5) | 0, (2 + rnd() * 4) | 0);
+  }
+
+  // 窓1枚(枠+ガラス+中桟/格子+窓下の落ち影。lit なら emissive にも描く)
+  const win = (x, y, ww, wh, lit, opt) => {
+    opt = opt || {};
+    g.fillStyle = opt.frame || _shadeCss(color, 0.5);
+    g.fillRect(x - 2, y - 2, ww + 4, wh + 4);
+    g.fillStyle = lit ? wc : (opt.glass || '#25303e');
+    g.fillRect(x, y, ww, wh);
+    if (opt.grid) { // 障子・木格子
+      g.strokeStyle = opt.gridC || 'rgba(48,32,16,0.85)'; g.lineWidth = 1;
+      for (let vx = x + 6; vx < x + ww; vx += 7) { g.beginPath(); g.moveTo(vx, y); g.lineTo(vx, y + wh); g.stroke(); }
+      for (let hy = y + 8; hy < y + wh; hy += 9) { g.beginPath(); g.moveTo(x, hy); g.lineTo(x + ww, hy); g.stroke(); }
+    } else { // アルミサッシの中桟
+      g.fillStyle = 'rgba(200,205,210,0.7)';
+      g.fillRect(x + ww / 2 - 0.5, y, 1.5, wh);
+    }
+    g.fillStyle = 'rgba(0,0,0,0.25)'; g.fillRect(x - 2, y + wh + 2, ww + 4, 3);
+    if (lit) { e.fillStyle = wc; e.fillRect(x, y, ww, wh); }
+  };
+
+  if (MODE === 'space') {
+    // パネル目地+リベット+横一文字の窓+フロア境界の発光帯
+    g.strokeStyle = 'rgba(0,0,0,0.28)'; g.lineWidth = 1;
+    for (let p = 16; p < S; p += 24) {
+      g.beginPath(); g.moveTo(p, 13); g.lineTo(p, S); g.stroke();
+      g.beginPath(); g.moveTo(0, p + 4); g.lineTo(S, p + 4); g.stroke();
+    }
+    g.fillStyle = 'rgba(255,255,255,0.16)';
+    for (let p = 16; p < S; p += 24) for (let q = 20; q < S; q += 24) g.fillRect(p - 1, q + 3, 2, 2);
+    win(20, 36, 88, 22, rnd() < 0.65, { glass: '#0a141e', frame: _shadeCss(color, 0.4) });
+    if (variant === 1) {
+      win(28, 76, 30, 26, rnd() < 0.5, { glass: '#0a141e' });
+      win(72, 76, 30, 26, rnd() < 0.5, { glass: '#0a141e' });
+    }
+    g.fillStyle = wc; g.fillRect(0, S - 6, S, 2);
+    e.fillStyle = wc; e.fillRect(0, S - 6, S, 2);
+  } else if (MODE === 'edo' || IS_MEIJI) {
+    // 上=漆喰/土壁、下=下見板張り。窓は障子(温かい光)と木格子、1階に引き戸
+    const wood = IS_MEIJI ? _shadeCss(color, 0.72) : '#5a4630';
+    g.fillStyle = wood; g.fillRect(0, S * 0.55, S, S * 0.45);
+    g.strokeStyle = 'rgba(0,0,0,0.3)'; g.lineWidth = 1;
+    for (let y = S * 0.55 + 6; y < S; y += 7) { g.beginPath(); g.moveTo(0, y); g.lineTo(S, y); g.stroke(); }
+    const shoji = { grid: true, glass: '#8a8070', frame: '#403020', gridC: 'rgba(40,28,16,0.8)' };
+    win(14, 26, 40, 26, rnd() < (IS_MEIJI ? 0.4 : 0.65), shoji);
+    win(74, 26, 40, 26, rnd() < (IS_MEIJI ? 0.35 : 0.6), shoji);
+    win(14, 82, 44, 30, rnd() < 0.5, { grid: true, glass: '#4a4034', frame: '#332618' });
+    g.fillStyle = '#3a2c1c'; g.fillRect(72, 78, 42, 40); // 引き戸
+    g.fillStyle = '#8a7050';
+    for (let vx = 75; vx < 112; vx += 6) g.fillRect(vx, 80, 2, 36);
+  } else if (MODE === 'marchen') {
+    // スカラップの縁飾り+丸窓+花箱+丸屋根ドア
+    g.fillStyle = 'rgba(255,255,255,0.85)';
+    for (let sx2 = 20; sx2 < S; sx2 += 16) { g.beginPath(); g.arc(sx2, 14, 8, 0, Math.PI); g.fill(); }
+    const cute = (x, y, ww, wh, lit) => {
+      g.fillStyle = '#ffffff';
+      g.beginPath(); g.arc(x + ww / 2, y + ww / 2, ww / 2 + 3, Math.PI, 0);
+      g.rect(x - 3, y + ww / 2, ww + 6, wh - ww / 2 + 3); g.fill();
+      g.fillStyle = lit ? wc : '#9ac8e8';
+      g.beginPath(); g.arc(x + ww / 2, y + ww / 2, ww / 2, Math.PI, 0);
+      g.rect(x, y + ww / 2, ww, wh - ww / 2); g.fill();
+      if (lit) { e.fillStyle = wc; e.fillRect(x, y + 3, ww, wh - 3); }
+      g.fillStyle = '#6a9a4a'; g.fillRect(x - 2, y + wh + 2, ww + 4, 5); // 花箱
+      const fcols = ['#ff70a0', '#ffd050', '#ff5060'];
+      for (let fx = x + 2; fx < x + ww; fx += 7) { g.fillStyle = fcols[(fx | 0) % 3]; g.fillRect(fx, y + wh, 3, 3); }
+    };
+    cute(16, 30, 28, 34, rnd() < 0.55);
+    cute(84, 30, 28, 34, rnd() < 0.55);
+    if (kind === 'house') { // 丸屋根のドア(白縁+屋根色+金のノブ)
+      g.fillStyle = '#ffffff';
+      g.beginPath(); g.arc(64, 92, 17, Math.PI, 0); g.rect(47, 92, 34, 26); g.fill();
+      g.fillStyle = _hex6(PASTEL_ROOFS[variant % PASTEL_ROOFS.length]);
+      g.beginPath(); g.arc(64, 92, 13, Math.PI, 0); g.rect(51, 92, 26, 24); g.fill();
+      g.fillStyle = '#fff0a0'; g.beginPath(); g.arc(72, 102, 2, 0, 7); g.fill();
+    } else {
+      cute(50, 76, 28, 34, rnd() < 0.5);
+    }
+  } else if (kind === 'house') {
+    // ===== 現実: 一戸建て(2階窓・掃き出し窓・戸袋・玄関・幕板・基礎の帯) =====
+    const gr = g.createLinearGradient(0, 12, 0, 26); // 軒下の影
+    gr.addColorStop(0, 'rgba(0,0,0,0.22)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = gr; g.fillRect(0, 12, S, 14);
+    g.fillStyle = 'rgba(0,0,0,0.06)'; g.fillRect(0, 64, S, 64); // 1階をわずかに濃く
+    g.fillStyle = _shadeCss(color, 0.7); g.fillRect(0, 62, S, 3); // 幕板
+    g.fillStyle = '#7a7468'; g.fillRect(0, S - 10, S, 10); // 基礎
+    win(16, 26, 30, 24, rnd() < 0.5);
+    win(64, 26, 30, 24, rnd() < 0.5);
+    win(14, 76, 40, 34, rnd() < 0.6); // 掃き出し窓
+    g.fillStyle = _shadeCss(color, 0.62); g.fillRect(58, 74, 12, 38); // 雨戸戸袋
+    g.fillStyle = '#4a3828'; g.fillRect(82, 78, 24, 40); // 玄関
+    g.fillStyle = '#5f4a34'; g.fillRect(85, 81, 18, 34);
+    g.fillStyle = '#d8c890'; g.fillRect(100, 96, 2, 5);
+  } else if (kind === 'apt') {
+    // ===== 現実: 集合住宅(スラブ+窓+ベランダ手すり壁) =====
+    g.fillStyle = 'rgba(0,0,0,0.18)'; g.fillRect(0, 0, S, 4);
+    const gr = g.createLinearGradient(0, 4, 0, 18);
+    gr.addColorStop(0, 'rgba(0,0,0,0.14)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = gr; g.fillRect(0, 4, S, 14);
+    win(24, 30, 80, 44, rnd() < 0.45);
+    g.fillStyle = 'rgba(15,18,24,0.35)'; g.fillRect(10, 80, 108, 6); // ベランダ奥の影
+    g.fillStyle = _shadeCss(color, 0.82); g.fillRect(8, 86, 112, 30); // 手すり壁
+    g.fillStyle = _shadeCss(color, 0.66); g.fillRect(8, 86, 112, 3);  // 笠木
+    g.fillStyle = 'rgba(0,0,0,0.2)';
+    for (let vx = 14; vx < 118; vx += 13) g.fillRect(vx, 89, 2, 26);
+  } else if (kind === 'ind') {
+    // ===== 現実: 工場・倉庫(波板+ハイサイド窓+シャッター) =====
+    g.fillStyle = 'rgba(0,0,0,0.06)';
+    for (let vx = 0; vx < S; vx += 6) g.fillRect(vx, 13, 2, S - 13);
+    g.fillStyle = _shadeCss(color, 0.75); g.fillRect(0, S - 8, S, 8);
+    win(18, 22, 92, 16, rnd() < 0.25, { glass: '#1d242e' });
+    if (variant === 1) {
+      g.fillStyle = _shadeCss(color, 0.6); g.fillRect(40, 62, 48, 58); // シャッター
+      g.strokeStyle = 'rgba(255,255,255,0.1)'; g.lineWidth = 1;
+      for (let hy = 66; hy < 118; hy += 5) { g.beginPath(); g.moveTo(41, hy); g.lineTo(87, hy); g.stroke(); }
+    }
+  } else {
+    // ===== 現実: オフィスビル(スラブ+目地+窓2列+スパンドレル) =====
+    g.fillStyle = 'rgba(0,0,0,0.2)'; g.fillRect(0, 0, S, 4);
+    const gr = g.createLinearGradient(0, 4, 0, 16);
+    gr.addColorStop(0, 'rgba(0,0,0,0.12)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = gr; g.fillRect(0, 4, S, 12);
+    g.fillStyle = 'rgba(0,0,0,0.15)'; g.fillRect(0, 13, 2, S - 13); g.fillRect(S - 2, 13, 2, S - 13); // 目地
+    win(16, 34, 42, 56, rnd() < 0.45);
+    win(70, 34, 42, 56, rnd() < 0.45);
+    g.fillStyle = _shadeCss(color, 0.86); g.fillRect(10, 102, 108, 16); // スパンドレル
+  }
+
+  const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  const etex = new THREE.CanvasTexture(ec);
+  etex.wrapS = etex.wrapT = THREE.RepeatWrapping;
+  const emi = MODE === 'space' ? 1.2 : MODE === 'edo' ? 0.9 : IS_MEIJI ? 0.55 : 0.85;
+  const m = new THREE.MeshLambertMaterial({ map: tex, emissive: 0xffffff, emissiveMap: etex, emissiveIntensity: emi });
+  facadeCache.set(key, m);
+  return m;
+}
+
+// BoxGeometryのUVをファサードタイルの繰り返し数に張り替える。
+// テクスチャは RepeatWrapping なので、UV値をタイル数倍するだけで側面に窓が並ぶ。
+// 天面・底面はテクスチャ左上の「無地の壁」領域(描画ルールで確保済み)を指すよう縮小。
+function setBoxFacadeUVs(geo, colsX, colsZ, floors) {
+  const uv = geo.attributes.uv;
+  const face = (f, cu, cvv) => {
+    for (let i = 0; i < 4; i++) uv.setXY(f * 4 + i, uv.getX(f * 4 + i) * cu, uv.getY(f * 4 + i) * cvv);
+  };
+  face(0, colsZ, floors); face(1, colsZ, floors); // ±X面(奥行d方向の幅)
+  face(4, colsX, floors); face(5, colsX, floors); // ±Z面(幅w方向)
+  for (const f of [2, 3]) for (let i = 0; i < 4; i++)
+    uv.setXY(f * 4 + i, 0.02 + uv.getX(f * 4 + i) * 0.03, 0.92 + uv.getY(f * 4 + i) * 0.03);
+}
+
+// ======= 屋根ジオメトリ(単位サイズ・全建物で共有し scale で変形) =======
+// 旧実装は建物ごとに new ConeGeometry していた → 共有ジオメトリ+scaleでGPUメモリと生成コストを削減。
+// userData.shared=true はチャンクアンロード時に dispose しない印(下の updateChunks 参照)
+function _roofGeo(pos, uv) {
+  const gg = new THREE.BufferGeometry();
+  gg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  gg.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  gg.computeVertexNormals();
+  gg.userData.shared = true;
+  return gg;
+}
+const _RQ = (p, u, a, b, c, d) => { p.push(...a, ...b, ...c, ...a, ...c, ...d); u.push(0,0, 4,0, 4,1, 0,0, 4,1, 0,1); };
+const _RT = (p, u, a, b, c) => { p.push(...a, ...b, ...c); u.push(0,0, 1,0, 0.5,1); };
+const GABLE_GEO = (() => { // 切妻(棟=X軸方向)
+  const p = [], u = [];
+  _RQ(p, u, [0.5,0,-0.5], [-0.5,0,-0.5], [-0.5,1,0], [0.5,1,0]);
+  _RQ(p, u, [-0.5,0,0.5], [0.5,0,0.5], [0.5,1,0], [-0.5,1,0]);
+  _RT(p, u, [0.5,0,0.5], [0.5,0,-0.5], [0.5,1,0]);   // 妻壁
+  _RT(p, u, [-0.5,0,-0.5], [-0.5,0,0.5], [-0.5,1,0]);
+  _RQ(p, u, [-0.5,0,-0.5], [0.5,0,-0.5], [0.5,0,0.5], [-0.5,0,0.5]); // 軒裏
+  return _roofGeo(p, u);
+})();
+const HIP_GEO = (() => { // 寄棟(棟の長さ=幅の半分)
+  const p = [], u = [];
+  _RQ(p, u, [0.5,0,-0.5], [-0.5,0,-0.5], [-0.25,1,0], [0.25,1,0]);
+  _RQ(p, u, [-0.5,0,0.5], [0.5,0,0.5], [0.25,1,0], [-0.25,1,0]);
+  _RT(p, u, [0.5,0,0.5], [0.5,0,-0.5], [0.25,1,0]);
+  _RT(p, u, [-0.5,0,-0.5], [-0.5,0,0.5], [-0.25,1,0]);
+  _RQ(p, u, [-0.5,0,-0.5], [0.5,0,-0.5], [0.5,0,0.5], [-0.5,0,0.5]);
+  return _roofGeo(p, u);
+})();
+const SHED_GEO = (() => { // 片流れ(z-側が高い楔形。箱を傾けると出る側面の隙間が出ない)
+  const p = [], u = [];
+  _RQ(p, u, [-0.5,0,0.5], [0.5,0,0.5], [0.5,1,-0.5], [-0.5,1,-0.5]);
+  _RQ(p, u, [0.5,0,-0.5], [-0.5,0,-0.5], [-0.5,1,-0.5], [0.5,1,-0.5]);
+  _RT(p, u, [0.5,0,0.5], [0.5,0,-0.5], [0.5,1,-0.5]);
+  _RT(p, u, [-0.5,0,-0.5], [-0.5,0,0.5], [-0.5,1,-0.5]);
+  _RQ(p, u, [-0.5,0,-0.5], [0.5,0,-0.5], [0.5,0,0.5], [-0.5,0,0.5]);
+  return _roofGeo(p, u);
+})();
+const PARAPET_GEO = (() => { // 陸屋根のパラペット(4辺の立ち上がり壁を1ジオメトリに)
+  const p = [], u = [];
+  const q = (a, b, c, d) => { p.push(...a, ...b, ...c, ...a, ...c, ...d); u.push(0,0, 1,0, 1,1, 0,0, 1,1, 0,1); };
+  const box = (x0, y0, z0, x1, y1, z1) => {
+    q([x1,y0,z1], [x1,y0,z0], [x1,y1,z0], [x1,y1,z1]);
+    q([x0,y0,z0], [x0,y0,z1], [x0,y1,z1], [x0,y1,z0]);
+    q([x0,y1,z1], [x1,y1,z1], [x1,y1,z0], [x0,y1,z0]);
+    q([x0,y0,z1], [x1,y0,z1], [x1,y1,z1], [x0,y1,z1]);
+    q([x1,y0,z0], [x0,y0,z0], [x0,y1,z0], [x1,y1,z0]);
+  };
+  box(-0.5, 0, -0.5, 0.5, 1, -0.47);
+  box(-0.5, 0, 0.47, 0.5, 1, 0.5);
+  box(-0.5, 0, -0.47, -0.47, 1, 0.47);
+  box(0.47, 0, -0.47, 0.5, 1, 0.47);
+  return _roofGeo(p, u);
+})();
+
+// 屋根表面のテクスチャ(グレースケールで描き、マテリアル色で着色 → 1テクスチャを全色で共有)
+const ROOF_TEXS = {};
+function roofTex(kindT) {
+  if (ROOF_TEXS[kindT]) return ROOF_TEXS[kindT];
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d');
+  if (kindT === 'tile') { // 瓦の横段+縦の継ぎ目
+    g.fillStyle = '#c4c4c4'; g.fillRect(0, 0, 64, 64);
+    for (let y = 0; y < 64; y += 8) {
+      g.fillStyle = '#888888'; g.fillRect(0, y + 6, 64, 2);
+      g.fillStyle = '#adadad';
+      for (let x = ((y / 8) % 2) * 8; x < 64; x += 16) g.fillRect(x, y + 1, 1, 5);
+    }
+  } else if (kindT === 'thatch') { // 茅葺きの縦筋+刈り込みの段
+    g.fillStyle = '#b8b8b8'; g.fillRect(0, 0, 64, 64);
+    for (let i = 0; i < 240; i++) {
+      g.fillStyle = Math.random() < 0.5 ? 'rgba(70,70,70,0.25)' : 'rgba(230,230,230,0.2)';
+      g.fillRect((Math.random() * 64) | 0, (Math.random() * 64) | 0, 1, (3 + Math.random() * 6) | 0);
+    }
+    g.fillStyle = 'rgba(60,60,60,0.25)';
+    for (let y = 14; y < 64; y += 16) g.fillRect(0, y, 64, 2);
+  } else { // stripe: メルヘンのしま屋根
+    g.fillStyle = '#ffffff'; g.fillRect(0, 0, 64, 64);
+    g.fillStyle = '#c8c8c8';
+    for (let x = 0; x < 64; x += 16) g.fillRect(x, 0, 8, 64);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  ROOF_TEXS[kindT] = t;
+  return t;
+}
+const roofMatCache = new Map();
+function roofSurfMat(color, kindT) {
+  const key = (kindT || 'plain') + '_' + color;
+  let m = roofMatCache.get(key);
+  if (!m) {
+    m = new THREE.MeshLambertMaterial(kindT ? { color, map: roofTex(kindT) } : { color });
+    roofMatCache.set(key, m);
+  }
+  return m;
+}
+
+// ======= 建物ディテール用の共有ジオメトリ・マテリアル =======
+const UNIT_BOX = new THREE.BoxGeometry(1, 1, 1);
+const UNIT_CYL = new THREE.CylinderGeometry(0.5, 0.5, 1, 8);
+const UNIT_CONE4 = new THREE.ConeGeometry(0.5, 1, 4);
+const UNIT_CONE8 = new THREE.ConeGeometry(0.5, 1, 8);
+const UNIT_DOME = new THREE.SphereGeometry(0.5, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2);
+const UNIT_SPH = new THREE.SphereGeometry(0.5, 8, 8);
+const UNIT_PLANE = new THREE.PlaneGeometry(1, 1);
+[UNIT_BOX, UNIT_CYL, UNIT_CONE4, UNIT_CONE8, UNIT_DOME, UNIT_SPH, UNIT_PLANE].forEach(gg => gg.userData.shared = true);
+function detailMesh(geo, mat, x, y, z, sx, sy, sz, ry) {
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(x, y, z);
+  m.scale.set(sx, sy, sz);
+  if (ry) m.rotation.y = ry;
+  m.renderOrder = 2;
+  scene.add(m);
+  return m;
+}
+// 追加ディテール(玄関庇・屋上設備等)は建物が多い時は自動で省略(ドローコール抑制。
+// minimapBuildings はチャンクアンロードで減るため自動的に釣り合う)
+const detailOK = () => minimapBuildings.length < 700;
+const ROOF_COLS = [0x555a66, 0x7a4a3a, 0x4a5a3a, 0x69463c, 0x3f4c59, 0x8a4038]; // 住宅屋根の色バリエーション
+const ENTRANCE_MAT = new THREE.MeshBasicMaterial({ color: 0x1a2430 }); // ビル1階の玄関ガラス
+const TANK_MAT = new THREE.MeshLambertMaterial({ color: 0xd8d4c8 });   // 屋上貯水槽
+const AC_MAT = new THREE.MeshLambertMaterial({ color: 0xb8bcc0 });     // 室外機
+const CROSS_MAT = new THREE.MeshBasicMaterial({ color: 0xff0000 });    // 病院の十字
 
 // ======= 小物インスタンシング基盤 =======
 // 電柱・木・自販機・ガードレール等は種類ごとに1つの InstancedMesh(=1ドローコール)。
@@ -432,16 +845,52 @@ function poolAdd(pool, x, y, z, ry, sx, sy, sz, color) {
   pool.mesh.instanceMatrix.needsUpdate = true;
   if (pool.mesh.instanceColor) pool.mesh.instanceColor.needsUpdate = true;
 }
-const poleP      = makePool(new THREE.CylinderGeometry(0.11, 0.16, 8, 6), new THREE.MeshLambertMaterial({ color: 0x776a5c }), 3000);
-const treeTrunkP = makePool(new THREE.CylinderGeometry(0.14, 0.24, 1.6, 5), new THREE.MeshLambertMaterial({ color: 0x5a4028 }), 3500);
-const treeTopP   = makePool(new THREE.SphereGeometry(1.3, 6, 5), new THREE.MeshLambertMaterial({ color: 0xffffff }), 3500);
-const vendP      = makePool(new THREE.BoxGeometry(1.0, 1.8, 0.75), new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x555544 }), 400);
+// プールのジオメトリ・マテリアルはモードで決める(生成ロジック側は共通)
+// 電柱: 江戸=木柱(行灯付き) / メルヘン=ピンクのキャンディ街灯 / 宇宙=発光エネルギーポール
+const poleP = makePool(new THREE.CylinderGeometry(0.11, 0.16, 8, 6),
+  MODE === 'edo'     ? new THREE.MeshLambertMaterial({ color: 0x6a4a2a }) :
+  MODE === 'marchen' ? new THREE.MeshLambertMaterial({ color: 0xff9bb8 }) :
+  MODE === 'space'   ? new THREE.MeshLambertMaterial({ color: 0x223344, emissive: 0x2266ff, emissiveIntensity: 0.9 }) :
+                       new THREE.MeshLambertMaterial({ color: 0x776a5c }), 3000);
+const TREE_MAX = IS_MEIJI ? 5000 : 3500; // 明治は里山・並木で木が主役
+const treeTrunkP = makePool(new THREE.CylinderGeometry(0.14, 0.24, 1.6, 5), new THREE.MeshLambertMaterial({ color: 0x5a4028 }), TREE_MAX);
+// 木: 宇宙モードはクリスタル(円錐・半透明発光)
+const treeTopP = makePool(
+  MODE === 'space' ? new THREE.ConeGeometry(0.9, 2.6, 5) : new THREE.SphereGeometry(1.3, 6, 5),
+  MODE === 'space' ? new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, emissive: 0x224466 })
+                   : new THREE.MeshLambertMaterial({ color: 0xffffff }), TREE_MAX);
+// 自販機: 江戸=樽/井戸(木の円筒) / 宇宙=発光キオスク
+const vendP = makePool(
+  MODE === 'edo' ? new THREE.CylinderGeometry(0.55, 0.65, 1.2, 8) : new THREE.BoxGeometry(1.0, 1.8, 0.75),
+  MODE === 'edo'   ? new THREE.MeshLambertMaterial({ color: 0xffffff }) :
+  MODE === 'space' ? new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x226688 }) :
+                     new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x555544 }), 400);
 const guardP     = makePool(new THREE.BoxGeometry(1, 0.32, 0.12), new THREE.MeshLambertMaterial({ color: 0xffffff }), 2500);
 const benchP     = makePool(new THREE.BoxGeometry(1.7, 0.4, 0.55), new THREE.MeshLambertMaterial({ color: 0x8a6a40 }), 400);
-const signBoardP = makePool(new THREE.BoxGeometry(1.0, 0.75, 0.06), new THREE.MeshLambertMaterial({ color: 0x2255cc, emissive: 0x112244 }), 400);
-const lampP      = makePool(new THREE.BoxGeometry(0.3, 0.3, 0.3), new THREE.MeshBasicMaterial({ color: 0xffffff }), 700); // 信号灯・街灯(色instance指定)
-const signalP    = makePool(new THREE.BoxGeometry(1.1, 0.38, 0.35), new THREE.MeshLambertMaterial({ color: 0x333338 }), 300);
-const TREE_GREENS = [0x2e6b2e, 0x3a7a33, 0x27632f];
+// 標識: 江戸=高札(木板) / 宇宙=ネオンパネル
+const signBoardP = makePool(new THREE.BoxGeometry(1.0, 0.75, 0.06),
+  MODE === 'edo'   ? new THREE.MeshLambertMaterial({ color: 0x8a6a4a }) :
+  MODE === 'space' ? new THREE.MeshBasicMaterial({ color: 0x22ddff }) :
+  MODE === 'marchen' ? new THREE.MeshLambertMaterial({ color: 0xff88bb }) :
+                     new THREE.MeshLambertMaterial({ color: 0x2255cc, emissive: 0x112244 }), 400);
+// 行灯/キャンディ玉を全電柱に付けるモードは上限を拡大
+const POLE_ORB = MODE === 'edo' ? 0xffb050 : MODE === 'marchen' ? 0xffe080 : null;
+const lampP      = makePool(new THREE.BoxGeometry(0.3, 0.3, 0.3), new THREE.MeshBasicMaterial({ color: 0xffffff }), POLE_ORB ? 3500 : 700);
+// 明治では signalP を道祖神(石)として使う
+const signalP    = makePool(
+  IS_MEIJI ? new THREE.BoxGeometry(0.6, 0.9, 0.45) : new THREE.BoxGeometry(1.1, 0.38, 0.35),
+  IS_MEIJI ? new THREE.MeshLambertMaterial({ color: 0x8a8a82 }) : new THREE.MeshLambertMaterial({ color: 0x333338 }), IS_MEIJI ? 600 : 300);
+const TREE_GREENS = MODE === 'marchen' ? [0x7be3a0, 0xffb0d0, 0xa0e8ff]
+                  : MODE === 'space'   ? [0x66eeff, 0xbb88ff, 0x66ffbb]
+                  : [0x2e6b2e, 0x3a7a33, 0x27632f];
+// 道路小物のモード別ふるまい
+const PROP_WIRES   = MODE === 'real';                 // 電線は現実のみ
+const PROP_SIGNALS = MODE !== 'edo';                  // 江戸に信号はない
+const PROP_GUARD_C = MODE === 'edo' ? 0x8a6a48 : MODE === 'marchen' ? 0xffc8d8 : MODE === 'space' ? 0x2288ff : 0xf0f0f0; // 江戸=木柵
+const PROP_VEND_COLORS = MODE === 'edo' ? [0x7a5a38, 0x6a4a2a, 0x8a6a48]
+                       : MODE === 'space' ? [0x22ccff, 0xff44cc, 0x66ffcc]
+                       : [0xff4444, 0x4488ff, 0xffffff];
+const PROP_VEND_Y = MODE === 'edo' ? 0.6 : 0.9;
 
 // 電線 — プリアロケートした単一 LineSegments に追記(1ドローコール)
 const WIRE_MAX = 6000; // 線分数上限
@@ -465,8 +914,15 @@ function addWireSeg(x1, y1, z1, x2, y2, z2) {
 
 function addTree(x, z, s) {
   const gy = getGroundY(x, z);
+  if (MODE === 'space') { // クリスタルオブジェ(幹なし)
+    poolAdd(treeTopP, x, gy + 1.3 * s, z, Math.random() * 3, s, s * (1.1 + Math.random() * 0.6), s,
+            TREE_GREENS[(Math.random() * 3) | 0]);
+    return;
+  }
   poolAdd(treeTrunkP, x, gy + 0.8 * s, z, 0, s, s, s);
-  poolAdd(treeTopP, x, gy + 2.3 * s, z, Math.random() * 3, s, s * (0.9 + Math.random() * 0.5), s,
+  const round = MODE === 'marchen'; // メルヘンは丸っこく
+  poolAdd(treeTopP, x, gy + 2.3 * s, z, Math.random() * 3,
+          s * (round ? 1.3 : 1), s * (round ? 0.95 : 0.9 + Math.random() * 0.5), s * (round ? 1.3 : 1),
           TREE_GREENS[(Math.random() * 3) | 0]);
 }
 
@@ -524,108 +980,174 @@ function addBuilding(x, z, w, d, h, style) {
   const gy = Math.min(...hs);   // 基礎 = 最低点
   h += Math.max(...hs) - gy;    // 斜面の高低差ぶん建物を延長して埋まりを防ぐ
 
-  // Body material — use style color or random purple
-  let mat;
-  if (style && style.color != null) {
-    mat = lambertMat(style.color, style.emissive || 0x000000);
+  const type = style ? style.type : 'default';
+  const floors = Math.max(1, Math.round(h / 3)); // building:levels は h に反映済み → 窓の段数に逆算
+  const minWD = Math.min(w, d), maxWD = Math.max(w, d);
+
+  // ---- 壁色(モード別パレット。lambertMat/facadeMat キャッシュを通すので増殖しない) ----
+  let isMushroom = false;
+  let wallC;
+  if (MODE === 'edo' && type !== 'shrine' && type !== 'temple') {
+    wallC = EDO_WALLS[(Math.random() * EDO_WALLS.length) | 0]; // 木造・土壁
+  } else if (MODE === 'marchen') {
+    isMushroom = maxWD < 11 && Math.random() < 0.3; // 小さい家はたまにキノコ
+    wallC = isMushroom ? 0xf0e8d8 : PASTEL_WALLS[(Math.random() * PASTEL_WALLS.length) | 0];
+  } else if (MODE === 'space') {
+    wallC = SPACE_WALLS[(Math.random() * SPACE_WALLS.length) | 0]; // 金属
+  } else if (style && style.color != null) {
+    wallC = style.color;
   } else {
-    mat = buildingMats[Math.floor(Math.random()*buildingMats.length)];
+    wallC = DEFAULT_WALLS[(Math.random() * DEFAULT_WALLS.length) | 0];
   }
-  const geo = new THREE.BoxGeometry(w, h, d);
+
+  // ---- ファサード種別(手続きテクスチャ。神社仏閣・教会・キノコは従来の無地) ----
+  const kind =
+    (isMushroom || type === 'shrine' || type === 'temple' || type === 'church') ? null :
+    type === 'industrial' ? 'ind' :
+    (floors <= 2 && (type === 'house' || type === 'default' || type === 'shop')) ? 'house' :
+    (type === 'house' || type === 'apartment') ? 'apt' : 'office';
+  const mat = kind
+    ? facadeMat(kind, wallC, (Math.random() * 2) | 0)
+    : lambertMat(wallC, (style && style.emissive) || (MODE === 'space' ? 0x0a1420 : 0));
+
+  const geo = isMushroom
+    ? new THREE.CylinderGeometry(minWD * 0.42, minWD * 0.5, h, 10)
+    : new THREE.BoxGeometry(w, h, d);
+  if (kind) { // 側面に窓タイルを並べ、天面/底面は無地領域へ
+    const tw = kind === 'ind' ? 8 : 3.6; // 1タイルの実幅
+    setBoxFacadeUVs(geo,
+      kind === 'house' ? 1 : Math.max(1, Math.round(w / tw)),
+      kind === 'house' ? 1 : Math.max(1, Math.round(d / tw)),
+      kind === 'house' ? 1 : floors);
+  }
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(x, gy + h/2, z);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
   mesh.renderOrder = 2;
   scene.add(mesh);
 
-  // Roof — shape & color varies by type
-  const type = style ? style.type : 'default';
-  const roofC = (style && style.roofColor) ? style.roofColor : 0x5030a0;
-  const rm = lambertMat(roofC);
+  // ==== 屋根 — 切妻・寄棟・片流れ・陸屋根+パラペットをモード/種別/高さで出し分け ====
+  let roofC = MODE === 'edo' ? 0x3a4450 /* 瓦 */ : (style && style.roofColor) ? style.roofColor : 0x5030a0;
+  if (MODE === 'real' && type === 'house' && Math.random() < 0.6)
+    roofC = ROOF_COLS[(Math.random() * ROOF_COLS.length) | 0]; // 住宅は屋根色もばらす
+  const rm = roofSurfMat(roofC, null);
+  const rtype = MODE === 'marchen' ? '_marchen'
+              : MODE === 'space' ? '_space'
+              : (IS_MEIJI && type !== 'shrine' && type !== 'temple') ? '_meiji'
+              : (MODE === 'edo' && type !== 'shrine' && type !== 'temple') ? '_edo' : type;
 
-  if (type === 'shrine') {
+  // 勾配屋根を載せる(長辺方向に棟を向け、ov=軒の張り出し)
+  const pitched = (geoR, rh, ov, matR) => {
+    const m2 = new THREE.Mesh(geoR, matR);
+    if (d > w) { m2.rotation.y = Math.PI / 2; m2.scale.set(d + ov, rh, w + ov); }
+    else m2.scale.set(w + ov, rh, d + ov);
+    m2.position.set(x, gy + h - 0.02, z);
+    m2.renderOrder = 2;
+    scene.add(m2);
+  };
+
+  if (rtype === '_meiji') {
+    // 茅葺き: 軒の深い分厚い寄棟(茅の縦筋テクスチャ)
+    pitched(HIP_GEO, Math.max(2.6, h * 0.85), minWD * 0.55, roofSurfMat(0x8a7050, 'thatch'));
+  } else if (rtype === '_edo') {
+    // 瓦: 切妻と寄棟を混在(瓦テクスチャ+深い軒)
+    pitched(Math.random() < 0.5 ? GABLE_GEO : HIP_GEO,
+            Math.min(3.2, Math.max(1.4, minWD * 0.42)), 1.8, roofSurfMat(0x3a4450, 'tile'));
+  } else if (rtype === '_marchen') {
+    if (isMushroom) { // キノコの傘
+      detailMesh(UNIT_SPH, lambertMat(0xff5060), x, gy + h + minWD * 0.12, z,
+                 minWD * 1.6, minWD * 0.88, minWD * 1.6);
+    } else { // しま模様のとんがり屋根+たまに煙突
+      detailMesh(UNIT_CONE8, roofSurfMat(PASTEL_ROOFS[(Math.random() * PASTEL_ROOFS.length) | 0], 'stripe'),
+                 x, gy + h + h * 0.42, z, maxWD * 1.36, h * 0.85, maxWD * 1.36);
+      if (detailOK() && Math.random() < 0.3)
+        detailMesh(UNIT_BOX, lambertMat(0xb06050), x + w * 0.22, gy + h + 0.9, z, 0.8, 1.8, 0.8);
+    }
+  } else if (rtype === '_space') {
+    // パラペット+ガラスドーム+ネオン帯(+たまに発光アンテナ)
+    detailMesh(PARAPET_GEO, lambertMat(shadeHex(wallC, 0.7)), x, gy + h, z, w + 0.2, 0.7, d + 0.2);
+    const dome = detailMesh(UNIT_DOME, SPACE_GLASS, x, gy + h, z, minWD * 1.1, minWD * 1.1, minWD * 1.1);
+    dome.renderOrder = 3;
+    detailMesh(UNIT_BOX, NEON_MATS[(Math.random() * NEON_MATS.length) | 0],
+               x, gy + h - 0.25, z, w * 1.02, 0.22, d * 1.02);
+    if (detailOK() && Math.random() < 0.3)
+      detailMesh(UNIT_CYL, lambertMat(0x223344, 0x2266ff), x + w * 0.2, gy + h + 1.6, z - d * 0.15, 0.12, 3.2, 0.12);
+  } else if (rtype === 'shrine') {
     // Pagoda-style double roof
-    const r1 = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w,d)*0.8, h*0.4, 4), rm);
-    r1.position.set(x, gy+h+h*0.2, z); r1.rotation.y = Math.PI/4; r1.renderOrder=2; scene.add(r1);
-    const r2 = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w,d)*0.5, h*0.25, 4), rm);
-    r2.position.set(x, gy+h+h*0.55, z); r2.rotation.y = Math.PI/4; r2.renderOrder=2; scene.add(r2);
+    detailMesh(UNIT_CONE4, rm, x, gy + h + h * 0.2, z, maxWD * 1.6, h * 0.4, maxWD * 1.6, Math.PI / 4);
+    detailMesh(UNIT_CONE4, rm, x, gy + h + h * 0.55, z, maxWD, h * 0.25, maxWD, Math.PI / 4);
     // Torii gate in front
     const tMat = lambertMat(0xdd2200);
-    const pillarH = Math.min(h*0.8, 8);
-    const pr = 0.3;
-    [-1.5,1.5].forEach(ox => {
-      const p = new THREE.Mesh(new THREE.CylinderGeometry(pr,pr,pillarH,6), tMat);
-      p.position.set(x+ox, gy+pillarH/2, z+d/2+2); p.renderOrder=2; scene.add(p);
-    });
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(4.5,0.5,0.5), tMat);
-    bar.position.set(x, gy+pillarH-0.5, z+d/2+2); bar.renderOrder=2; scene.add(bar);
-    const bar2 = new THREE.Mesh(new THREE.BoxGeometry(3.8,0.4,0.4), tMat);
-    bar2.position.set(x, gy+pillarH-1.5, z+d/2+2); bar2.renderOrder=2; scene.add(bar2);
-  } else if (type === 'temple') {
-    // Wide curved roof
-    const r1 = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w,d)*0.9, h*0.3, 8), rm);
-    r1.position.set(x, gy+h+h*0.15, z); r1.renderOrder=2; scene.add(r1);
-    // Bell tower hint
-    const bellMat = lambertMat(0x4a3010);
-    const bell = new THREE.Mesh(new THREE.CylinderGeometry(0.8,1.0,h*0.6,8), bellMat);
-    bell.position.set(x+w/2+2, gy+h*0.3, z); bell.renderOrder=2; scene.add(bell);
-  } else if (type === 'hospital') {
-    // Flat roof + red cross
-    const r1 = new THREE.Mesh(new THREE.BoxGeometry(w+0.5, 0.5, d+0.5), rm);
-    r1.position.set(x, gy+h+0.25, z); r1.renderOrder=2; scene.add(r1);
-    const crossMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-    const cH = new THREE.Mesh(new THREE.BoxGeometry(3, 0.4, 1), crossMat);
-    cH.position.set(x, gy+h+0.7, z); cH.renderOrder=2; scene.add(cH);
-    const cV = new THREE.Mesh(new THREE.BoxGeometry(1, 0.4, 3), crossMat);
-    cV.position.set(x, gy+h+0.7, z); cV.renderOrder=2; scene.add(cV);
-  } else if (type === 'school') {
-    // Hip roof, wide
-    const r1 = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w,d)*0.7, h*0.2, 4), rm);
-    r1.position.set(x, gy+h+h*0.1, z); r1.rotation.y=Math.PI/4; r1.renderOrder=2; scene.add(r1);
-  } else if (type === 'government') {
-    // Dome
-    const r1 = new THREE.Mesh(new THREE.SphereGeometry(Math.min(w,d)*0.4,8,6,0,Math.PI*2,0,Math.PI/2), rm);
-    r1.position.set(x, gy+h, z); r1.renderOrder=2; scene.add(r1);
+    const pillarH = Math.min(h * 0.8, 8);
+    [-1.5, 1.5].forEach(ox =>
+      detailMesh(UNIT_CYL, tMat, x + ox, gy + pillarH / 2, z + d / 2 + 2, 0.6, pillarH, 0.6));
+    detailMesh(UNIT_BOX, tMat, x, gy + pillarH - 0.5, z + d / 2 + 2, 4.5, 0.5, 0.5);
+    detailMesh(UNIT_BOX, tMat, x, gy + pillarH - 1.5, z + d / 2 + 2, 3.8, 0.4, 0.4);
+  } else if (rtype === 'temple') {
+    // Wide curved roof + bell tower hint
+    detailMesh(UNIT_CONE8, rm, x, gy + h + h * 0.15, z, maxWD * 1.8, h * 0.3, maxWD * 1.8);
+    detailMesh(UNIT_CYL, lambertMat(0x4a3010), x + w / 2 + 2, gy + h * 0.3, z, 1.9, h * 0.6, 1.9);
+  } else if (rtype === 'hospital') {
+    // 陸屋根+パラペット+赤十字
+    detailMesh(PARAPET_GEO, rm, x, gy + h, z, w + 0.5, 0.8, d + 0.5);
+    detailMesh(UNIT_BOX, CROSS_MAT, x, gy + h + 0.7, z, 3, 0.4, 1);
+    detailMesh(UNIT_BOX, CROSS_MAT, x, gy + h + 0.7, z, 1, 0.4, 3);
+  } else if (rtype === 'school') {
+    pitched(HIP_GEO, Math.max(1.4, minWD * 0.22), 1.6, rm); // 幅広の寄棟
+  } else if (rtype === 'government') {
+    detailMesh(UNIT_DOME, rm, x, gy + h, z, minWD * 0.8, minWD * 0.8, minWD * 0.8); // Dome
   } else {
-    // Default cone roof
-    const roof = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w,d)*0.75, h*0.3, 4), rm);
-    roof.position.set(x, gy+h+h*0.15, z); roof.rotation.y=Math.PI/4; roof.renderOrder=2; scene.add(roof);
+    // 一般建物(現実モード)
+    const isFlat = h >= 10 || (type === 'apartment' && h >= 7) || (type === 'industrial' && h >= 8);
+    if (isFlat) {
+      // 陸屋根+パラペット+屋上設備(貯水槽・室外機・アンテナ)
+      detailMesh(PARAPET_GEO, lambertMat(shadeHex(wallC, 0.8)), x, gy + h, z, w + 0.3, 0.9, d + 0.3);
+      if (detailOK()) {
+        if (Math.random() < 0.6)
+          detailMesh(UNIT_CYL, TANK_MAT, x + w * 0.22, gy + h + 1.2, z + d * 0.18, 2.2, 2.4, 2.2);
+        if (Math.random() < 0.7)
+          detailMesh(UNIT_BOX, AC_MAT, x - w * 0.2, gy + h + 0.5, z - d * 0.15, 1.8, 1.0, 1.2, Math.random() * 3);
+        if (Math.random() < 0.35)
+          detailMesh(UNIT_CYL, lambertMat(0x888888), x - w * 0.05, gy + h + 2, z + d * 0.2, 0.1, 4, 0.1);
+      }
+    } else {
+      // 勾配屋根: 切妻50% / 寄棟35% / 片流れ15%(工場・倉庫は片流れ)。住宅は瓦テクスチャ
+      const r = Math.random();
+      const geoR = type === 'industrial' ? SHED_GEO : r < 0.5 ? GABLE_GEO : r < 0.85 ? HIP_GEO : SHED_GEO;
+      const rM = roofSurfMat(roofC, MODE === 'real' && type === 'house' ? 'tile' : null);
+      pitched(geoR, geoR === SHED_GEO ? Math.max(0.8, minWD * 0.18)
+                                      : Math.min(4.2, Math.max(1.5, minWD * 0.38)), 1.0, rM);
+      // 玄関庇(住宅のみ)
+      if (type === 'house' && detailOK() && Math.random() < 0.5)
+        detailMesh(UNIT_BOX, roofSurfMat(roofC, null), x + w * 0.22, gy + 2.35, z + d / 2 + 0.5, 2.2, 0.16, 1.1);
+    }
   }
 
-  // コンビニ・商店: 明るい店構え+色付き看板帯で夜でも判別しやすく(共有マテリアル2メッシュのみ)
+  // エントランス(中高層ビルの1階の玄関ガラス)
+  if ((kind === 'office' || kind === 'apt') && h >= 9 && MODE !== 'edo' && !IS_MEIJI &&
+      detailOK() && Math.random() < 0.5) {
+    detailMesh(UNIT_PLANE, ENTRANCE_MAT, x, gy + 1.4, z + d / 2 + 0.06, 3.0, 2.8, 1);
+  }
+
+  // コンビニ・商店のモード別演出(共有マテリアル、追加は最大2メッシュ+提灯インスタンス)
   if (type === 'shop' && h <= 12) {
-    const front = new THREE.Mesh(new THREE.PlaneGeometry(Math.min(w * 0.85, 10), 1.6), STOREFRONT_MAT);
-    front.position.set(x, gy + 1.1, z + d / 2 + 0.06);
-    front.renderOrder = 2;
-    scene.add(front);
-    const band = new THREE.Mesh(new THREE.BoxGeometry(Math.min(w, 12) * 0.95, 0.7, 0.25),
-      SIGN_BAND_MATS[(Math.random() * SIGN_BAND_MATS.length) | 0]);
-    band.position.set(x, gy + 2.4, z + d / 2 + 0.2);
-    band.renderOrder = 2;
-    scene.add(band);
+    if (MODE === 'edo') {
+      // 茶屋: 暖簾+提灯
+      detailMesh(UNIT_PLANE, NOREN_MAT, x, gy + 1.7, z + d / 2 + 0.08, Math.min(w * 0.7, 6), 1.1, 1);
+      poolAdd(lampP, x - Math.min(w, 8) * 0.35, gy + 2.2, z + d / 2 + 0.4, 0, 0.9, 1.2, 0.9, 0xff8830);
+      poolAdd(lampP, x + Math.min(w, 8) * 0.35, gy + 2.2, z + d / 2 + 0.4, 0, 0.9, 1.2, 0.9, 0xff8830);
+    } else {
+      const bandMats = MODE === 'space' ? NEON_MATS : MODE === 'marchen' ? CANDY_BAND_MATS : SIGN_BAND_MATS;
+      detailMesh(UNIT_PLANE, STOREFRONT_MAT, x, gy + 1.1, z + d / 2 + 0.06, Math.min(w * 0.85, 10), 1.6, 1);
+      detailMesh(UNIT_BOX, bandMats[(Math.random() * bandMats.length) | 0],
+                 x, gy + 2.4, z + d / 2 + 0.2, Math.min(w, 12) * 0.95, 0.7, 0.25);
+    }
   } else if (type === 'school') {
     // 校庭(土色の広場)
-    const yard = new THREE.Mesh(new THREE.PlaneGeometry(w + 18, d + 18), YARD_MAT);
+    const yard = detailMesh(UNIT_PLANE, YARD_MAT, x, gy + 0.12, z, w + 18, d + 18, 1);
     yard.rotation.x = -Math.PI / 2;
-    yard.position.set(x, gy + 0.12, z);
-    scene.add(yard);
   }
 
-  // Windows (random) — 窓は1枚ごとに1ドローコール。最大2段・35%出現に抑え、
-  // 建物が450棟を超えたら以降は省略(ドローコール爆発の防止)
-  const numW = minimapBuildings.length < 450 ? Math.min(2, Math.floor(h / 3)) : 0;
-  for (let lv = 0; lv < numW; lv++) {
-    const wy = gy + (lv+1) * (h / (numW+1));
-    [[w/2+0.01,0,'x'],[-(w/2+0.01),0,'x'],[0,d/2+0.01,'z'],[0,-(d/2+0.01),'z']].forEach(([ox,oz,ax]) => {
-      if (Math.random() > 0.35) return;
-      const wm = new THREE.Mesh(new THREE.PlaneGeometry(0.35,0.5), windowMat);
-      wm.position.set(x+ox, wy, z+oz);
-      if (ax==='x') wm.rotation.y = ox>0 ? 0 : Math.PI;
-      else           wm.rotation.y = oz>0 ? Math.PI/2 : -Math.PI/2;
-      scene.add(wm);
-    });
-  }
+  // (旧: 窓プレーン生成はファサードテクスチャの emissiveMap に置換され削除)
 
   // Special glow for shrines/temples
   if (type === 'shrine') {
@@ -633,8 +1155,7 @@ function addBuilding(x, z, w, d, h, style) {
   } else if (type === 'temple') {
     addDecorLight(0xffaa00, 1.2, 25, x, gy+h*0.8, z);
   } else if (Math.random() < 0.06) {
-    const aura = new THREE.Mesh(new THREE.SphereGeometry(Math.max(w,d)*0.8, 8, 8), glowMat);
-    aura.position.set(x, gy + h*0.6, z); scene.add(aura);
+    detailMesh(UNIT_SPH, glowMat, x, gy + h * 0.6, z, maxWD * 1.6, maxWD * 1.6, maxWD * 1.6);
     addDecorLight(0x8040ff, 0.8, 15, x, gy + h*0.6, z);
   }
 
@@ -659,12 +1180,59 @@ const ROAD_MAT = {
   trunk:      new THREE.MeshBasicMaterial({ color: 0xffee00, side: THREE.DoubleSide }),
   primary:    new THREE.MeshBasicMaterial({ color: 0xffdd00, side: THREE.DoubleSide }),
   secondary:  new THREE.MeshBasicMaterial({ color: 0xff9922, side: THREE.DoubleSide }),
-  tertiary:   new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide }),
+  tertiary:   new THREE.MeshBasicMaterial({ color: MODE_CONF.roadMinor, side: THREE.DoubleSide }),
   railway:    new THREE.MeshBasicMaterial({ color: 0xaa22ff, side: THREE.DoubleSide }),
   rail_white: new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide }),
-  road:       new THREE.MeshBasicMaterial({ color: 0xe8e8e8, side: THREE.DoubleSide }),
-  water:      new THREE.MeshBasicMaterial({ color: 0x2277bb, side: THREE.DoubleSide }),
+  road:       new THREE.MeshBasicMaterial({ color: MODE_CONF.roadMinor, side: THREE.DoubleSide }),
+  water:      new THREE.MeshBasicMaterial({ color: MODE_CONF.water, side: THREE.DoubleSide }),
 };
+if (IS_MEIJI) { // 明治: 全道路を土道の色調に
+  ROAD_MAT.trunk.color.setHex(0xa08a60);
+  ROAD_MAT.primary.color.setHex(0xa08a60);
+  ROAD_MAT.secondary.color.setHex(0x98825c);
+  ROAD_MAT.tertiary.color.setHex(0x907a55);
+}
+
+// 明治: 土地利用コード別の地面パッチ用マテリアル(共有・テクスチャは小さなcanvas)
+function meijiTex(base, stripe, stripeH, repeat) {
+  const c = document.createElement('canvas'); c.width = 32; c.height = 32;
+  const g = c.getContext('2d');
+  g.fillStyle = base; g.fillRect(0, 0, 32, 32);
+  if (stripe) { g.fillStyle = stripe; g.fillRect(0, 0, 32, stripeH); g.fillRect(0, 16, 32, stripeH); }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(1 / repeat, 1 / repeat);
+  return tex;
+}
+const MEIJI_GROUND_MATS = IS_MEIJI ? {
+  1:  new THREE.MeshLambertMaterial({ map: meijiTex('#6a9a4a', '#4a6a38', 3, 18), side: THREE.DoubleSide }), // 水田(あぜ)
+  2:  new THREE.MeshLambertMaterial({ map: meijiTex('#8a7a4a', '#6a5a38', 4, 8),  side: THREE.DoubleSide }), // 畑
+  3:  new THREE.MeshLambertMaterial({ map: meijiTex('#5a7a3a', '#485f2e', 5, 6),  side: THREE.DoubleSide }), // 桑・茶
+  5:  new THREE.MeshLambertMaterial({ color: 0x9aa060, side: THREE.DoubleSide }), // 草地・荒地
+  6:  new THREE.MeshLambertMaterial({ color: 0xb0a080, side: THREE.DoubleSide }), // 村落(踏み固めた土)
+  8:  new THREE.MeshLambertMaterial({ color: 0xc8b890, side: THREE.DoubleSide }), // 砂地
+  9:  new THREE.MeshLambertMaterial({ color: 0x4a6a58, side: THREE.DoubleSide }), // 湿地
+  10: new THREE.MeshBasicMaterial({ color: 0x3a6a8a, side: THREE.DoubleSide }),   // 水面
+} : null;
+const MEIJI_HOUSE_WALLS = [0xa89878, 0x8a7050, 0x9a8868];
+
+// 火の見櫓(村落にまれに。チャンク生成中に呼ばれるのでアンロード対象)
+function addFireTower(x, z) {
+  const gy = getGroundY(x, z);
+  const wood = lambertMat(0x6a4a2a);
+  const legGeo = new THREE.BoxGeometry(0.25, 9, 0.25);
+  [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(([ox, oz]) => {
+    const leg = new THREE.Mesh(legGeo, wood);
+    leg.position.set(x + ox * 0.9, gy + 4.5, z + oz * 0.9);
+    scene.add(leg);
+  });
+  const top = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.25, 2.6), wood);
+  top.position.set(x, gy + 9, z); scene.add(top);
+  const roof = new THREE.Mesh(new THREE.ConeGeometry(2.2, 1.2, 4), lambertMat(0x4a3d2a));
+  roof.position.set(x, gy + 10, z); roof.rotation.y = Math.PI / 4; scene.add(roof);
+  const bell = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.3, 0.5, 6), lambertMat(0x554422));
+  bell.position.set(x, gy + 9.6, z); scene.add(bell);
+}
 
 // Build a terrain-following road ribbon as a single BufferGeometry mesh
 function makeRoadGeo(x1, z1, x2, z2, width, yOffset) {
@@ -710,14 +1278,15 @@ function addRoad(x1, z1, x2, z2, width, type='road') {
     case 'secondary': w = Math.max(width, 6);  break;
     case 'tertiary':  w = Math.max(width, 4);  break;
     case 'railway':   w = 5; isRailway = true; break;
-    case 'water':     w = Math.max(width, 3);  break; // 川・水路(青いリボン)
+    case 'water':     w = Math.max(width, 1.5); break; // 川・水路(実幅は waterwayWidth で決定済み)
     default:          w = Math.max(width, 3);  break;
   }
 
   const mat = ROAD_MAT[type] || ROAD_MAT.road;
   // 0.15→0.35: 幅広道路は左右端の間で地形(バイリニア面)が盛り上がることがあるため余裕を持たせる
-  // 水面は道路より低く(橋の交差で道路が上に見えるように)
-  const geo = makeRoadGeo(x1, z1, x2, z2, w, type === 'water' ? 0.12 : 0.35);
+  // 水面リボンは実形状の水面ポリゴン(+0.15)より低い+0.05に置き、
+  // 実形状がある区間では推定幅リボンが完全に隠れるようにする
+  const geo = makeRoadGeo(x1, z1, x2, z2, w, type === 'water' ? 0.05 : 0.35);
   if (!geo) return;
   const road = new THREE.Mesh(geo, mat);
   road.renderOrder = 1;
@@ -745,6 +1314,22 @@ function decorateRoad(x1, z1, x2, z2, type, w) {
   if (len < 18) return;
   const nx = dx / len, nz = dz / len, px = -nz, pz = nx;
   const ry = Math.atan2(-nz, nx); // boxのX軸を道路方向に向ける回転
+  if (IS_MEIJI) {
+    // 明治: 街道の並木と道祖神(石)のみ。電柱・自販機・信号・ガードレール・看板は存在しない
+    for (let s = 20; s < len - 10; s += 45 + Math.random() * 20) {
+      const side = Math.random() < 0.5 ? -1 : 1;
+      const tx = x1 + nx * s + px * side * (w / 2 + 2.2);
+      const tz = z1 + nz * s + pz * side * (w / 2 + 2.2);
+      addTree(tx, tz, 1.0 + Math.random() * 0.6);
+    }
+    if (Math.random() < 0.08) {
+      const t = Math.random();
+      const sx = x1 + dx * t + px * (w / 2 + 1);
+      const sz = z1 + dz * t + pz * (w / 2 + 1);
+      poolAdd(signalP, sx, getGroundY(sx, sz) + 0.4, sz, Math.random() * 3, 0.5, 1.6, 0.9); // 道祖神
+    }
+    return;
+  }
   const minor = (type === 'road' || type === 'tertiary');
   if (minor) {
     // 電柱(約35m間隔、道路の左側で統一)+ 電線(たるみ付き)
@@ -755,9 +1340,11 @@ function decorateRoad(x1, z1, x2, z2, type, w) {
       const cx = x1 + dx * t + px * (w / 2 + 0.9);
       const cz = z1 + dz * t + pz * (w / 2 + 0.9);
       const gy = getGroundY(cx, cz);
-      poolAdd(poleP, cx, gy + 4, cz);
+      // 江戸=木の行灯柱(短め) / その他=フルハイト
+      poolAdd(poleP, cx, gy + (MODE === 'edo' ? 2.4 : 4), cz, 0, 1, MODE === 'edo' ? 0.6 : 1, 1);
+      if (POLE_ORB) poolAdd(lampP, cx, gy + (MODE === 'edo' ? 4.9 : 7.9), cz, 0, 1.1, 1.1, 1.1, POLE_ORB);
       const top = { x: cx, y: gy + 7.6, z: cz };
-      if (prevTop) {
+      if (PROP_WIRES && prevTop) {
         const mx = (prevTop.x + top.x) / 2, mz = (prevTop.z + top.z) / 2;
         const my = (prevTop.y + top.y) / 2 - 0.6;
         addWireSeg(prevTop.x, prevTop.y, prevTop.z, mx, my, mz);
@@ -765,13 +1352,13 @@ function decorateRoad(x1, z1, x2, z2, type, w) {
       }
       prevTop = top;
     }
-    // 自販機(たまに、光る箱)
+    // 自販機(江戸では樽/井戸)
     if (Math.random() < 0.13) {
       const t = 0.2 + Math.random() * 0.6;
       const vx = x1 + dx * t + px * (w / 2 + 1.2);
       const vz = z1 + dz * t + pz * (w / 2 + 1.2);
-      poolAdd(vendP, vx, getGroundY(vx, vz) + 0.9, vz, ry + Math.PI / 2, 1, 1, 1,
-              [0xff4444, 0x4488ff, 0xffffff][(Math.random() * 3) | 0]);
+      poolAdd(vendP, vx, getGroundY(vx, vz) + PROP_VEND_Y, vz, ry + Math.PI / 2, 1, 1, 1,
+              PROP_VEND_COLORS[(Math.random() * 3) | 0]);
     }
   } else {
     // 幹線(secondary以上): ガードレール(8m毎、両側)
@@ -779,11 +1366,11 @@ function decorateRoad(x1, z1, x2, z2, type, w) {
       for (const side of [-1, 1]) {
         const gx = x1 + nx * s + px * side * (w / 2 + 0.4);
         const gz = z1 + nz * s + pz * side * (w / 2 + 0.4);
-        poolAdd(guardP, gx, getGroundY(gx, gz) + 0.7, gz, ry, 8, 1, 1, 0xf0f0f0);
+        poolAdd(guardP, gx, getGroundY(gx, gz) + 0.7, gz, ry, 8, 1, 1, PROP_GUARD_C);
       }
     }
-    // 信号機(長い区間にたまに)
-    if (len > 60 && Math.random() < 0.1) {
+    // 信号機(長い区間にたまに。江戸モードでは出さない)
+    if (PROP_SIGNALS && len > 60 && Math.random() < 0.1) {
       const sx = x1 + dx * 0.5 + px * (w / 2 + 0.8), sz = z1 + dz * 0.5 + pz * (w / 2 + 0.8);
       const gy = getGroundY(sx, sz);
       poolAdd(poleP, sx, gy + 3, sz, 0, 0.8, 0.72, 0.8);
@@ -807,8 +1394,12 @@ const stationLabels = []; // for billboard update each frame
 
 function addStation(x, z, name) {
   const gy = getGroundY(x, z); // 地表基準にしないと高地の駅ランドマークが埋まる
-  // Golden pillar
-  const pillarMat = new THREE.MeshLambertMaterial({ color: 0xffcc00, emissive: 0xff8800, emissiveIntensity: 0.6 });
+  // Golden pillar(江戸=宿場の木塔 / メルヘン=ピンク / 宇宙=ネオン)
+  const stC = MODE === 'edo'     ? { c: 0x8a6a40, e: 0xcc6600 }
+            : MODE === 'marchen' ? { c: 0xffb0d0, e: 0xff70a0 }
+            : MODE === 'space'   ? { c: 0x66eeff, e: 0x00ccff }
+            : { c: 0xffcc00, e: 0xff8800 };
+  const pillarMat = new THREE.MeshLambertMaterial({ color: stC.c, emissive: stC.e, emissiveIntensity: 0.6 });
   const pillar = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 2.5, 50, 8), pillarMat);
   pillar.position.set(x, gy + 25, z);
   pillar.castShadow = true;
@@ -882,14 +1473,19 @@ function latLonToXZ(lat, lon) {
 // ======= 面フィーチャ(公園・水域・田畑・森) =======
 const avoidPolygons = []; // 手続き生成の建物を建ててはいけない領域
 const areaPolyBudget = { park: 80, water: 80, farm: 250 }; // 面メッシュのドローコール予算
-const lawnMat  = new THREE.MeshLambertMaterial({ color: 0x4a8a3d, side: THREE.DoubleSide });
-const waterAreaMat = new THREE.MeshLambertMaterial({ color: 0x2277bb, side: THREE.DoubleSide });
+const lawnMat  = new THREE.MeshLambertMaterial({ color: MODE_CONF.lawn, side: THREE.DoubleSide });
+// リボン(ROAD_MAT.water)と同じMeshBasicにして、重なっても境目が見えないようにする
+const waterAreaMat = new THREE.MeshBasicMaterial({ color: MODE_CONF.water, side: THREE.DoubleSide });
+const minimapWaterPolys = []; // ミニマップに描く実形状水面 {pts,minX,maxX,minZ,maxZ}
 // 田畑: あぜ縞のcanvasテクスチャ(uv=世界座標なので repeat で約9m周期の縞になる)
 const farmMat = (() => {
   const c = document.createElement('canvas'); c.width = 32; c.height = 32;
   const g = c.getContext('2d');
-  g.fillStyle = '#6a8a3a'; g.fillRect(0, 0, 32, 32);
-  g.fillStyle = '#8a7a4a'; g.fillRect(0, 12, 32, 8);
+  const fc = MODE === 'space' ? ['#2a3240', '#3a4756'] // 無機質グリッド
+           : MODE === 'marchen' ? ['#7bd06a', '#e8c87a']
+           : ['#6a8a3a', '#8a7a4a'];
+  g.fillStyle = fc[0]; g.fillRect(0, 0, 32, 32);
+  g.fillStyle = fc[1]; g.fillRect(0, 12, 32, 8);
   const tex = new THREE.CanvasTexture(c);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(1 / 9, 1 / 9);
@@ -897,10 +1493,18 @@ const farmMat = (() => {
 })();
 
 // ポリゴンから地形に沿った面メッシュを1枚生成(三角形分割はShapeGeometry=earcut)
-function buildAreaPoly(pts, mat, yOff) {
+// holes: 内周リング(中州など)の配列(省略可)
+function buildAreaPoly(pts, mat, yOff, holes) {
   const shape = new THREE.Shape();
   shape.moveTo(pts[0].x, pts[0].z);
   for (let i = 1; i < pts.length; i++) shape.lineTo(pts[i].x, pts[i].z);
+  if (holes) for (const hp of holes) {
+    if (hp.length < 4) continue;
+    const hpath = new THREE.Path();
+    hpath.moveTo(hp[0].x, hp[0].z);
+    for (let i = 1; i < hp.length; i++) hpath.lineTo(hp[i].x, hp[i].z);
+    shape.holes.push(hpath);
+  }
   const geo = new THREE.ShapeGeometry(shape);
   const pos = geo.attributes.position;
   for (let i = 0; i < pos.count; i++) {
@@ -924,13 +1528,155 @@ function scatterTreesIn(poly, sqmPerTree, cap) {
   }
 }
 
+// ======= 明治モード: 迅速測図100m土地利用データ =======
+// 出典: 農研機構農業環境研究部門「明治時代初期土地利用・被覆デジタルデータベース」(CC BY 4.0)
+// https://github.com/wata909/habs_test — GitHub Pages配信でCORS可、プロキシ不要。
+// 100m間隔の点データ。code: 1水田 2畑 3果樹園(桑茶) 4森林 5草地荒地 6村落 7土手崖 8砂地 9湿地 10水面 11竹 12塩田
+const meijiCells = new Map();       // "gx,gz"(100m格子) → 土地利用コード
+const meijiMeshLoaded = new Set();  // 取得済み二次メッシュ
+let meijiReady = false;
+
+function meijiMeshCode(lat, lon) {
+  const p = Math.floor(lat * 1.5), u = Math.floor(lon - 100);
+  const q = Math.floor((lat * 1.5 - p) * 8), v = Math.floor(((lon - 100) - u) * 8);
+  return { m1: '' + p + u, m2: '' + p + u + q + v };
+}
+
+async function loadMeijiMesh(lat, lon) {
+  const { m1, m2 } = meijiMeshCode(lat, lon);
+  if (meijiMeshLoaded.has(m2)) return;
+  meijiMeshLoaded.add(m2);
+  try {
+    const res = await fetch(`https://wata909.github.io/habs_test/${m1}/geojson/rapid${m2}.geojson`);
+    if (!res.ok) return; // データ未整備地域(404)は空扱いで確定
+    const gj = await res.json();
+    if (!gj || !gj.features) return;
+    for (const f of gj.features) {
+      if (!f.geometry || f.geometry.type !== 'Point') continue;
+      const code = f.properties && (f.properties.code || f.properties.habs_code);
+      if (!code) continue;
+      const p = latLonToXZ(f.geometry.coordinates[1], f.geometry.coordinates[0]);
+      meijiCells.set(Math.round(p.x / 100) + ',' + Math.round(p.z / 100), code);
+      // 森林・竹は読み込み時に低密度で木を散布(恒久インスタンス。プール上限で頭打ち)
+      if ((code === 4 || code === 11) && Math.random() < 0.4) {
+        addTree(p.x + (Math.random() - 0.5) * 80, p.z + (Math.random() - 0.5) * 80,
+                code === 11 ? 0.55 : 0.8 + Math.random() * 0.8);
+      }
+    }
+  } catch (e) { meijiMeshLoaded.delete(m2); } // ネットワーク失敗は再試行可能に
+}
+
+async function loadMeijiLanduse() {
+  statusEl.textContent = '🌾 明治期土地利用データ取得中...';
+  const jobs = [];
+  for (const lat of [OSM_BOUNDS.minLat, OSM_BOUNDS.maxLat])
+    for (const lon of [OSM_BOUNDS.minLon, OSM_BOUNDS.maxLon])
+      jobs.push(loadMeijiMesh(lat, lon));
+  await Promise.all(jobs);
+  meijiReady = true;
+  statusEl.textContent = `🌾 明治期土地利用 ${meijiCells.size} 地点読込`;
+}
+
+// ======= 頂点間引きほか =======
+// 頂点の間引き — 直前の採用点から tol[m] 未満の点をスキップ(大河川の負荷対策)
+function thinPts(pts, tol) {
+  if (tol <= 0 || pts.length < 20) return pts;
+  const out = [pts[0]];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const last = out[out.length - 1];
+    const dx = pts[i].x - last.x, dz = pts[i].z - last.z;
+    if (dx * dx + dz * dz >= tol * tol) out.push(pts[i]);
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
+}
+
+// ======= multipolygon 水面(相模川クラスの大河川) =======
+// 大きな水面はOSMでは relation(multipolygon) で表現され、outer が複数wayに
+// 分割されていることが多い。端点一致で連結して閉リングを組み立てる。
+const seenOSMRels = new Set();
+function _llEq(a, b) { return Math.abs(a.lat - b.lat) < 1e-6 && Math.abs(a.lon - b.lon) < 1e-6; }
+function stitchRings(members) {
+  const segs = members.map(m => m.geometry.slice());
+  const rings = [];
+  while (segs.length) {
+    let ring = segs.pop().slice();
+    let guard = 0;
+    while (guard++ < 500) {
+      const head = ring[0], tail = ring[ring.length - 1];
+      if (_llEq(head, tail)) break; // 閉じた
+      let found = -1, rev = false, atEnd = true;
+      for (let i = 0; i < segs.length; i++) {
+        const s = segs[i], sh = s[0], st = s[s.length - 1];
+        if (_llEq(tail, sh)) { found = i; rev = false; atEnd = true;  break; }
+        if (_llEq(tail, st)) { found = i; rev = true;  atEnd = true;  break; }
+        if (_llEq(head, st)) { found = i; rev = false; atEnd = false; break; }
+        if (_llEq(head, sh)) { found = i; rev = true;  atEnd = false; break; }
+      }
+      if (found < 0) break; // これ以上つながらない → 開いたまま採用(earcutは閉じ扱い)
+      let s = segs.splice(found, 1)[0];
+      if (rev) s = s.slice().reverse();
+      ring = atEnd ? ring.concat(s.slice(1)) : s.concat(ring.slice(1));
+    }
+    if (ring.length >= 4) rings.push(ring);
+  }
+  return rings;
+}
+
+function processWaterRelation(el) {
+  if (el.type !== 'relation' || !el.members) return;
+  const tags = el.tags || {};
+  if (!(tags.natural === 'water' || tags.waterway === 'riverbank' || tags.water)) return;
+  if (seenOSMRels.has(el.id)) return;
+  seenOSMRels.add(el.id);
+  const outers = el.members.filter(m => m.type === 'way' && m.role !== 'inner' && m.geometry && m.geometry.length >= 2);
+  const inners = el.members.filter(m => m.type === 'way' && m.role === 'inner' && m.geometry && m.geometry.length >= 2);
+  const innerRings = stitchRings(inners);
+  for (const ring of stitchRings(outers)) {
+    let pts = ring.map(g => latLonToXZ(g.lat, g.lon));
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    pts.forEach(p => { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); });
+    const span = Math.max(maxX - minX, maxZ - minZ);
+    if (span < 25) continue;
+    const tol = span > 1500 ? 25 : span > 400 ? 10 : 0;
+    pts = thinPts(pts, tol);
+    if (pts.length < 4) continue;
+    const poly = { pts, minX, maxX, minZ, maxZ };
+    avoidPolygons.push(poly); // 水面内には建物を生成しない
+    if (areaPolyBudget.water-- > 0) {
+      // このouterのbbox内にある中州(inner)を穴として追加
+      const holes = innerRings
+        .map(r => thinPts(r.map(g => latLonToXZ(g.lat, g.lon)), tol))
+        .filter(hp => hp.length >= 4 &&
+                hp[0].x >= minX && hp[0].x <= maxX && hp[0].z >= minZ && hp[0].z <= maxZ);
+      buildAreaPoly(pts, waterAreaMat, 0.15, holes);
+      minimapWaterPolys.push(poly);
+    }
+  }
+}
+
+// waterway の実幅: width タグ優先、なければ種別から推定
+function waterwayWidth(tags) {
+  const wtag = parseFloat(tags.width || tags['width:river']); // "5 m" 等も parseFloat で拾える
+  if (wtag > 0) return Math.min(60, Math.max(1.5, wtag));
+  switch (tags.waterway) {
+    case 'river':  return 12;
+    case 'canal':  return 5;
+    case 'stream': return 2.5;
+    default:       return 3;
+  }
+}
+
 // OSM要素が面フィーチャなら処理して true を返す(初期ロード・タイル両方から呼ばれる)
 function handleAreaFeature(el) {
   if (el.type !== 'way' || !el.geometry || el.geometry.length < 4) return false;
   const tags = el.tags || {};
   const lu = tags.landuse || '';
+  // riverbank ポリゴン(旧スタイルの川の実形状)も水面として扱う
+  const isWater  = tags.natural === 'water' || tags.waterway === 'riverbank';
+  // 明治: 現代の公園・田畑・森ポリゴンは使わない(迅速測図データで代替)。川・水面のみ残す
+  if (IS_MEIJI && !isWater) return false;
   const isPark   = tags.leisure === 'park' || tags.leisure === 'garden' || tags.leisure === 'playground';
-  const isWater  = tags.natural === 'water';
   const isFarm   = ['farmland','farm','orchard','meadow','allotments','vineyard'].includes(lu);
   const isForest = lu === 'forest' || tags.natural === 'wood';
   if (!isPark && !isWater && !isFarm && !isForest) return false;
@@ -957,7 +1703,11 @@ function handleAreaFeature(el) {
       poolAdd(lampP, cx, gy + 4.1, cz, 0, 1, 1, 1, 0xffcc77);
     }
   } else if (isWater) {
-    if (span < 800 && areaPolyBudget.water-- > 0) buildAreaPoly(pts, waterAreaMat, 0.1);
+    if (span < 3000 && areaPolyBudget.water-- > 0) {
+      const tp = thinPts(pts, span > 400 ? 10 : 0);
+      buildAreaPoly(tp, waterAreaMat, 0.15);
+      minimapWaterPolys.push({ pts: tp, minX, maxX, minZ, maxZ });
+    }
   } else if (isFarm) {
     if (span >= 15 && span < 500 && areaPolyBudget.farm-- > 0) buildAreaPoly(pts, farmMat, 0.1);
   } else if (isForest) {
@@ -1093,6 +1843,16 @@ function getGroundY(x, z) {
 let terrainMaxH = 1;
 function terrainColorRGB(h) {
   const t = Math.max(0, Math.min(1, h / terrainMaxH));
+  if (MODE === 'space') { // 無機質なグレー→青グレー
+    const g = 0.15 + t * 0.25;
+    return [g * 0.9, g, g * 1.3];
+  }
+  if (MODE === 'edo') { // セピアがかった野山
+    return [0.30 + 0.18 * t, 0.27 + 0.10 * t, 0.16 + 0.06 * t];
+  }
+  if (MODE === 'marchen') { // 明るい緑→ピンクがかった丘
+    return [0.28 + 0.42 * t, 0.60 - 0.12 * t, 0.32 + 0.28 * t];
+  }
   if (t < 0.25)      { const k = t / 0.25;         return [0.23 + 0.12*k, 0.33 + 0.05*k, 0.21 - 0.04*k]; }
   else if (t < 0.6)  { const k = (t - 0.25) / 0.35; return [0.35 + 0.10*k, 0.38 - 0.10*k, 0.17 + 0.02*k]; }
   else               { const k = (t - 0.6) / 0.4;   return [0.45 + 0.15*k, 0.28 + 0.22*k, 0.19 + 0.31*k]; }
@@ -1177,7 +1937,7 @@ async function loadElevations() {
 
 async function loadOSM() {
   const bb = `${OSM_BOUNDS.minLat},${OSM_BOUNDS.minLon},${OSM_BOUNDS.maxLat},${OSM_BOUNDS.maxLon}`;
-  const query = `[out:json][timeout:40];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal"](${bb});way["railway"="rail"](${bb});node["railway"="station"](${bb});node["railway"="halt"](${bb});node["public_transport"="station"](${bb}););out geom;`;
+  const query = `[out:json][timeout:40];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal|riverbank"](${bb});relation["natural"="water"](${bb});relation["waterway"="riverbank"](${bb});way["railway"="rail"](${bb});node["railway"="station"](${bb});node["railway"="halt"](${bb});node["public_transport"="station"](${bb}););out geom;`;
   const url = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
 
   let data = null;
@@ -1216,6 +1976,7 @@ async function loadOSM() {
       if (!isImportant && roadCount >= 2500) return; // 800では市街地の細街路が途中で打ち切られ歯抜けになっていた
       const width = hw==='trunk'||hw==='primary' ? 8 : hw==='secondary' ? 6 : hw==='tertiary'||hw==='residential' ? 4 : 2.5;
       const type = (hw==='trunk'||hw==='primary'||hw==='secondary'||hw==='tertiary') ? hw : 'road';
+      if (IS_MEIJI && type === 'road') return; // 明治: 住宅街の細街路は存在しない(幹線・古道のみ)
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
@@ -1224,7 +1985,8 @@ async function loadOSM() {
       roadCount++;
     }
 
-    if (tags.railway === 'rail' && el.geometry && el.geometry.length >= 2) {
+    // 明治(1880年代): 伊勢原周辺に鉄道はまだない
+    if (!IS_MEIJI && tags.railway === 'rail' && el.geometry && el.geometry.length >= 2) {
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
@@ -1233,8 +1995,9 @@ async function loadOSM() {
     }
 
     // 川・水路(青いリボン。isOnRoad判定で川の上への建物生成も防げる)
-    if (tags.waterway && el.geometry && el.geometry.length >= 2) {
-      const ww = tags.waterway === 'river' ? 8 : 3;
+    // riverbank は線ではなく面(handleAreaFeature)で処理するため除外
+    if (tags.waterway && tags.waterway !== 'riverbank' && el.geometry && el.geometry.length >= 2) {
+      const ww = waterwayWidth(tags);
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
@@ -1248,6 +2011,10 @@ async function loadOSM() {
     if (el.type !== 'way') return;
     const tags = el.tags || {};
 
+    if (IS_MEIJI && tags.building) { // 明治: OSM建物は神社仏閣のみ残す
+      const st = getBuildingStyle(tags);
+      if (!st || (st.type !== 'shrine' && st.type !== 'temple')) return;
+    }
     if (tags.building && buildingCount < 1200 && el.geometry && el.geometry.length >= 4) { // 700では初期エリア内でも歯抜けが出ていた
       const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
       let cx = 0, cz = 0;
@@ -1285,9 +2052,10 @@ async function loadOSM() {
     landusePolygons.push({ pts, lu, minX, maxX, minZ, maxZ });
   });
 
-  // Station landmarks
+  // Station landmarks(明治: 鉄道開通前なので駅なし)
   const seenStations = new Set();
   data.elements.forEach(el => {
+    if (IS_MEIJI) return;
     if (el.type !== 'node' || !el.tags) return;
     const isStation = el.tags.railway === 'station' || el.tags.railway === 'halt' || el.tags.public_transport === 'station';
     if (!isStation) return;
@@ -1298,8 +2066,11 @@ async function loadOSM() {
     addStation(pos.x, pos.z, name);
   });
 
-  // === PASS 4: 公園・水域・田畑・森 ===
-  data.elements.forEach(el => { handleAreaFeature(el); });
+  // === PASS 4: 公園・水域・田畑・森 + multipolygon水面 ===
+  data.elements.forEach(el => {
+    handleAreaFeature(el);
+    if (el.type === 'relation') processWaterRelation(el);
+  });
 
   // 初期ロードで処理したway IDを記録(境界タイルの再取得時に二重生成しないため)
   data.elements.forEach(el => { if (el.type === 'way') seenOSMWays.add(el.id); });
@@ -1340,7 +2111,12 @@ function buildFallbackMap() {
 }
 
 // Load terrain first, then place OSM world on top
-(async () => { await loadElevations(); await loadOSM(); })();
+// 明治モードは迅速測図の土地利用データを先に読む(チャンク生成が依存)
+(async () => {
+  await loadElevations();
+  if (IS_MEIJI) await loadMeijiLanduse();
+  await loadOSM();
+})();
 
 // ======= REAL-WORLD COORDINATES =======
 const gpsEl = document.getElementById('gpsDisplay');
@@ -1476,12 +2252,29 @@ function drawMinimap() {
   const mmRoadColor = { trunk:'#ffcc00', primary:'#ffcc00', secondary:'#ffaa40', tertiary:'#aabbcc', railway:'#cc44ff', road:'#505878', water:'#3388cc' };
   const mmRoadWidth = { trunk:3, primary:2.5, secondary:2, tertiary:1.5, railway:2, road:1, water:2.5 };
   const R = MM_RANGE + 60; // 表示範囲外の要素は描画コマンド自体を発行しない
+
+  // 実形状の水面ポリゴン(道路より下層に描く)
+  mctx.fillStyle = '#2a6a9a';
+  for (const wp of minimapWaterPolys) {
+    if (wp.minX - px > R || px - wp.maxX > R || wp.minZ - pz > R || pz - wp.maxZ > R) continue;
+    mctx.beginPath();
+    const p0 = toMap(wp.pts[0].x, wp.pts[0].z);
+    mctx.moveTo(p0.mx, p0.my);
+    for (let i = 1; i < wp.pts.length; i++) {
+      const p = toMap(wp.pts[i].x, wp.pts[i].z);
+      mctx.lineTo(p.mx, p.my);
+    }
+    mctx.closePath();
+    mctx.fill();
+  }
+
   for (const r of minimapRoads) {
     if ((r.x1-px > R && r.x2-px > R) || (px-r.x1 > R && px-r.x2 > R) ||
         (r.z1-pz > R && r.z2-pz > R) || (pz-r.z1 > R && pz-r.z2 > R)) continue;
     const t = r.type || 'road';
     mctx.strokeStyle = mmRoadColor[t] || '#505878';
-    mctx.lineWidth = mmRoadWidth[t] || 1;
+    // 川は3D側の実幅をそのままミニマップスケールに変換(道路は視認性優先の固定幅)
+    mctx.lineWidth = t === 'water' ? Math.max(1.5, (r.rw || 3) * scale) : (mmRoadWidth[t] || 1);
     const a = toMap(r.x1, r.z1), b = toMap(r.x2, r.z2);
     mctx.beginPath(); mctx.moveTo(a.mx, a.my); mctx.lineTo(b.mx, b.my); mctx.stroke();
   }
@@ -1728,21 +2521,22 @@ function processTileData(data) {
       const hw = tags.highway;
       const width = hw==='trunk'||hw==='primary' ? 8 : hw==='secondary' ? 6 : hw==='tertiary'||hw==='residential' ? 4 : 2.5;
       const type = (hw==='trunk'||hw==='primary'||hw==='secondary'||hw==='tertiary') ? hw : 'road';
+      if (IS_MEIJI && type === 'road') return; // 明治: 細街路なし
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
         addRoad(a.x, a.z, b.x, b.z, width, type);
       }
     }
-    if (tags.railway === 'rail') {
+    if (!IS_MEIJI && tags.railway === 'rail') {
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
         addRoad(a.x, a.z, b.x, b.z, 4, 'railway');
       }
     }
-    if (tags.waterway) {
-      const ww = tags.waterway === 'river' ? 8 : 3;
+    if (tags.waterway && tags.waterway !== 'riverbank') {
+      const ww = waterwayWidth(tags);
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
@@ -1750,8 +2544,9 @@ function processTileData(data) {
       }
     }
   });
-  // 公園・水域・田畑・森
+  // 公園・水域・田畑・森 + multipolygon水面
   data.elements.forEach(el => {
+    if (el.type === 'relation') { processWaterRelation(el); return; } // 重複はrel側のSetで防止
     if (el.type === 'way' && el.id && seenOSMWays.has(el.id)) return;
     handleAreaFeature(el);
   });
@@ -1762,6 +2557,10 @@ function processTileData(data) {
     if (seenOSMWays.has(el.id)) return;
     const tags = el.tags || {};
     if (!tags.building) return;
+    if (IS_MEIJI) { // 明治: 神社仏閣以外のOSM建物は出さない
+      const st = getBuildingStyle(tags);
+      if (!st || (st.type !== 'shrine' && st.type !== 'temple')) return;
+    }
     const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
     let cx=0, cz=0;
     pts.forEach(p => { cx+=p.x; cz+=p.z; });
@@ -1806,7 +2605,7 @@ async function processOSMTileQueue() {
   const minLat = Math.min(ll00.lat, ll11.lat), maxLat = Math.max(ll00.lat, ll11.lat);
   const minLon = Math.min(ll00.lon, ll11.lon), maxLon = Math.max(ll00.lon, ll11.lon);
   const bb = `${minLat.toFixed(5)},${minLon.toFixed(5)},${maxLat.toFixed(5)},${maxLon.toFixed(5)}`;
-  const query = `[out:json][timeout:20];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal"](${bb});way["railway"="rail"](${bb}););out geom;`;
+  const query = `[out:json][timeout:20];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal|riverbank"](${bb});relation["natural"="water"](${bb});relation["waterway"="riverbank"](${bb});way["railway"="rail"](${bb}););out geom;`;
   let failed = false;
   try {
     const res = await fetch('https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query));
@@ -1834,6 +2633,13 @@ function checkOSMTiles() {
   _osmCheckFrame++;
   if (_osmCheckFrame % 60 !== 0) return; // check every ~1s at 60fps
   const px = player.position.x, pz = player.position.z;
+  // 明治: プレイヤー周辺の二次メッシュ土地利用データも必要に応じて追加取得
+  if (IS_MEIJI) {
+    [[-1500,-1500],[1500,-1500],[-1500,1500],[1500,1500]].forEach(([ox,oz]) => {
+      const c = xzToLatLon(px + ox, pz + oz);
+      loadMeijiMesh(c.lat, c.lon);
+    });
+  }
   // Check 5x5 tile grid around player (2 tiles in each direction = ~1400m radius)
   for (let dx = -2; dx <= 2; dx++) {
     for (let dz = -2; dz <= 2; dz++) {
@@ -1851,7 +2657,7 @@ function checkOSMTiles() {
 
 // ======= CHUNK-BASED DYNAMIC BUILDING GENERATION =======
 function generateChunk(chunkX, chunkZ) {
-  if (landusePolygons.length === 0) return; // OSM not yet loaded
+  if (IS_MEIJI ? !meijiReady : landusePolygons.length === 0) return; // データ未ロード
   const key = `${chunkX},${chunkZ}`;
   currentChunkKey = key; // addBuilding が記録に掃除用タグを付ける
   const worldX = chunkX * CHUNK_SIZE;
@@ -1867,6 +2673,11 @@ function generateChunk(chunkX, chunkZ) {
   const nearLanduse = landusePolygons.filter(p => !(x1 + 30 < p.minX || x0 - 30 > p.maxX || z1 + 30 < p.minZ || z0 - 30 > p.maxZ));
   const inLanduse = (x, z) => nearLanduse.some(p =>
     x >= p.minX && x <= p.maxX && z >= p.minZ && z <= p.maxZ && pointInPolygon(x, z, p.pts));
+
+  if (IS_MEIJI) {
+    // ======= 明治: 迅速測図の100m土地利用グリッドに従って生成 =======
+    generateMeijiCells(x0, z0, x1, z1, inAvoid);
+  } else {
 
   // --- 1) 道路沿いの住宅補完(日本の住宅街らしく道路に面して並べる) ---
   // 住宅系landuse内・田畑/森/公園/水域の外・既存建物や道路と非重複、の空き地だけ埋める
@@ -1925,6 +2736,7 @@ function generateChunk(chunkX, chunkZ) {
       }
     }
   }
+  } // end if(IS_MEIJI)/else
 
   // Store all meshes added during this chunk for future unloading
   const added = scene.children.slice(beforeCount);
@@ -1932,11 +2744,67 @@ function generateChunk(chunkX, chunkZ) {
   currentChunkKey = null;
 }
 
+// 明治: チャンク内の100m格子セルを土地利用コードに従って生成
+function generateMeijiCells(x0, z0, x1, z1, inAvoid) {
+  const groundGroups = new Map(); // material → セル中心座標列(後で1メッシュにマージ)
+  for (let gx = Math.floor(x0 / 100); gx <= Math.floor(x1 / 100) + 1; gx++) {
+    for (let gz = Math.floor(z0 / 100); gz <= Math.floor(z1 / 100) + 1; gz++) {
+      const code = meijiCells.get(gx + ',' + gz);
+      if (!code) continue;
+      const cx = gx * 100, cz = gz * 100;
+      if (cx < x0 || cx >= x1 || cz < z0 || cz >= z1) continue; // 中心点が担当チャンク内のセルのみ(二重生成防止)
+      const mat = MEIJI_GROUND_MATS[code];
+      if (mat) {
+        let arr = groundGroups.get(mat);
+        if (!arr) { arr = []; groundGroups.set(mat, arr); }
+        arr.push(cx, cz);
+      }
+      if (code === 6) { // 村落: 茅葺き民家の集落
+        const n = 2 + (Math.random() * 3 | 0);
+        for (let i = 0; i < n; i++) {
+          const hx = cx + (Math.random() - 0.5) * 80, hz = cz + (Math.random() - 0.5) * 80;
+          const bw = 7 + Math.random() * 4, bd = 6 + Math.random() * 3;
+          if (inAvoid(hx, hz)) continue;               // 水面には建てない
+          if (isOnRoad(hx, hz, bw, bd)) continue;
+          if (hasBuildingNearby(hx, hz, Math.max(bw, bd) / 2 + 2)) continue;
+          addBuilding(hx, hz, bw, bd, 2.8 + Math.random() * 1.2,
+                      { color: MEIJI_HOUSE_WALLS[(Math.random() * 3) | 0], roofColor: 0x4a3d2a, type: 'house' });
+        }
+        if (Math.random() < 0.04) addFireTower(cx + (Math.random() - 0.5) * 60, cz + (Math.random() - 0.5) * 60);
+      } else if (code === 3 && Math.random() < 0.5) {
+        addTree(cx + (Math.random() - 0.5) * 70, cz + (Math.random() - 0.5) * 70, 0.4); // 桑・茶の低木
+      }
+    }
+  }
+  // セルをマテリアルごとに1つのBufferGeometryへマージ(チャンクあたり最大でも数ドローコール)
+  for (const [mat, cells] of groundGroups) {
+    const verts = [], idxs = [], uvs = [];
+    for (let i = 0; i < cells.length; i += 2) {
+      const cx = cells[i], cz = cells[i + 1];
+      const base = verts.length / 3;
+      [[-50, -50], [50, -50], [50, 50], [-50, 50]].forEach(([ox, oz]) => {
+        const vx = cx + ox, vz = cz + oz;
+        verts.push(vx, getGroundY(vx, vz) + 0.12, vz);
+        uvs.push(vx, vz); // uv=世界座標(テクスチャ側のrepeatで縞周期を制御)
+      });
+      idxs.push(base, base + 2, base + 1, base, base + 3, base + 2);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geo.setIndex(idxs);
+    geo.computeVertexNormals();
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.renderOrder = 1;
+    scene.add(mesh); // チャンクのスナップショットに入るためアンロード時に破棄される
+  }
+}
+
 let _lastChunkX = null, _lastChunkZ = null;
 const chunkGenQueue = [];
 
 function updateChunks() {
-  if (landusePolygons.length === 0) return;
+  if (IS_MEIJI ? !meijiReady : landusePolygons.length === 0) return;
   const cx = Math.floor(player.position.x / CHUNK_SIZE);
   const cz = Math.floor(player.position.z / CHUNK_SIZE);
 
@@ -1966,7 +2834,8 @@ function updateChunks() {
     if (Math.abs(kcx - cx) > unloadR || Math.abs(kcz - cz) > unloadR) {
       meshes.forEach(m => {
         scene.remove(m);
-        if (m.geometry) m.geometry.dispose();
+        // 屋根・小物の単位ジオメトリは全建物で共有しているため破棄しない
+        if (m.geometry && !m.geometry.userData.shared) m.geometry.dispose();
       });
       chunkMeshes.delete(key);
       loadedChunks.delete(key); // allow re-generation if player returns
