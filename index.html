@@ -101,6 +101,19 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
 #mapHint {
   color:#80e0ff; font-size:13px; text-align:center;
 }
+#mapSearchRow { display:flex; gap:8px; width:90vw; pointer-events:all; }
+#mapSearchInput {
+  flex:1; min-width:0; padding:10px 12px; font-size:15px;
+  border-radius:8px; border:1px solid #40c0ff;
+  background:rgba(10,20,40,0.9); color:#e0f0ff;
+}
+#mapSearchBtn, #geoBtn {
+  background:rgba(20,80,120,0.9); color:#c8ecff;
+  border:1px solid #40c0ff; border-radius:8px;
+  padding:10px 14px; font-size:14px; cursor:pointer;
+  white-space:nowrap;
+}
+#mapSearchBtn:hover, #geoBtn:hover { background:rgba(30,110,160,0.95); }
 #mapBtn {
   position:fixed; top:56px; left:16px;
   background:rgba(80,40,120,0.85); color:#e8c8ff;
@@ -140,6 +153,11 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
 <div id="credit" style="display:none; position:fixed; bottom:2px; left:8px; font-size:10px; color:rgba(255,255,255,0.65); z-index:30; pointer-events:all;"></div>
 <div id="mapOverlay">
   <div id="mapHint">タップした場所にジャンプします</div>
+  <div id="mapSearchRow">
+    <input id="mapSearchInput" type="text" placeholder="地名・住所・施設名で検索" autocomplete="off">
+    <button id="mapSearchBtn">🔎 検索</button>
+    <button id="geoBtn">📡 現在地</button>
+  </div>
   <div id="leafletMap"></div>
   <button id="mapCloseBtn">✕ 閉じる</button>
 </div>
@@ -182,10 +200,28 @@ try {
   btn.textContent = VISUAL_MODES[idx].label;
   btn.addEventListener('click', () => {
     const next = VISUAL_MODES[(idx + 1) % VISUAL_MODES.length].id;
-    try { localStorage.setItem('iseharaVisualMode', next); } catch (e) {}
+    try {
+      localStorage.setItem('iseharaVisualMode', next);
+      // 現在位置と向きを保存 → リロード後の loadOSM がここから再開する(スポーンに戻さない)
+      const ll = xzToLatLon(player.position.x, player.position.z);
+      localStorage.setItem('iseharaResumePos',
+        JSON.stringify({ lat: ll.lat, lon: ll.lon, yaw: camYaw, rot: player.rotation.y }));
+    } catch (e) {}
     location.reload();
   });
 })();
+
+// モード切替リロード用の再開位置(1回読んだら消す — 通常リロードは従来どおりスポーン地点)
+function consumeResumePos() {
+  try {
+    const s = localStorage.getItem('iseharaResumePos');
+    if (!s) return null;
+    localStorage.removeItem('iseharaResumePos');
+    const p = JSON.parse(s);
+    if (typeof p.lat === 'number' && typeof p.lon === 'number') return p;
+  } catch (e) {}
+  return null;
+}
 // モード別の環境パレット
 const MODE_CONF = {
   real: {
@@ -2078,10 +2114,18 @@ async function loadOSM() {
   statusEl.textContent = `✨ 伊勢原ファンタジー世界へようこそ！ (建物:${buildingCount} 道路:${roadCount})`;
   setTimeout(()=>{ statusEl.style.display='none'; }, 4000);
 
-  // 東成瀬2-2-11(=ワールド原点付近)にスポーン。建物内なら最寄りの空き地点へ
-  const spw = latLonToXZ(SPAWN_LAT, SPAWN_LON);
-  const sp = findSpawnNear(spw.x, spw.z);
-  player.position.set(sp.x, 0, sp.z);
+  // モード切替リロードなら切替前の位置・向きから再開、通常起動は東成瀬2-2-11にスポーン
+  const resume = consumeResumePos();
+  if (resume) {
+    const rp = latLonToXZ(resume.lat, resume.lon);
+    player.position.set(rp.x, 0, rp.z); // yはanimateの床追従が地形/屋根に合わせる
+    if (typeof resume.yaw === 'number') camYaw = resume.yaw;
+    if (typeof resume.rot === 'number') player.rotation.y = resume.rot;
+  } else {
+    const spw = latLonToXZ(SPAWN_LAT, SPAWN_LON);
+    const sp = findSpawnNear(spw.x, spw.z); // 建物内なら最寄りの空き地点へ
+    player.position.set(sp.x, 0, sp.z);
+  }
   initialWorldLoaded = true; // ここからタイル取得を許可(標高は既に反映済み)
 }
 
@@ -2104,9 +2148,17 @@ function buildFallbackMap() {
   }
   statusEl.textContent = '✨ 伊勢原ファンタジー世界（フォールバック）へようこそ！';
   setTimeout(()=>{ statusEl.style.display='none'; }, 3000);
-  const spw2 = latLonToXZ(SPAWN_LAT, SPAWN_LON);
-  const sp2 = findSpawnNear(spw2.x, spw2.z);
-  player.position.set(sp2.x, 0, sp2.z);
+  const resume2 = consumeResumePos();
+  if (resume2) {
+    const rp2 = latLonToXZ(resume2.lat, resume2.lon);
+    player.position.set(rp2.x, 0, rp2.z);
+    if (typeof resume2.yaw === 'number') camYaw = resume2.yaw;
+    if (typeof resume2.rot === 'number') player.rotation.y = resume2.rot;
+  } else {
+    const spw2 = latLonToXZ(SPAWN_LAT, SPAWN_LON);
+    const sp2 = findSpawnNear(spw2.x, spw2.z);
+    player.position.set(sp2.x, 0, sp2.z);
+  }
   initialWorldLoaded = true;
 }
 
@@ -2129,9 +2181,20 @@ function xzToLatLon(x, z) {
 // ======= MAP JUMP (Leaflet overlay) =======
 let leafletMap = null, playerMarker = null;
 const mapOverlay = document.getElementById('mapOverlay');
+const mapHintEl = document.getElementById('mapHint');
+
+// 指定の緯度経度へジャンプ(地図タップ・地名検索・現在地ボタンの共通処理)
+function jumpToLatLon(toLat, toLon) {
+  const pos = latLonToXZ(toLat, toLon);
+  player.position.set(pos.x, 0, pos.z); // yはanimateの床追従が合わせる
+  if (playerMarker) { playerMarker.setLatLng([toLat, toLon]); playerMarker.openPopup(); }
+  if (leafletMap) leafletMap.setView([toLat, toLon], leafletMap.getZoom());
+  setTimeout(() => mapOverlay.classList.remove('active'), 300);
+}
 
 function openMapJump() {
   mapOverlay.classList.add('active');
+  mapHintEl.textContent = 'タップした場所にジャンプします';
   const { lat, lon } = xzToLatLon(player.position.x, player.position.z);
 
   if (!leafletMap) {
@@ -2146,14 +2209,7 @@ function openMapJump() {
       .bindPopup('現在地').openPopup();
 
     // Tap to jump
-    leafletMap.on('click', e => {
-      const { lat: toLat, lng: toLon } = e.latlng;
-      const pos = latLonToXZ(toLat, toLon);
-      player.position.set(pos.x, 0, pos.z);
-      playerMarker.setLatLng([toLat, toLon]);
-      playerMarker.openPopup();
-      setTimeout(() => mapOverlay.classList.remove('active'), 300);
-    });
+    leafletMap.on('click', e => jumpToLatLon(e.latlng.lat, e.latlng.lng));
   } else {
     playerMarker.setLatLng([lat, lon]);
     leafletMap.setView([lat, lon], leafletMap.getZoom());
@@ -2164,6 +2220,72 @@ function openMapJump() {
 document.getElementById('jumpBtn').addEventListener('click', openMapJump);
 document.getElementById('mapCloseBtn').addEventListener('click', () => {
   mapOverlay.classList.remove('active');
+});
+
+// ======= 地名・住所・施設名の検索ジャンプ =======
+// 国土地理院ジオコーディングAPI(無料・キー不要・CORS可)→ 失敗時は Nominatim にフォールバック
+const mapSearchInput = document.getElementById('mapSearchInput');
+async function searchPlaceJump() {
+  const q = mapSearchInput.value.trim();
+  if (!q) return;
+  mapHintEl.textContent = '🔎 「' + q + '」を検索中...';
+  let lat = null, lon = null, name = '';
+  try {
+    const res = await fetch('https://msearch.gsi.go.jp/address-search/AddressSearch?q=' + encodeURIComponent(q));
+    const js = await res.json();
+    if (Array.isArray(js) && js.length && js[0].geometry && js[0].geometry.coordinates) {
+      lon = js[0].geometry.coordinates[0];
+      lat = js[0].geometry.coordinates[1];
+      name = (js[0].properties && js[0].properties.title) || q;
+    }
+  } catch (e) {}
+  if (lat === null) { // フォールバック: Nominatim (OSM)
+    try {
+      const res = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=ja&q=' + encodeURIComponent(q));
+      const js = await res.json();
+      if (Array.isArray(js) && js.length) {
+        lat = parseFloat(js[0].lat);
+        lon = parseFloat(js[0].lon);
+        name = js[0].display_name || q;
+      }
+    } catch (e) {}
+  }
+  if (lat === null || !isFinite(lat) || !isFinite(lon)) {
+    mapHintEl.textContent = '⚠️ 「' + q + '」が見つかりませんでした';
+    return;
+  }
+  mapHintEl.textContent = '📍 ' + name + ' へジャンプ！';
+  jumpToLatLon(lat, lon);
+}
+document.getElementById('mapSearchBtn').addEventListener('click', searchPlaceJump);
+mapSearchInput.addEventListener('keydown', e => {
+  e.stopPropagation(); // WASD移動のキー入力ハンドラに拾わせない
+  if (e.key === 'Enter') searchPlaceJump();
+});
+mapSearchInput.addEventListener('keyup', e => e.stopPropagation());
+
+// ======= スマホ等の位置情報から現在地ジャンプ =======
+// Geolocation API は HTTPS(secure context)必須。LANのhttpアクセスでは使えない旨を案内する
+document.getElementById('geoBtn').addEventListener('click', () => {
+  if (!('geolocation' in navigator)) {
+    mapHintEl.textContent = '⚠️ この端末・ブラウザは位置情報に対応していません';
+    return;
+  }
+  if (!window.isSecureContext) {
+    mapHintEl.textContent = '⚠️ 位置情報はHTTPS接続でのみ使えます(http://192.168.…などLAN経由では不可。Render等のhttps版でお試しを)';
+    return;
+  }
+  mapHintEl.textContent = '📡 現在地を取得中...';
+  navigator.geolocation.getCurrentPosition(
+    p => {
+      mapHintEl.textContent = '📍 現在地へジャンプ！';
+      jumpToLatLon(p.coords.latitude, p.coords.longitude);
+    },
+    err => {
+      mapHintEl.textContent = '⚠️ 現在地を取得できませんでした(' +
+        (err.code === 1 ? '位置情報の利用が許可されていません' : err.message) + ')';
+    },
+    { enableHighAccuracy: true, timeout: 10000 });
 });
 
 function updateGPS(t) {
@@ -2384,7 +2506,7 @@ function getJoyBounds() {
 // touchstart: passive:true so buttons still fire click events
 document.addEventListener('touchstart', e => {
   for (const t of e.changedTouches) {
-    if (t.target.closest('button')) continue; // let buttons work normally
+    if (t.target.closest('button, input, #mapOverlay')) continue; // ボタン・検索入力・マップ画面は通常動作
     const joy = getJoyBounds();
     const dx = t.clientX - joy.cx, dy = t.clientY - joy.cy;
     if (Math.sqrt(dx*dx+dy*dy) < joy.radius && joyId === null) {
