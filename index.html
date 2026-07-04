@@ -159,6 +159,19 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
   box-shadow:0 0 12px rgba(64,160,255,0.3);
 }
 #seaCtrl input { width:100%; margin-top:5px; accent-color:#40c0ff; }
+/* 水中エフェクト(キャラが完全に水没した時) */
+#waterOverlay {
+  position:fixed; inset:0; z-index:100; display:none; pointer-events:none;
+  background:radial-gradient(ellipse at center,
+    rgba(30,110,170,0.32) 0%, rgba(10,60,115,0.58) 62%, rgba(4,32,74,0.82) 100%);
+  animation:waterShimmer 3.5s ease-in-out infinite;
+}
+#waterOverlay::after {
+  content:''; position:absolute; inset:0;
+  background:linear-gradient(180deg, rgba(120,210,255,0.18) 0%, rgba(120,210,255,0) 30%);
+}
+#waterOverlay.active { display:block; }
+@keyframes waterShimmer { 0%,100% { opacity:0.82; } 50% { opacity:1; } }
 /* UI非表示トグル(常時表示。スティック・ジャンプ・このボタン以外を隠す) */
 #uiToggleBtn {
   position:fixed; top:16px; right:16px;
@@ -177,12 +190,13 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 </head>
 <body>
 <canvas id="canvas"></canvas>
+<div id="waterOverlay"></div>
 <button id="viewBtn">👁 一人称</button>
 <button id="mapBtn">🗺 上空</button>
 <button id="jumpBtn">📍 マップジャンプ</button>
 <button id="modeBtn">🏙 現実</button>
 <button id="camDirBtn">🔄 視点</button>
-<div id="seaCtrl">🌊 海面 <span id="seaVal">0</span>m<input id="seaSlider" type="range" min="0" max="100" value="0"></div>
+<div id="seaCtrl">🌊 海面 <span id="seaVal">3.0</span>m<input id="seaSlider" type="range" min="1" max="10" step="0.5" value="3"></div>
 <button id="uiToggleBtn" title="UI表示/非表示">🙈</button>
 <div id="credit" style="display:none; position:fixed; bottom:2px; left:8px; font-size:10px; color:rgba(255,255,255,0.65); z-index:30; pointer-events:all;"></div>
 <div id="mapOverlay">
@@ -927,11 +941,7 @@ const poleP = makePool(new THREE.CylinderGeometry(0.11, 0.16, 8, 6),
                        new THREE.MeshLambertMaterial({ color: 0x776a5c }), 3000);
 const TREE_MAX = IS_MEIJI ? 5000 : 3500; // 明治は里山・並木で木が主役
 const treeTrunkP = makePool(new THREE.CylinderGeometry(0.14, 0.24, 1.6, 5), new THREE.MeshLambertMaterial({ color: 0x5a4028 }), TREE_MAX);
-// 木: 宇宙モードはクリスタル(円錐・半透明発光)
-const treeTopP = makePool(
-  MODE === 'space' ? new THREE.ConeGeometry(0.9, 2.6, 5) : new THREE.SphereGeometry(1.3, 6, 5),
-  MODE === 'space' ? new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, emissive: 0x224466 })
-                   : new THREE.MeshLambertMaterial({ color: 0xffffff }), TREE_MAX);
+// 木の樹冠 treeTopPools は TREE_GREENS 定義後(下方)で作る(instanceColor を使わない単色プール)
 // 自販機: 江戸=樽/井戸(木の円筒) / 宇宙=発光キオスク
 const vendP = makePool(
   MODE === 'edo' ? new THREE.CylinderGeometry(0.55, 0.65, 1.2, 8) : new THREE.BoxGeometry(1.0, 1.8, 0.75),
@@ -956,33 +966,39 @@ const signalP    = makePool(
 const TREE_GREENS = MODE === 'marchen' ? [0x7be3a0, 0xffb0d0, 0xa0e8ff]
                   : MODE === 'space'   ? [0x66eeff, 0xbb88ff, 0x66ffbb]
                   : [0x2e6b2e, 0x3a7a33, 0x27632f];
+// 木の樹冠プール: instanceColor(色付きインスタンス)がこの環境では描画されず樹冠が消えるため、
+// 色ごとに単色マテリアルのプールを分ける(幹と同じ=確実に描画される方式)。宇宙はクリスタル。
+const _treeTopGeo = MODE === 'space' ? new THREE.ConeGeometry(0.9, 2.6, 5) : new THREE.SphereGeometry(1.3, 6, 5);
+const treeTopPools = TREE_GREENS.map(c => makePool(_treeTopGeo,
+  MODE === 'space' ? new THREE.MeshLambertMaterial({ color: c, transparent: true, opacity: 0.85, emissive: 0x224466 })
+                   : new THREE.MeshLambertMaterial({ color: c }), TREE_MAX));
 
-// ======= 山の森(針葉樹)専用プール =======
-// 街の木(treeTrunkP/treeTopP)とは別枠。高標高スロープに円錐の針葉樹を敷き詰めて
-// 「森に覆われた山」を表現する。街路樹の上限を食い潰さないよう独立プールにする。
-const FOREST_MAX = 14000;
-const FOREST_GREENS = MODE === 'marchen' ? [0x74d98f, 0x9be0a0, 0xffc0dc]
-                    : MODE === 'space'   ? [0x66eeff, 0x88ffcc, 0xbb99ff]
-                    : MODE === 'edo'     ? [0x4f7a3a, 0x5c8a40, 0x668f45]
-                    : MODE === 'meiji'   ? [0x5a8a3a, 0x4f7a33, 0x6a9a45]
-                    : [0x347f34, 0x3f9a3a, 0x2f7a2f]; // 現実: はっきりした森の緑
-const forestTrunkP = makePool(new THREE.CylinderGeometry(0.16, 0.26, 2.0, 5),
-  new THREE.MeshLambertMaterial({ color: MODE === 'space' ? 0x2a3a4a : 0x4a3524 }), FOREST_MAX);
-// 樹冠: 街路樹(treeTopP)と同じ「球+白Lambert+インスタンス色」の実績ある構成にする。
-// (以前は円錐にしていたが樹冠が出ず幹だけになっていたため、確実に描ける球へ戻す)
-const forestTopP = makePool(
+// ======= 山の森 =======
+// 【重要】treeTopP(街路樹の樹冠)は instanceColor を使うが、この環境では
+// 色付き樹冠インスタンスが描画されず「幹だけ」になってしまう(街路樹も同様)。
+// そこで森の樹冠は instanceColor を使わず、緑を焼き込んだ単色マテリアルのプールで描く
+// (幹プールと同じ=確実に描画される方式)。色違いを数プール用意して単調さを避ける。
+const forestLeafColors = MODE === 'space'   ? [0x66eeff, 0x88ffcc, 0xbb99ff]
+                       : MODE === 'marchen' ? [0x74d98f, 0x9be0a0, 0xff9ecb]
+                       : MODE === 'edo'     ? [0x4f7a3a, 0x5c8a40, 0x668f45]
+                       : MODE === 'meiji'   ? [0x5a8a3a, 0x4f7a33, 0x6a9a45]
+                       : [0x2f7a33, 0x3f9a3a, 0x276b2c]; // 現実: はっきりした森の緑
+const forestTrunkMat = new THREE.MeshLambertMaterial({ color: MODE === 'space' ? 0x2a3a4a : 0x4a3524 });
+const forestTrunkP = makePool(new THREE.CylinderGeometry(0.16, 0.26, 2.0, 5), forestTrunkMat, 11000);
+const forestLeafPools = forestLeafColors.map(c => makePool(
   MODE === 'space' ? new THREE.ConeGeometry(1.1, 3.2, 6) : new THREE.SphereGeometry(1.5, 6, 5),
-  new THREE.MeshLambertMaterial({ color: 0xffffff }), FOREST_MAX);
+  new THREE.MeshLambertMaterial({ color: c }),           // 単色 → instanceColor 不要で確実に描画
+  4000));
 function forestTree(x, z, s) {
   const gy = getGroundY(x, z);
-  const col = FOREST_GREENS[(Math.random() * FOREST_GREENS.length) | 0];
+  const leaf = forestLeafPools[(Math.random() * forestLeafPools.length) | 0];
   if (MODE === 'space') { // クリスタル(幹なし)
-    poolAdd(forestTopP, x, gy + 1.7 * s, z, Math.random() * 3, s, s * 1.3, s, col);
+    poolAdd(leaf, x, gy + 1.7 * s, z, Math.random() * 3, s, s * 1.3, s);
     return;
   }
-  poolAdd(forestTrunkP, x, gy + 1.0 * s, z, 0, s, s, s);          // 幹: 根元を gy に
-  poolAdd(forestTopP,  x, gy + 2.6 * s, z, Math.random() * 3,     // 樹冠: 幹の上に載る球
-          s * 1.25, s * (1.15 + Math.random() * 0.4), s * 1.25, col);
+  poolAdd(forestTrunkP, x, gy + 1.0 * s, z, 0, s, s, s);              // 幹: 根元を gy に
+  poolAdd(leaf, x, gy + 2.6 * s, z, Math.random() * 3,                // 樹冠: 幹の上に載る球(単色)
+          s * 1.25, s * (1.15 + Math.random() * 0.4), s * 1.25);
 }
 // 道路小物のモード別ふるまい
 const PROP_WIRES   = MODE === 'real';                 // 電線は現実のみ
@@ -1015,16 +1031,15 @@ function addWireSeg(x1, y1, z1, x2, y2, z2) {
 
 function addTree(x, z, s) {
   const gy = getGroundY(x, z);
+  const top = treeTopPools[(Math.random() * treeTopPools.length) | 0]; // 色ごとの単色プールから選ぶ
   if (MODE === 'space') { // クリスタルオブジェ(幹なし)
-    poolAdd(treeTopP, x, gy + 1.3 * s, z, Math.random() * 3, s, s * (1.1 + Math.random() * 0.6), s,
-            TREE_GREENS[(Math.random() * 3) | 0]);
+    poolAdd(top, x, gy + 1.3 * s, z, Math.random() * 3, s, s * (1.1 + Math.random() * 0.6), s);
     return;
   }
   poolAdd(treeTrunkP, x, gy + 0.8 * s, z, 0, s, s, s);
   const round = MODE === 'marchen'; // メルヘンは丸っこく
-  poolAdd(treeTopP, x, gy + 2.3 * s, z, Math.random() * 3,
-          s * (round ? 1.3 : 1), s * (round ? 0.95 : 0.9 + Math.random() * 0.5), s * (round ? 1.3 : 1),
-          TREE_GREENS[(Math.random() * 3) | 0]);
+  poolAdd(top, x, gy + 2.3 * s, z, Math.random() * 3,
+          s * (round ? 1.3 : 1), s * (round ? 0.95 : 0.9 + Math.random() * 0.5), s * (round ? 1.3 : 1));
 }
 
 // Returns true if the rectangle (cx,cz,bw,bd) overlaps any road segment
@@ -2360,8 +2375,7 @@ const WIDE_SEGS = 28, WIDE_SEGS1 = WIDE_SEGS + 1;
 const WIDE_W = 2 * WIDE_HALF_LON * SCALE * COS_LAT;
 const WIDE_D = 2 * WIDE_HALF_LAT * SCALE;
 let seaLevelM = 5;            // 海面の実標高(m)。スライダーで変更可(elevBase確定時に初期値を上書き)
-let wideRawM = null;          // 各ノードの実標高(m)。海面変更時に wideElev を再計算するため保持
-// wideElev は上方(遠景地形メッシュ定義の前)で宣言済み。flat [iz*WIDE_SEGS1+ix] = ゲーム高さ(海はSEA_Yより下へ沈める)
+// wideElev は上方(遠景地形メッシュ定義の前)で宣言済み。flat [iz*WIDE_SEGS1+ix] = ゲーム高さ(実標高で固定)
 let SEA_Y = 0;                // 海面(seaLevelM)のゲーム高さ。SEA_Y = (seaLevelM - elevBase) * ELEV_SCALE
 
 function getWideTerrainY(x, z) {
@@ -2399,36 +2413,35 @@ async function loadWideTerrain() {
       if (i + 100 < pts.length) await new Promise(r => setTimeout(r, 1100));
     }
   } catch (e) { return; }
-  wideRawM = raw;                        // 実標高(m)を保持 → 海面変更時に再分類できる
   wideElev = new Float32Array(pts.length);
-  recomputeWideSea();                    // 現在の seaLevelM で陸/海を分類し、遠景メッシュを更新
+  const oceanFloor = (0 - elevBase) * ELEV_SCALE - 10; // データ無しノードは海底(海面より十分下)扱い
+  for (let i = 0; i < raw.length; i++) {
+    const m = raw[i];
+    wideElev[i] = (m == null) ? oceanFloor : (m - elevBase) * ELEV_SCALE; // 実標高で固定(海面とは無関係)
+  }
+  updateFarMesh(true); // 遠景メッシュを実地形で1回だけ構築。以後、海面変更では作り直さない
 }
 
-// seaLevelM に基づいて海面高さ・遠景の陸/海分類を再計算する(スライダー操作・初回ロード共通)
-function recomputeWideSea() {
+// 海面標高の変更は「水面プレーンの上下」だけにする。地形・道路・建物は一切動かさない。
+// (以前は海面に応じて遠景地形の高さも作り替えていたため、水が来ていない陸の道路までズレて消えていた)
+function setSeaLevel() {
   SEA_Y = (seaLevelM - elevBase) * ELEV_SCALE;
   if (seaMesh) seaMesh.position.y = SEA_Y;
-  if (wideElev && wideRawM) {
-    for (let i = 0; i < wideRawM.length; i++) {
-      const m = wideRawM[i];
-      wideElev[i] = (m == null || m <= seaLevelM) ? SEA_Y - 12                   // 海: 海面プレーンの下へ沈める
-                  : Math.max(SEA_Y + 2, (m - elevBase) * ELEV_SCALE);            // 陸: 詳細グリッドと同じ基準
-    }
-    updateFarMesh(true); // 遠景メッシュを新しい海面で再構築
-  }
 }
 
 // 海面(実標高0m)の巨大プレーン。カメラ追従・霧免除で、南の地平の先に海が見える。
 // 陸(地形メッシュ)は不透明でdepthが先に書かれるので、標高が海面より高い場所では自然に隠れる。
 let seaMesh = null;
+const waterOverlay = document.getElementById('waterOverlay');
+let _wasSubmerged = false;
 function initDistantSea() {
   if (seaMesh) return;
   // 海面標高の初期値: 保存値があれば優先。無ければ「詳細エリアの最低標高より少し下」に置く
   // (= 海岸が街の近くまで来て、かつ街は水没しない安全な既定値)
   let saved = NaN;
   try { saved = parseFloat(localStorage.getItem('iseharaSeaLevel')); } catch (e) {}
-  seaLevelM = Number.isFinite(saved) ? saved : Math.max(0, Math.round(elevBase - 3));
-  seaLevelM = Math.max(0, seaLevelM);
+  seaLevelM = Number.isFinite(saved) ? saved : 3;
+  seaLevelM = Math.max(1, Math.min(10, seaLevelM)); // 1〜10m
   SEA_Y = (seaLevelM - elevBase) * ELEV_SCALE;
   const c = document.createElement('canvas'); c.width = 128; c.height = 128;
   const g = c.getContext('2d');
@@ -2463,18 +2476,14 @@ function setupSeaSlider() {
   const lab = document.getElementById('seaVal');
   const box = document.getElementById('seaCtrl');
   if (!sl || !lab) return;
-  // 上限は最高地点の実標高まで許可 → スライダーを上げると低地から順に水没していくのが見える。
-  // (以前は上限=最低標高で、水面が視界に入らず「動かしても変化しない」ように見えていた)
-  const maxSea = Math.round(elevBase + terrainMaxH / ELEV_SCALE) + 5;
-  sl.min = 0;
-  sl.max = Math.max(20, maxSea);
-  sl.value = Math.round(seaLevelM);
-  lab.textContent = Math.round(seaLevelM);
+  sl.min = 1; sl.max = 10; sl.step = 0.5;   // 海面標高 1〜10m を 0.5m 刻みで
+  sl.value = seaLevelM;
+  lab.textContent = seaLevelM.toFixed(1);
   sl.addEventListener('input', () => {
-    seaLevelM = Math.max(0, +sl.value);
-    lab.textContent = Math.round(seaLevelM);
+    seaLevelM = Math.max(1, Math.min(10, +sl.value));
+    lab.textContent = seaLevelM.toFixed(1);
     try { localStorage.setItem('iseharaSeaLevel', String(seaLevelM)); } catch (e) {}
-    recomputeWideSea();
+    setSeaLevel();
   });
   // スマホ: スライダー操作がカメラ回転ハンドラに奪われないようにする
   if (box) ['touchstart', 'touchmove', 'pointerdown'].forEach(ev =>
@@ -3595,7 +3604,8 @@ function processChunkQueue() {
 //         (B) プレイヤー追従ストリーミングで、詳細エリアの外(大山方面など)を歩くと森が続く。
 const FOREST_CELL = 90;       // ストリーミングのセル辺(m)
 const FOREST_RADIUS = 9;      // ±9セル ≈ 810m
-const FOREST_MIN_T = 0.42;    // 標高比 t=h/terrainMaxH がこれ以上を「山」とみなす(緑に着色する帯とほぼ一致)
+const FOREST_MIN_T = 0.30;    // 標高比 t=h/terrainMaxH がこれ以上を「山」とみなす。
+                              // 低めにして手前の中腹にも森を出し、近くで緑の樹冠が見えるようにする
 const forestCells = new Set();
 let _forestLastCX = Infinity, _forestLastCZ = Infinity;
 let initialForestDone = false;
@@ -3803,6 +3813,12 @@ function animate() {
     const wt = seaMesh.material.map;
     wt.offset.x = (t * 0.012) % 1;
     wt.offset.y = (t * 0.008) % 1;
+    // キャラが完全に水没(頭まで海面下)したら水中エフェクトを出す
+    const submerged = (player.position.y + 1.8) < SEA_Y;
+    if (submerged !== _wasSubmerged) {
+      if (waterOverlay) waterOverlay.classList.toggle('active', submerged);
+      _wasSubmerged = submerged;
+    }
   }
   updateFarMesh(); // 200mグリッドをまたいだ時だけ再サンプリング(それ以外は即return)
 
