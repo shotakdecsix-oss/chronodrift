@@ -571,6 +571,7 @@ function rebuildRoadsNearChunk(chunkX, chunkZ) {
   const z0 = chunkZ * CHUNK_SIZE - margin, z1 = chunkZ * CHUNK_SIZE + CHUNK_SIZE + margin;
   rebuildRoadsInBounds(x0, x1, z0, z1);
   rebuildAreaPolysInBounds(x0, x1, z0, z1); // 川・公園・田畑ポリゴンも同じタイミングで合わせ直す
+  rebuildBuildingsInBounds(x0, x1, z0, z1); // 建物もY方向だけ地形に合わせて追従させる
 }
 // 点(x,z)が、道路の中心線から (道幅/2 + extra) 以内にあるか(近傍セルだけ調べる)
 function roadNear(x, z, extra) {
@@ -589,6 +590,62 @@ function roadNear(x, z, extra) {
   }
   return false;
 }
+// ======= 建物の高さresnap(地形更新への追従) =======
+// 建物は道路と違い「壁+屋根+屋上設備+ライト」等の複数メッシュが絶対Y座標で
+// 直置きされた剛体の集合。地形が変わっても形状自体は変えず、束ねて
+// Y方向にだけ平行移動すれば大部分の浮き/埋まりは解消できる(道路のような
+// ジオメトリ全再構築は不要)。ただし建物フットプリント内で傾斜が大きく
+// 変化した場合は一律シフトだけでは片側だけ残ることがある(既知の限界。
+// まずはこの方式で様子を見て、必要なら角ごとの微傾斜補正を検討する)。
+const buildingRecords = []; // {x,z,w,d,gy,parts:[mesh/light,...],cbox,ck}
+const BUILDING_CELL = 80;
+let buildingGrid = new Map();
+function buildingGridAdd(rec) {
+  const pad = Math.max(rec.w, rec.d) / 2 + 5;
+  const gx0 = Math.floor((rec.x - pad) / BUILDING_CELL), gx1 = Math.floor((rec.x + pad) / BUILDING_CELL);
+  const gz0 = Math.floor((rec.z - pad) / BUILDING_CELL), gz1 = Math.floor((rec.z + pad) / BUILDING_CELL);
+  for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
+    const k = gx + ',' + gz;
+    let arr = buildingGrid.get(k);
+    if (!arr) { arr = []; buildingGrid.set(k, arr); }
+    arr.push(rec);
+  }
+}
+function rebuildBuildingGrid() {
+  buildingGrid = new Map();
+  for (const rec of buildingRecords) buildingGridAdd(rec);
+}
+// 1棟ぶんを現在の地形に合わせてY方向へ平行移動する(形状・ジオメトリは変えない)
+function rebuildBuildingHeight(rec) {
+  const hs = [
+    getGroundY(rec.x, rec.z),
+    getGroundY(rec.x - rec.w/2, rec.z - rec.d/2), getGroundY(rec.x + rec.w/2, rec.z - rec.d/2),
+    getGroundY(rec.x - rec.w/2, rec.z + rec.d/2), getGroundY(rec.x + rec.w/2, rec.z + rec.d/2),
+  ];
+  const newGy = Math.min(...hs);
+  const delta = newGy - rec.gy;
+  if (Math.abs(delta) < 0.05) return; // 誤差レベルは無視(毎回全建物を動かさない)
+  for (const p of rec.parts) { if (p) p.position.y += delta; }
+  if (rec.cbox) { rec.cbox.min.y += delta; rec.cbox.max.y += delta; }
+  rec.gy = newGy;
+}
+// 矩形範囲(ワールド座標)にかかる建物を、現在の地形に合わせてまとめて追従させる。
+// 道路のrebuildRoadsInBoundsと同じタイミング(NEAR再取得時・チャンク生成時)で呼ぶ。
+function rebuildBuildingsInBounds(x0, x1, z0, z1) {
+  const gx0 = Math.floor(x0 / BUILDING_CELL), gx1 = Math.floor(x1 / BUILDING_CELL);
+  const gz0 = Math.floor(z0 / BUILDING_CELL), gz1 = Math.floor(z1 / BUILDING_CELL);
+  const seen = new Set();
+  for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
+    const arr = buildingGrid.get(gx + ',' + gz);
+    if (!arr) continue;
+    for (const rec of arr) {
+      if (seen.has(rec)) continue;
+      seen.add(rec);
+      rebuildBuildingHeight(rec);
+    }
+  }
+}
+
 let placedBuildings = [];  // {x,z,r,ck} for landuse de-duplication
 const landusePolygons = []; // {pts, lu, minX, maxX, minZ, maxZ} — stored during loadOSM for dynamic chunk generation
 const loadedChunks = new Set(); // "cx,cz" string keys of already-generated chunks
@@ -695,11 +752,12 @@ function lambertMat(color, emissive) {
 let decorLightCount = 0;
 const MAX_DECOR_LIGHTS = 6;
 function addDecorLight(color, intensity, range, x, y, z) {
-  if (decorLightCount >= MAX_DECOR_LIGHTS) return;
+  if (decorLightCount >= MAX_DECOR_LIGHTS) return null;
   decorLightCount++;
   const l = new THREE.PointLight(color, intensity, range);
   l.position.set(x, y, z);
   scene.add(l);
+  return l;
 }
 // 窓ガラスの個別メッシュは廃止 — 窓はファサードテクスチャ+emissiveMapに焼き込む(下記 facadeMat)
 const glowMat  = new THREE.MeshBasicMaterial({ color: 0x8040ff, transparent: true, opacity: 0.3, side: THREE.DoubleSide });
@@ -1234,6 +1292,15 @@ function addBuilding(x, z, w, d, h, style) {
   const gy = Math.min(...hs);   // 基礎 = 最低点
   h += Math.max(...hs) - gy;    // 斜面の高低差ぶん建物を延長して埋まりを防ぐ
 
+  // このbuildingを構成する全メッシュ/ライトをここに集める。
+  // 【重要】以前はここで各パーツを個別に絶対Y座標でsceneへ直置きし、生成後は二度と
+  // 動かさない仕様だった。地形(NEAR)は後から更新され続けるのに建物だけ固定されるため、
+  // 進めば進むほど道路・地形との高さのズレが蓄積して浮く/埋まるが悪化していた。
+  // 剛体(building全体)としてY方向にだけ平行移動すればよいので、パーツを集めておき
+  // rebuildBuildingHeight() でまとめてシフトできるようにする。
+  const parts = [];
+  const dm = (...a) => { const m = detailMesh(...a); parts.push(m); return m; };
+
   const type = style ? style.type : 'default';
   const floors = Math.max(1, Math.round(h / 3)); // building:levels は h に反映済み → 窓の段数に逆算
   const minWD = Math.min(w, d), maxWD = Math.max(w, d);
@@ -1278,6 +1345,7 @@ function addBuilding(x, z, w, d, h, style) {
   mesh.position.set(x, gy + h/2, z);
   mesh.renderOrder = 2;
   scene.add(mesh);
+  parts.push(mesh);
 
   // ==== 屋根 — 切妻・寄棟・片流れ・陸屋根+パラペットをモード/種別/高さで出し分け ====
   let roofC = MODE === 'edo' ? 0x3a4450 /* 瓦 */ : (style && style.roofColor) ? style.roofColor : 0x5030a0;
@@ -1297,6 +1365,8 @@ function addBuilding(x, z, w, d, h, style) {
     m2.position.set(x, gy + h - 0.02, z);
     m2.renderOrder = 2;
     scene.add(m2);
+    parts.push(m2);
+    return m2;
   };
 
   if (rtype === '_meiji') {
@@ -1308,60 +1378,60 @@ function addBuilding(x, z, w, d, h, style) {
             Math.min(3.2, Math.max(1.4, minWD * 0.42)), 1.8, roofSurfMat(0x3a4450, 'tile'));
   } else if (rtype === '_marchen') {
     if (isMushroom) { // キノコの傘
-      detailMesh(UNIT_SPH, lambertMat(0xff5060), x, gy + h + minWD * 0.12, z,
+      dm(UNIT_SPH, lambertMat(0xff5060), x, gy + h + minWD * 0.12, z,
                  minWD * 1.6, minWD * 0.88, minWD * 1.6);
     } else { // しま模様のとんがり屋根+たまに煙突
-      detailMesh(UNIT_CONE8, roofSurfMat(PASTEL_ROOFS[(Math.random() * PASTEL_ROOFS.length) | 0], 'stripe'),
+      dm(UNIT_CONE8, roofSurfMat(PASTEL_ROOFS[(Math.random() * PASTEL_ROOFS.length) | 0], 'stripe'),
                  x, gy + h + h * 0.42, z, maxWD * 1.36, h * 0.85, maxWD * 1.36);
       if (detailOK() && Math.random() < 0.3)
-        detailMesh(UNIT_BOX, lambertMat(0xb06050), x + w * 0.22, gy + h + 0.9, z, 0.8, 1.8, 0.8);
+        dm(UNIT_BOX, lambertMat(0xb06050), x + w * 0.22, gy + h + 0.9, z, 0.8, 1.8, 0.8);
     }
   } else if (rtype === '_space') {
     // パラペット+ガラスドーム+ネオン帯(+たまに発光アンテナ)
-    detailMesh(PARAPET_GEO, lambertMat(shadeHex(wallC, 0.7)), x, gy + h, z, w + 0.2, 0.7, d + 0.2);
-    const dome = detailMesh(UNIT_DOME, SPACE_GLASS, x, gy + h, z, minWD * 1.1, minWD * 1.1, minWD * 1.1);
+    dm(PARAPET_GEO, lambertMat(shadeHex(wallC, 0.7)), x, gy + h, z, w + 0.2, 0.7, d + 0.2);
+    const dome = dm(UNIT_DOME, SPACE_GLASS, x, gy + h, z, minWD * 1.1, minWD * 1.1, minWD * 1.1);
     dome.renderOrder = 3;
-    detailMesh(UNIT_BOX, NEON_MATS[(Math.random() * NEON_MATS.length) | 0],
+    dm(UNIT_BOX, NEON_MATS[(Math.random() * NEON_MATS.length) | 0],
                x, gy + h - 0.25, z, w * 1.02, 0.22, d * 1.02);
     if (detailOK() && Math.random() < 0.3)
-      detailMesh(UNIT_CYL, lambertMat(0x223344, 0x2266ff), x + w * 0.2, gy + h + 1.6, z - d * 0.15, 0.12, 3.2, 0.12);
+      dm(UNIT_CYL, lambertMat(0x223344, 0x2266ff), x + w * 0.2, gy + h + 1.6, z - d * 0.15, 0.12, 3.2, 0.12);
   } else if (rtype === 'shrine') {
     // Pagoda-style double roof
-    detailMesh(UNIT_CONE4, rm, x, gy + h + h * 0.2, z, maxWD * 1.6, h * 0.4, maxWD * 1.6, Math.PI / 4);
-    detailMesh(UNIT_CONE4, rm, x, gy + h + h * 0.55, z, maxWD, h * 0.25, maxWD, Math.PI / 4);
+    dm(UNIT_CONE4, rm, x, gy + h + h * 0.2, z, maxWD * 1.6, h * 0.4, maxWD * 1.6, Math.PI / 4);
+    dm(UNIT_CONE4, rm, x, gy + h + h * 0.55, z, maxWD, h * 0.25, maxWD, Math.PI / 4);
     // Torii gate in front
     const tMat = lambertMat(0xdd2200);
     const pillarH = Math.min(h * 0.8, 8);
     [-1.5, 1.5].forEach(ox =>
-      detailMesh(UNIT_CYL, tMat, x + ox, gy + pillarH / 2, z + d / 2 + 2, 0.6, pillarH, 0.6));
-    detailMesh(UNIT_BOX, tMat, x, gy + pillarH - 0.5, z + d / 2 + 2, 4.5, 0.5, 0.5);
-    detailMesh(UNIT_BOX, tMat, x, gy + pillarH - 1.5, z + d / 2 + 2, 3.8, 0.4, 0.4);
+      dm(UNIT_CYL, tMat, x + ox, gy + pillarH / 2, z + d / 2 + 2, 0.6, pillarH, 0.6));
+    dm(UNIT_BOX, tMat, x, gy + pillarH - 0.5, z + d / 2 + 2, 4.5, 0.5, 0.5);
+    dm(UNIT_BOX, tMat, x, gy + pillarH - 1.5, z + d / 2 + 2, 3.8, 0.4, 0.4);
   } else if (rtype === 'temple') {
     // Wide curved roof + bell tower hint
-    detailMesh(UNIT_CONE8, rm, x, gy + h + h * 0.15, z, maxWD * 1.8, h * 0.3, maxWD * 1.8);
-    detailMesh(UNIT_CYL, lambertMat(0x4a3010), x + w / 2 + 2, gy + h * 0.3, z, 1.9, h * 0.6, 1.9);
+    dm(UNIT_CONE8, rm, x, gy + h + h * 0.15, z, maxWD * 1.8, h * 0.3, maxWD * 1.8);
+    dm(UNIT_CYL, lambertMat(0x4a3010), x + w / 2 + 2, gy + h * 0.3, z, 1.9, h * 0.6, 1.9);
   } else if (rtype === 'hospital') {
     // 陸屋根+パラペット+赤十字
-    detailMesh(PARAPET_GEO, rm, x, gy + h, z, w + 0.5, 0.8, d + 0.5);
-    detailMesh(UNIT_BOX, CROSS_MAT, x, gy + h + 0.7, z, 3, 0.4, 1);
-    detailMesh(UNIT_BOX, CROSS_MAT, x, gy + h + 0.7, z, 1, 0.4, 3);
+    dm(PARAPET_GEO, rm, x, gy + h, z, w + 0.5, 0.8, d + 0.5);
+    dm(UNIT_BOX, CROSS_MAT, x, gy + h + 0.7, z, 3, 0.4, 1);
+    dm(UNIT_BOX, CROSS_MAT, x, gy + h + 0.7, z, 1, 0.4, 3);
   } else if (rtype === 'school') {
     pitched(HIP_GEO, Math.max(1.4, minWD * 0.22), 1.6, rm); // 幅広の寄棟
   } else if (rtype === 'government') {
-    detailMesh(UNIT_DOME, rm, x, gy + h, z, minWD * 0.8, minWD * 0.8, minWD * 0.8); // Dome
+    dm(UNIT_DOME, rm, x, gy + h, z, minWD * 0.8, minWD * 0.8, minWD * 0.8); // Dome
   } else {
     // 一般建物(現実モード)
     const isFlat = h >= 10 || (type === 'apartment' && h >= 7) || (type === 'industrial' && h >= 8);
     if (isFlat) {
       // 陸屋根+パラペット+屋上設備(貯水槽・室外機・アンテナ)
-      detailMesh(PARAPET_GEO, lambertMat(shadeHex(wallC, 0.8)), x, gy + h, z, w + 0.3, 0.9, d + 0.3);
+      dm(PARAPET_GEO, lambertMat(shadeHex(wallC, 0.8)), x, gy + h, z, w + 0.3, 0.9, d + 0.3);
       if (detailOK()) {
         if (Math.random() < 0.6)
-          detailMesh(UNIT_CYL, TANK_MAT, x + w * 0.22, gy + h + 1.2, z + d * 0.18, 2.2, 2.4, 2.2);
+          dm(UNIT_CYL, TANK_MAT, x + w * 0.22, gy + h + 1.2, z + d * 0.18, 2.2, 2.4, 2.2);
         if (Math.random() < 0.7)
-          detailMesh(UNIT_BOX, AC_MAT, x - w * 0.2, gy + h + 0.5, z - d * 0.15, 1.8, 1.0, 1.2, Math.random() * 3);
+          dm(UNIT_BOX, AC_MAT, x - w * 0.2, gy + h + 0.5, z - d * 0.15, 1.8, 1.0, 1.2, Math.random() * 3);
         if (Math.random() < 0.35)
-          detailMesh(UNIT_CYL, lambertMat(0x888888), x - w * 0.05, gy + h + 2, z + d * 0.2, 0.1, 4, 0.1);
+          dm(UNIT_CYL, lambertMat(0x888888), x - w * 0.05, gy + h + 2, z + d * 0.2, 0.1, 4, 0.1);
       }
     } else {
       // 勾配屋根: 切妻50% / 寄棟35% / 片流れ15%(工場・倉庫は片流れ)。住宅は瓦テクスチャ
@@ -1372,32 +1442,32 @@ function addBuilding(x, z, w, d, h, style) {
                                       : Math.min(4.2, Math.max(1.5, minWD * 0.38)), 1.0, rM);
       // 玄関庇(住宅のみ)
       if (type === 'house' && detailOK() && Math.random() < 0.5)
-        detailMesh(UNIT_BOX, roofSurfMat(roofC, null), x + w * 0.22, gy + 2.35, z + d / 2 + 0.5, 2.2, 0.16, 1.1);
+        dm(UNIT_BOX, roofSurfMat(roofC, null), x + w * 0.22, gy + 2.35, z + d / 2 + 0.5, 2.2, 0.16, 1.1);
     }
   }
 
   // エントランス(中高層ビルの1階の玄関ガラス)
   if ((kind === 'office' || kind === 'apt') && h >= 9 && MODE !== 'edo' && !IS_MEIJI &&
       detailOK() && Math.random() < 0.5) {
-    detailMesh(UNIT_PLANE, ENTRANCE_MAT, x, gy + 1.4, z + d / 2 + 0.06, 3.0, 2.8, 1);
+    dm(UNIT_PLANE, ENTRANCE_MAT, x, gy + 1.4, z + d / 2 + 0.06, 3.0, 2.8, 1);
   }
 
   // コンビニ・商店のモード別演出(共有マテリアル、追加は最大2メッシュ+提灯インスタンス)
   if (type === 'shop' && h <= 12) {
     if (MODE === 'edo') {
       // 茶屋: 暖簾+提灯
-      detailMesh(UNIT_PLANE, NOREN_MAT, x, gy + 1.7, z + d / 2 + 0.08, Math.min(w * 0.7, 6), 1.1, 1);
+      dm(UNIT_PLANE, NOREN_MAT, x, gy + 1.7, z + d / 2 + 0.08, Math.min(w * 0.7, 6), 1.1, 1);
       poolAdd(lampP, x - Math.min(w, 8) * 0.35, gy + 2.2, z + d / 2 + 0.4, 0, 0.9, 1.2, 0.9, 0xff8830);
       poolAdd(lampP, x + Math.min(w, 8) * 0.35, gy + 2.2, z + d / 2 + 0.4, 0, 0.9, 1.2, 0.9, 0xff8830);
     } else {
       const bandMats = MODE === 'space' ? NEON_MATS : MODE === 'marchen' ? CANDY_BAND_MATS : SIGN_BAND_MATS;
-      detailMesh(UNIT_PLANE, STOREFRONT_MAT, x, gy + 1.1, z + d / 2 + 0.06, Math.min(w * 0.85, 10), 1.6, 1);
-      detailMesh(UNIT_BOX, bandMats[(Math.random() * bandMats.length) | 0],
+      dm(UNIT_PLANE, STOREFRONT_MAT, x, gy + 1.1, z + d / 2 + 0.06, Math.min(w * 0.85, 10), 1.6, 1);
+      dm(UNIT_BOX, bandMats[(Math.random() * bandMats.length) | 0],
                  x, gy + 2.4, z + d / 2 + 0.2, Math.min(w, 12) * 0.95, 0.7, 0.25);
     }
   } else if (type === 'school') {
     // 校庭(土色の広場)
-    const yard = detailMesh(UNIT_PLANE, YARD_MAT, x, gy + 0.12, z, w + 18, d + 18, 1);
+    const yard = dm(UNIT_PLANE, YARD_MAT, x, gy + 0.12, z, w + 18, d + 18, 1);
     yard.rotation.x = -Math.PI / 2;
   }
 
@@ -1405,12 +1475,12 @@ function addBuilding(x, z, w, d, h, style) {
 
   // Special glow for shrines/temples
   if (type === 'shrine') {
-    addDecorLight(0xff4400, 1.5, 30, x, gy+h*0.8, z);
+    parts.push(addDecorLight(0xff4400, 1.5, 30, x, gy+h*0.8, z));
   } else if (type === 'temple') {
-    addDecorLight(0xffaa00, 1.2, 25, x, gy+h*0.8, z);
+    parts.push(addDecorLight(0xffaa00, 1.2, 25, x, gy+h*0.8, z));
   } else if (Math.random() < 0.06) {
-    detailMesh(UNIT_SPH, glowMat, x, gy + h * 0.6, z, maxWD * 1.6, maxWD * 1.6, maxWD * 1.6);
-    addDecorLight(0x8040ff, 0.8, 15, x, gy + h*0.6, z);
+    dm(UNIT_SPH, glowMat, x, gy + h * 0.6, z, maxWD * 1.6, maxWD * 1.6, maxWD * 1.6);
+    parts.push(addDecorLight(0x8040ff, 0.8, 15, x, gy + h*0.6, z));
   }
 
   // Collision AABB — terrain-aware(chunkKey はアンロード時の掃除用)
@@ -1427,6 +1497,11 @@ function addBuilding(x, z, w, d, h, style) {
   minimapBuildings.push({x, z, w, d, ck: currentChunkKey});
   // Spatial index for landuse fill de-duplication
   placedBuildings.push({x, z, r: Math.max(w,d)/2, ck: currentChunkKey});
+
+  // resnap用の記録(地形が後から更新された時にこのbuilding一式をY方向へ平行移動する)
+  const brec = { x, z, w, d, gy, parts, cbox, ck: currentChunkKey };
+  buildingRecords.push(brec);
+  buildingGridAdd(brec);
 }
 
 // ======= 現実モード: リアル道路・線路・高速高架 =======
@@ -2756,6 +2831,10 @@ async function loadNearTerrain(centerX = 0, centerZ = 0) {
   // 範囲にかかる道路・川/公園/田畑ポリゴンをすぐに新しい地形へ合わせ直す(浮き/埋まりを即座に解消する)
   rebuildRoadsInBounds(centerX - NEAR_W/2, centerX + NEAR_W/2, centerZ - NEAR_D/2, centerZ + NEAR_D/2);
   rebuildAreaPolysInBounds(centerX - NEAR_W/2, centerX + NEAR_W/2, centerZ - NEAR_D/2, centerZ + NEAR_D/2);
+  // 【重要】以前は建物だけここで追従させておらず、道路はNEAR更新のたびに正確な高さへ
+  // 追従するのに建物は生成時の高さで固定されたままだったため、進むほど道路と建物の
+  // 高さのズレが蓄積して浮く/埋まるが悪化していた。同じ範囲で建物もY方向に追従させる。
+  rebuildBuildingsInBounds(centerX - NEAR_W/2, centerX + NEAR_W/2, centerZ - NEAR_D/2, centerZ + NEAR_D/2);
 }
 
 // プレイヤーがNEARグリッドの中心から離れたら取り直す。範囲を広げた(±4km)ぶん、
@@ -3749,52 +3828,88 @@ function processTileData(data) {
 function processOSMTileQueue() {
   while (osmTileActiveCount < OSM_TILE_CONCURRENCY && osmTileQueue.length > 0) {
     osmTileActiveCount++;
-    fetchOneOSMTile();
+    fetchOSMTileBatch();
   }
 }
 
-async function fetchOneOSMTile() {
+// Overpassクエリの各条件節(bboxを後から差し込むテンプレート)。
+// 1タイル分の絞り込み条件を、まとめて取得するタイルの数だけ繰り返して1クエリにする。
+const OSM_TILE_CLAUSES = [
+  'way["highway"]',
+  'way["building"]',
+  'way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"]',
+  'way["leisure"~"park|garden|playground"]',
+  'way["natural"~"water|wood"]',
+  'way["waterway"~"river|stream|canal|riverbank"]',
+  'relation["natural"="water"]',
+  'relation["waterway"="riverbank"]',
+  'way["railway"="rail"]',
+  'node["railway"="station"]',
+  'node["railway"="halt"]',
+  'node["public_transport"="station"]',
+];
+// 1リクエストにまとめる最大タイル数。スポーン直後・地図ジャンプ直後・急旋回時は
+// 一度に何十枚も新規タイルが必要になるが、Overpassは1ホスト1.1秒間隔の直列制限
+// (server.js)のため「1タイル=1リクエスト」だと平常時の10〜数十倍待たされていた。
+// Overpass QLは (clause(bbox1);clause(bbox2);...) のようにbboxをunionで束ねて
+// 1クエリに収められるので、近い順に最大6枚まとめて1往復で取得する。
+const OSM_TILE_BATCH = 6;
+function buildOSMBatchQuery(bboxes) {
+  const parts = [];
+  for (const clause of OSM_TILE_CLAUSES) for (const bb of bboxes) parts.push(clause + '(' + bb + ');');
+  const timeout = Math.min(60, 20 + bboxes.length * 6); // タイル数に応じて上流タイムアウトも延ばす
+  return `[out:json][timeout:${timeout}];(${parts.join('')});out geom;`;
+}
+
+async function fetchOSMTileBatch() {
   // プレイヤーに近いタイルを優先(以前はキュー投入順で、進行方向の
   // タイルが後回しになり目の前で道路が途切れたまま待たされていた)
   const ptx = player.position.x / OSM_TILE_M, ptz = player.position.z / OSM_TILE_M;
   osmTileQueue.sort((a, b) =>
     (Math.abs(a.tx + 0.5 - ptx) + Math.abs(a.tz + 0.5 - ptz)) -
     (Math.abs(b.tx + 0.5 - ptx) + Math.abs(b.tz + 0.5 - ptz)));
-  const { tx, tz } = osmTileQueue.shift();
-  const key = `${tx},${tz}`;
-  const worldX0 = tx * OSM_TILE_M, worldZ0 = tz * OSM_TILE_M;
-  const ll00 = xzToLatLon(worldX0, worldZ0);
-  const ll11 = xzToLatLon(worldX0 + OSM_TILE_M, worldZ0 + OSM_TILE_M);
-  const minLat = Math.min(ll00.lat, ll11.lat), maxLat = Math.max(ll00.lat, ll11.lat);
-  const minLon = Math.min(ll00.lon, ll11.lon), maxLon = Math.max(ll00.lon, ll11.lon);
-  const bb = `${minLat.toFixed(5)},${minLon.toFixed(5)},${maxLat.toFixed(5)},${maxLon.toFixed(5)}`;
-  // 駅ノードを追加(以前はここに含まれておらず、初期範囲外の駅が一切表示されなかった)
-  const query = `[out:json][timeout:30];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal|riverbank"](${bb});relation["natural"="water"](${bb});relation["waterway"="riverbank"](${bb});way["railway"="rail"](${bb});node["railway"="station"](${bb});node["railway"="halt"](${bb});node["public_transport"="station"](${bb}););out geom;`;
+  const batch = osmTileQueue.splice(0, OSM_TILE_BATCH); // 近い順に最大OSM_TILE_BATCH枚をまとめて1リクエストへ
+  const keys = batch.map(({tx, tz}) => `${tx},${tz}`);
+  const bboxes = batch.map(({tx, tz}) => {
+    const worldX0 = tx * OSM_TILE_M, worldZ0 = tz * OSM_TILE_M;
+    const ll00 = xzToLatLon(worldX0, worldZ0);
+    const ll11 = xzToLatLon(worldX0 + OSM_TILE_M, worldZ0 + OSM_TILE_M);
+    const minLat = Math.min(ll00.lat, ll11.lat), maxLat = Math.max(ll00.lat, ll11.lat);
+    const minLon = Math.min(ll00.lon, ll11.lon), maxLon = Math.max(ll00.lon, ll11.lon);
+    return `${minLat.toFixed(5)},${minLon.toFixed(5)},${maxLat.toFixed(5)},${maxLon.toFixed(5)}`;
+  });
+  const query = buildOSMBatchQuery(bboxes);
   let failed = false;
   try {
     const res = await fetch('https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query));
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     if (!data || !data.elements) throw new Error('no elements');
+    // 複数タイル分の要素が1つの配列で混ざって届くが、seenOSMWaysでway ID重複排除される
+    // ので、1タイルの時と同じ processTileData にそのまま渡してよい。
     processTileData(data);
-    osmTileFailCount.delete(key);
-    loadedOSMTiles.add(key); // このタイルの道路が確定 → 建物生成待ちのチャンクを解放してよい
+    keys.forEach(k => {
+      osmTileFailCount.delete(k);
+      loadedOSMTiles.add(k); // このタイルの道路が確定 → 建物生成待ちのチャンクを解放してよい
+    });
   } catch(e) {
     // 以前は3回失敗すると完全に諦めて二度と再試行しなかったため、Overpassが一時的に
     // 混雑していただけの場合でも「その区画だけ永久に道路が途切れる」ことがあった。
     // → 諦めきらず、間隔を伸ばしながら背景でずっと再試行し続ける。
     // (3回失敗した時点では建物生成だけ先に進めてよい扱いにし、後から道路が届いたら反映される)
     failed = true;
-    const n = (osmTileFailCount.get(key) || 0) + 1;
-    osmTileFailCount.set(key, n);
-    if (n >= 4) loadedOSMTiles.add(key); // これ以上は建物生成をブロックしない(道路は背景で取得を続ける)
-    fetchedOSMTiles.delete(key); // 常に再試行対象に戻す(checkOSMTiles が再度キューに積む)
+    keys.forEach(k => {
+      const n = (osmTileFailCount.get(k) || 0) + 1;
+      osmTileFailCount.set(k, n);
+      if (n >= 4) loadedOSMTiles.add(k); // これ以上は建物生成をブロックしない(道路は背景で取得を続ける)
+      fetchedOSMTiles.delete(k); // 常に再試行対象に戻す(checkOSMTiles が再度キューに積む)
+    });
   }
   // 失敗するたびに待ち時間を延ばす(最大30秒)。連続失敗中の無駄な連打を防ぎつつ、
   // 一時的な混雑が収まれば自動的に復帰して歯抜けが埋まる。
-  // (成功時はプロキシ側で既にレート制限済みなので、このワーカーはすぐ次のタイルへ)
-  const n = osmTileFailCount.get(key) || 0;
-  await new Promise(r => setTimeout(r, failed ? Math.min(30000, 3000 * n) : 200));
+  // (成功時はプロキシ側で既にレート制限済みなので、このワーカーはすぐ次のバッチへ)
+  const maxN = keys.reduce((m, k) => Math.max(m, osmTileFailCount.get(k) || 0), 0);
+  await new Promise(r => setTimeout(r, failed ? Math.min(30000, 3000 * maxN) : 200));
   osmTileActiveCount--;
   processOSMTileQueue(); // この枠が空いたので、キューに残りがあれば次を拾う
 }
@@ -4088,10 +4203,15 @@ function updateChunks() {
       collisionBoxes = collisionBoxes.filter(b => b.chunkKey !== key);
       minimapBuildings = minimapBuildings.filter(b => b.ck !== key);
       placedBuildings = placedBuildings.filter(b => b.ck !== key);
+      // resnap記録も一緒に捨てないと、消えたはずの建物パーツをいつまでも参照し続ける
+      // (実OSM建物はck=nullなので手続き生成チャンクのアンロードでは消えない=想定通り)
+      for (let i = buildingRecords.length - 1; i >= 0; i--) {
+        if (buildingRecords[i].ck === key) buildingRecords.splice(i, 1);
+      }
       removedAny = true;
     }
   }
-  if (removedAny) rebuildCollGrid();
+  if (removedAny) { rebuildCollGrid(); rebuildBuildingGrid(); }
 }
 
 // このチャンクの範囲を覆うOSMタイルが全て「道路確定済み」かどうか。
@@ -4358,7 +4478,12 @@ function animate() {
   // 建物が1つあるだけで、後続の「もう準備が整っている」他エリアの建物まで全部
   // 足止めされていた。これが移動速度に読み込みが追いつかない主因の一つ。
   // → 未準備の建物は諦めずキュー末尾へ回して次を試す(他が足止めされないように)。
-  for (let n = 0; n < 20 && pendingBuildingIdx < pendingBuildings.length; n++) {
+  // 固定20棟/フレームだと、密集タイルが届いた直後にバックログが溜まりやすい。
+  // 未処理分(バックログ)が多いほど今フレームの処理数を増やす可変バジェットにし、
+  // 通常時(バックログ小)はコマ落ちさせない20棟のまま、山になった時だけ追いつく。
+  const _buildBacklog = pendingBuildings.length - pendingBuildingIdx;
+  const _buildBudget = Math.min(80, 20 + Math.floor(_buildBacklog / 25));
+  for (let n = 0; n < _buildBudget && pendingBuildingIdx < pendingBuildings.length; n++) {
     const b = pendingBuildings[pendingBuildingIdx++];
     const bcx = Math.floor(b.x / CHUNK_SIZE), bcz = Math.floor(b.z / CHUNK_SIZE);
     if (!IS_MEIJI && !chunkNearTerrainReady(bcx, bcz)) {
