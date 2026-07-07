@@ -2438,6 +2438,27 @@ function proceduralElevs(elevs) {
   }
 }
 
+// 同時実行数を絞ってバッチ処理する小さなワーカープール。
+// 標高取得を Promise.all で無制限に並列発行していたところ、遠景の高解像度化(WIDE_SEGS増)
+// と合わさって一度に最大50件以上の同時リクエストが発生し、プロキシ/サーバーが詰まって
+// OSM取得(伊勢原本体)まで巻き添えで失敗する、遠くへジャンプした際に地形取得自体が
+// 失敗して何も描写されない、という不具合を起こしていた。同時実行数を小さく固定する。
+const FETCH_CONCURRENCY = 3;
+async function runLimited(items, worker, limit = FETCH_CONCURRENCY) {
+  const results = new Array(items.length);
+  let idx = 0;
+  async function runNext() {
+    while (idx < items.length) {
+      const i = idx++;
+      results[i] = await worker(items[i], i);
+    }
+  }
+  const pool = [];
+  for (let n = 0; n < Math.min(limit, items.length); n++) pool.push(runNext());
+  await Promise.all(pool);
+  return results;
+}
+
 async function loadElevations() {
   statusEl.textContent = '🏔 地形データ取得中...';
   // Build lat/lon for each vertex
@@ -2453,16 +2474,16 @@ async function loadElevations() {
   const elevs = new Array(latlons.length).fill(0);
   let ok = true;
   try {
-    // バッチを並列発行する。opentopodataの1req/秒レート制限は server/server.js の
-    // プロキシ側(scheduleUpstream)が直列キューで既に守っているため、クライアント側で
-    // さらに1.1秒ずつ待つのは二重の待機になっていた(初回読み込みが不必要に遅い主因)。
-    // プロキシ経由でない直叩き運用は想定していない(README/DEPLOY.md参照)。
+    // バッチを少数ずつ並列発行する(FETCH_CONCURRENCY件まで)。opentopodataの1req/秒
+    // レート制限は server/server.js のプロキシ側(scheduleUpstream)が直列キューで既に
+    // 守っているため、クライアント側でさらに1.1秒ずつ待つのは二重の待機だった。
+    // ただし無制限に同時発行するとプロキシ/サーバーが詰まるため、少数の同時実行数に絞る。
     const batches = [];
     for (let i = 0; i < latlons.length; i += 100) batches.push(latlons.slice(i, i + 100));
-    const results = await Promise.all(batches.map(batch => {
+    const results = await runLimited(batches, batch => {
       const locStr = batch.map(ll => `${ll.lat.toFixed(6)},${ll.lon.toFixed(6)}`).join('|');
       return fetch(`https://api.opentopodata.org/v1/srtm30m?locations=${encodeURIComponent(locStr)}`).then(r => r.json());
-    }));
+    });
     results.forEach((json, bi) => {
       if (json && json.results) json.results.forEach((r, j) => { elevs[bi*100 + j] = r.elevation || 0; });
       else ok = false; // 429等 — 失敗分は0のままだが、ok=falseで下のprocedural地形に総入れ替えされる
@@ -2540,13 +2561,14 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
     }
   const raw = new Array(pts.length).fill(null);
   try {
-    // loadElevations と同じ理由でバッチを並列発行(プロキシ側で既にレート制限・キャッシュ済み)
+    // loadElevations と同じ理由で少数の同時実行数に絞ってバッチ発行する
+    // (解像度アップでバッチ数が最大54件まで増えたため、無制限並列だと確実に詰まる)
     const batches = [];
     for (let i = 0; i < pts.length; i += 100) batches.push(pts.slice(i, i + 100));
-    const results = await Promise.all(batches.map(batch => {
+    const results = await runLimited(batches, batch => {
       const loc = batch.map(ll => `${ll.lat.toFixed(6)},${ll.lon.toFixed(6)}`).join('|');
       return fetch(`https://api.opentopodata.org/v1/srtm30m?locations=${encodeURIComponent(loc)}`).then(r => r.json());
-    }));
+    });
     for (let bi = 0; bi < results.length; bi++) {
       const j = results[bi];
       if (!j || !j.results) { wideLoading = false; return; } // 失敗時は現状維持(安全なフォールバック)
@@ -2654,10 +2676,13 @@ async function fetchOSMData() {
   const query = `[out:json][timeout:40];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal|riverbank"](${bb});relation["natural"="water"](${bb});relation["waterway"="riverbank"](${bb});way["railway"="rail"](${bb});node["railway"="station"](${bb});node["railway"="halt"](${bb});node["public_transport"="station"](${bb}););out geom;`;
   const url = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
   try {
-    statusEl.textContent = '🗺 伊勢原マップ取得中... (最大30秒)';
+    statusEl.textContent = '🗺 伊勢原マップ取得中... (最大45秒)';
+    // クエリ自体のOverpass側タイムアウトが40秒なのに、クライアント側は32秒で見切っていたため、
+    // サーバーがまだ処理中でも早期に諦めてフォールバック(単純格子状マップ)になることがあった。
+    // サーバー側タイムアウトより余裕を持たせる。
     const res = await Promise.race([
       fetch(url).then(r=>r.json()),
-      new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')), 32000))
+      new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')), 45000))
     ]);
     return res;
   } catch(e) {
@@ -3360,9 +3385,9 @@ const loadedOSMTiles = new Set();    // 実際に処理が完了した(道路が
 const osmTileQueue = [];
 // タイル取得の同時実行数。以前は1件ずつ完全直列だったため、ダッシュ(最大45m/s)で
 // 移動すると描写エリアの拡大がまったく追いつかず、未読み込みの端に突き当たっていた。
-// server/server.js のプロキシが上流(overpass-api.de)へのレート制限を既に一元管理して
-// いるので、クライアント側は複数タイルを並行にリクエストして問題ない。
-const OSM_TILE_CONCURRENCY = 4;
+// 一方で4は欲張りすぎで、遠景地形の高解像度化(WIDE_SEGS増)による大量リクエストと
+// 重なった際にプロキシ/サーバーを詰まらせていたため、控えめな2に落とす。
+const OSM_TILE_CONCURRENCY = 2;
 let osmTileActiveCount = 0;
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
 // 【重要】標高データ+初期OSMのロード完了までタイル取得を止めるゲート。
