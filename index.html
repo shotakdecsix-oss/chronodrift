@@ -36,22 +36,7 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
   padding:10px 20px; font-size:13px;
   pointer-events:none; text-align:center;
 }
-/* 周辺の道路・建物データを取得/生成している間だけ出す小さな表示。
-   起動時の #status と違い常駐監視で、歩いている最中に「今読み込み中なのか、
-   本当に何もないエリアなのか」を区別できるようにする */
-#tileLoading {
-  /* 以前は top:16px;right:16px で #uiToggleBtn(同じ位置・z-index:40)の真下に
-     完全に隠れてしまい、条件は満たしていても画面上には一切見えていなかった。
-     #info(top:64px)の下の空きスペースへ移動する。 */
-  position:fixed; top:150px; right:16px;
-  background:rgba(70,35,10,0.85); color:#ffcf80;
-  border:1px solid rgba(255,170,60,0.7); border-radius:8px;
-  padding:6px 12px; font-size:12px;
-  pointer-events:none; z-index:22;
-  text-shadow:0 0 6px rgba(255,170,60,0.6);
-  display:none;
-}
-#tileLoading.active { display:block; }
+/* #tileLoading(周辺データ読み込み中バッジ)は、常時表示され続けて意味を成さなかったため廃止した。 */
 /* 現在地の住所(市区町村+町名レベル)。移動中に常時表示し続ける */
 #addressDisplay {
   position:fixed; top:16px; left:50%; transform:translateX(-50%);
@@ -239,7 +224,6 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
   スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ
 </div>
 <div id="status">🗺 伊勢原マップ読み込み中...</div>
-<div id="tileLoading">⏳ 周辺データ読み込み中 LOADING...</div>
 <a id="gpsDisplay" href="#" target="_blank">📍 座標取得中...</a>
 <div id="minimap"><canvas id="minimapCanvas" width="200" height="200"></canvas></div>
 <div id="joystick"><div id="joystickKnob"></div></div>
@@ -2053,7 +2037,6 @@ function addStation(x, z, name) {
 
 // ======= OSM DATA LOADER =======
 const statusEl = document.getElementById('status');
-const tileLoadingEl = document.getElementById('tileLoading');
 // 初期スポーン: 神奈川県伊勢原市東成瀬2-2-11
 // (国土地理院ジオコーディング「東成瀬2番地」= 35.409103, 139.342331)
 const SPAWN_LAT = 35.409103, SPAWN_LON = 139.342331;
@@ -2617,9 +2600,20 @@ async function loadElevations() {
 // 起きていた。そこで2段階構成にする:
 //   ① FAR  = 広い範囲(±14km)を低解像度で覆う。地平線に見える山並み・海岸線の概形用。
 //            取得点数が少ない(約9バッチ)ので初回・再取得とも短時間で確実に終わる。
-//   ② NEAR = プレイヤーの周囲だけ(±2km)を伊勢原と同程度の解像度(約170m間隔)で覆う。
-//            範囲が狭いので取得点数も少なく(約7バッチ)、頻繁に取り直しても軽い。
+//   ② NEAR = プレイヤーの周囲(±4km)を比較的高い解像度(約300〜400m間隔)で覆う。
+//            範囲が狭いので取得点数も少なく、頻繁に取り直しても軽い。
 // 実際の高さ問い合わせ(getWideTerrainY)は、まずNEARの範囲内ならNEARを、範囲外ならFARを返す。
+//
+// 【opentopodata公開APIの実際の上限(公式ポリシーで確認済み)】
+//   1リクエスト/秒・1リクエスト最大100地点、かつ「1日あたり最大1000コール」というハード上限がある。
+//   NEARを伊勢原本体と同じ約170m間隔・±2kmのままだと、ダッシュ(45m/s)で動き続けた場合
+//   1時間で900コール超に達し、1日の上限をわずか1時間程度で使い切ってしまう計算になった。
+//   上限に達すると以降その日は標高取得が失敗し続け、地形が更新されなくなる(=読み込みが
+//   進まないまま止まる)ため、これが「読み込みが遅い/終わらない」の一因になっていた可能性が高い。
+//   → NEARの範囲を広げ(±2km→±4km)て取り直しの頻度そのものを下げ、かつ解像度を少し
+//   落とす(約170m→約300〜400m)ことで、1回の取り直しあたりのバッチ数と発生頻度の両方を
+//   減らした。体感の「待ち時間」は「取り直し頻度 × 1回あたりの待ち時間」で決まるため、
+//   頻度を下げるほうが解像度をわずかに落とすより効果が大きい。
 const WIDE_HALF_LAT = 0.13, WIDE_HALF_LON = 0.13;   // FAR: ≈ ±14km(低解像度)
 const WIDE_SEGS = 28, WIDE_SEGS1 = WIDE_SEGS + 1;   // FAR: 約1km間隔、約9バッチ
 const WIDE_W = 2 * WIDE_HALF_LON * SCALE * COS_LAT;
@@ -2628,8 +2622,8 @@ const WIDE_D = 2 * WIDE_HALF_LAT * SCALE;
 // これで富士山など伊勢原から離れた場所でも実際の地形・標高が出る。
 let wideCX = 0, wideCZ = 0, wideLoading = false;
 
-const NEAR_HALF_LAT = 0.018, NEAR_HALF_LON = 0.018; // NEAR: ≈ ±2km(高解像度・プレイヤー追従)
-const NEAR_SEGS = 24, NEAR_SEGS1 = NEAR_SEGS + 1;   // NEAR: 約170m間隔、約7バッチ
+const NEAR_HALF_LAT = 0.036, NEAR_HALF_LON = 0.036; // NEAR: ≈ ±4km(高解像度・プレイヤー追従)
+const NEAR_SEGS = 20, NEAR_SEGS1 = NEAR_SEGS + 1;   // NEAR: 約300〜400m間隔、約5バッチ
 const NEAR_W = 2 * NEAR_HALF_LON * SCALE * COS_LAT;
 const NEAR_D = 2 * NEAR_HALF_LAT * SCALE;
 let nearElev = null, nearCX = 0, nearCZ = 0, nearLoading = false;
@@ -2764,18 +2758,17 @@ async function loadNearTerrain(centerX = 0, centerZ = 0) {
   rebuildAreaPolysInBounds(centerX - NEAR_W/2, centerX + NEAR_W/2, centerZ - NEAR_D/2, centerZ + NEAR_D/2);
 }
 
-// プレイヤーがNEARグリッドの中心から離れたら取り直す。範囲が狭い分、判定・取り直しの
-// 両方をFARより頻繁にし、常にプレイヤー周辺だけは高解像度になるよう追従させる。
-// 失敗が続く場合は間隔を伸ばして無駄打ちを防ぎつつ、一定回数を超えたら「NEARは無いもの」として
-// 建物生成のブロックを解除する(APIが長時間ダウンしても永久にチャンク生成が止まらないように)。
+// プレイヤーがNEARグリッドの中心から離れたら取り直す。範囲を広げた(±4km)ぶん、
+// 閾値も0.3→0.4に上げて取り直し頻度自体を下げた(opentopodataの1日1000コール上限対策。
+// 上のNEAR定数のコメント参照)。それでも端に近づく前に十分な余裕を残して取り直す。
 let _nearCheckFrame = 0, _nearFailCount = 0, _nearGiveUp = false;
 function checkNearTerrain() {
   if (nearLoading) return;
   const interval = 30 * Math.min(20, 1 + _nearFailCount); // 失敗するたび間隔を伸ばす(最大10秒)
   if ((++_nearCheckFrame) % interval !== 0) return;
   if (!nearElev ||
-      Math.abs(player.position.x - nearCX) > NEAR_W * 0.3 ||
-      Math.abs(player.position.z - nearCZ) > NEAR_D * 0.3) {
+      Math.abs(player.position.x - nearCX) > NEAR_W * 0.4 ||
+      Math.abs(player.position.z - nearCZ) > NEAR_D * 0.4) {
     loadNearTerrain(player.position.x, player.position.z);
   }
 }
@@ -2963,12 +2956,14 @@ async function loadOSM(preFetchedData) {
       const w = Math.max(maxDx * 2, 2);
       const d = Math.max(maxDz * 2, 2);
 
-      if (isOnRoad(cx, cz, w, d)) return; // road takes priority
-
       const style = getBuildingStyle(tags);
       const levels = parseInt(tags['building:levels']) || 1 + Math.floor(Math.random()*3);
       const h = Math.max(levels * 3, 3) + Math.random()*2;
-      addBuilding(cx, cz, w, d, h, style);
+      // 直接生成せず、タイル取得分と同じキューに積んでフレーム分割で生成する。
+      // 【重要】以前はここで直接addBuildingしており、NEAR高解像度地形がまだ届く前に
+      // 高さが焼き込まれてしまい、初期スポーン周辺の建物が浮く/埋まる主な原因になっていた。
+      // isOnRoad判定はキュー投入時ではなく、他の建物と同じくフレーム分割の生成時に行う。
+      pendingBuildings.push({ x: cx, z: cz, w, d, h, style });
       buildingCount++;
     }
   });
@@ -3097,8 +3092,10 @@ function xzToLatLon(x, z) {
 
 // ======= 現在地の住所表示(市区町村+町名レベル)。移動中ずっと更新する =======
 // Nominatim(OSMの逆ジオコーディング)を server/server.js 経由(/api/nominatim)で叩く。
-// 公開APIの利用制限(実質1req/秒程度)を尊重するため、時間(約6秒)と移動距離(80m)の
-// 両方が閾値を超えたときだけ再取得する。失敗時は前回の表示を維持する(安全側)。
+// 公式ポリシー上、移動のたびに逐次リバースジオコーディングする使い方は
+// 「reverse queries in a grid」に近く、頻度が高すぎると禁止行為(BAN対象)とみなされ得る。
+// そのため、時間(約45秒)と移動距離(400m)の両方が閾値を超えたときだけ再取得する
+// (「時々ふりかえって現在地を確認する」程度の頻度に抑える)。失敗時は前回の表示を維持する。
 const addressEl = document.getElementById('addressDisplay');
 let addrFetching = false, lastAddrX = null, lastAddrZ = null, _addrCheckFrame = 0;
 async function updateAddressDisplay() {
@@ -3122,8 +3119,8 @@ async function updateAddressDisplay() {
 function checkAddressDisplay() {
   if (!initialWorldLoaded) return;
   _addrCheckFrame++;
-  if (_addrCheckFrame % 360 !== 0) return; // ~6秒ごと
-  if (lastAddrX !== null && Math.hypot(player.position.x - lastAddrX, player.position.z - lastAddrZ) < 80) return;
+  if (_addrCheckFrame % 2700 !== 0) return; // ~45秒ごと
+  if (lastAddrX !== null && Math.hypot(player.position.x - lastAddrX, player.position.z - lastAddrZ) < 400) return;
   lastAddrX = player.position.x; lastAddrZ = player.position.z;
   updateAddressDisplay();
 }
@@ -3792,23 +3789,11 @@ async function fetchOneOSMTile() {
   processOSMTileQueue(); // この枠が空いたので、キューに残りがあれば次を拾う
 }
 
-// 道路・建物データを取得/生成している最中かどうかを画面右上に出す。
-// 「何もない」のか「まだ読み込み中」なのかをプレイヤーが区別できるようにするための表示。
-function updateLoadingIndicator() {
-  if (!tileLoadingEl) return;
-  // 取得待ち/取得中のOSMタイル、道路確定待ちの建物生成チャンク、
-  // フレーム分割でまだ生成しきっていないタイル取得分の建物、のいずれかがあれば「読み込み中」
-  const busy = osmTileActiveCount > 0 || osmTileQueue.length > 0 || chunkGenQueue.length > 0 ||
-               pendingBuildingIdx < pendingBuildings.length || wideLoading || nearLoading;
-  tileLoadingEl.classList.toggle('active', busy);
-}
-
 let _osmCheckFrame = 0;
 let _osmLastPx = null, _osmLastPz = null;
 function checkOSMTiles() {
   if (!initialWorldLoaded) return; // 標高+初期OSMが揃うまで開始しない(高さ競合防止)
   _osmCheckFrame++;
-  updateLoadingIndicator(); // キューの増減はここで毎回チェック(~1/60秒ごと呼ばれる)
   if (_osmCheckFrame % 30 !== 0) return; // ~0.5秒ごと(移動中の追随を速める)
   const px = player.position.x, pz = player.position.z;
   // 明治: プレイヤー周辺の二次メッシュ土地利用データも必要に応じて追加取得
@@ -4351,9 +4336,17 @@ function animate() {
   // Dynamic chunk streaming — generates buildings around player as they explore
   updateChunks();
   processChunkQueue(); // フレーム分割: 1チャンク/フレーム
-  // タイル取得分の建物もフレーム分割(20棟/フレーム)で生成
+  // タイル取得分の建物もフレーム分割(20棟/フレーム)で生成。
+  // 【重要】以前はここでNEAR地形の準備状況を一切見ていなかった。チャンク生成側
+  // (processChunkQueue/chunkNearTerrainReady)だけをゲートしても、実際の建物の大半は
+  // OSMタイルのポリゴンから来るこちらの経路で生成されるため、浮き/埋まりが直りきって
+  // いなかった。同じ判定をここにも入れ、NEARがまだその位置を覆っていなければこのフレームは
+  // ここで足踏みする(同じ建物から次フレームで再判定。手前で止めるだけなのでコストは低い)。
   for (let n = 0; n < 20 && pendingBuildingIdx < pendingBuildings.length; n++) {
-    const b = pendingBuildings[pendingBuildingIdx++];
+    const b = pendingBuildings[pendingBuildingIdx];
+    const bcx = Math.floor(b.x / CHUNK_SIZE), bcz = Math.floor(b.z / CHUNK_SIZE);
+    if (!IS_MEIJI && !chunkNearTerrainReady(bcx, bcz)) break;
+    pendingBuildingIdx++;
     if (!isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style);
   }
   if (pendingBuildingIdx > 0 && pendingBuildingIdx === pendingBuildings.length) {
