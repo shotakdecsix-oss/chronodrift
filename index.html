@@ -597,7 +597,8 @@ function roadNear(x, z, extra) {
 // ジオメトリ全再構築は不要)。ただし建物フットプリント内で傾斜が大きく
 // 変化した場合は一律シフトだけでは片側だけ残ることがある(既知の限界。
 // まずはこの方式で様子を見て、必要なら角ごとの微傾斜補正を検討する)。
-const buildingRecords = []; // {x,z,w,d,gy,parts:[mesh/light,...],cbox,ck}
+const buildingRecords = []; // {x,z,w,d,h,style,gy,parts:[mesh/light,...],cbox,ck,bid}
+let _buildingIdSeq = 0; // collisionBoxes/minimapBuildings/placedBuildingsから一括削除するための共通ID
 const BUILDING_CELL = 80;
 let buildingGrid = new Map();
 function buildingGridAdd(rec) {
@@ -644,6 +645,45 @@ function rebuildBuildingsInBounds(x0, x1, z0, z1) {
       rebuildBuildingHeight(rec);
     }
   }
+}
+
+// 【重要】実OSM建物(タイル取得・初期ロード由来)は、手続き生成のチャンク建物と違って
+// 一度生成されると距離に関係なく永久にscene・collisionBoxes等に残り続けていた。
+// 探索範囲が広がるほど建物数が際限なく増え、最終的に描画・メモリが持たずに
+// 「移動を続けると徐々に重くなり落ちる」症状になっていた。
+// ここでプレイヤーから一定距離を超えた実建物のTHREE.jsオブジェクトを解放する。
+// ただし完全に忘れるのではなく、軽量な記述(x,z,w,d,h,style)だけpendingBuildingsへ
+// 戻しておき、再訪時にNEAR準備が整えば通常の経路でまた生成されるようにする
+// (手続き生成建物のチャンク・アンロード/再生成と同じ考え方)。
+const BUILDING_UNLOAD_DIST = 2500;
+let _buildingUnloadFrame = 0;
+function unloadFarBuildings() {
+  _buildingUnloadFrame++;
+  if (_buildingUnloadFrame % 90 !== 0) return; // 毎フレームやる必要はない(~1.5秒ごと)
+  if (buildingRecords.length === 0) return;
+  const px = player.position.x, pz = player.position.z;
+  const d2 = BUILDING_UNLOAD_DIST * BUILDING_UNLOAD_DIST;
+  const removeIds = new Set();
+  for (let i = buildingRecords.length - 1; i >= 0; i--) {
+    const rec = buildingRecords[i];
+    const dx = rec.x - px, dz = rec.z - pz;
+    if (dx * dx + dz * dz <= d2) continue; // まだ範囲内
+    for (const p of rec.parts) {
+      if (!p) continue;
+      scene.remove(p);
+      if (p.geometry && !p.geometry.userData.shared) p.geometry.dispose();
+    }
+    removeIds.add(rec.bid);
+    buildingRecords.splice(i, 1);
+    // 再訪時に復元できるよう、軽量な記述だけキューへ戻す
+    pendingBuildings.push({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h, style: rec.style });
+  }
+  if (removeIds.size === 0) return;
+  collisionBoxes = collisionBoxes.filter(b => !removeIds.has(b.buildingId));
+  minimapBuildings = minimapBuildings.filter(b => !removeIds.has(b.bid));
+  placedBuildings = placedBuildings.filter(b => !removeIds.has(b.bid));
+  rebuildCollGrid();
+  rebuildBuildingGrid();
 }
 
 let placedBuildings = [];  // {x,z,r,ck} for landuse de-duplication
@@ -1112,17 +1152,32 @@ function makePool(geo, mat, max) {
 // 注意: 同じプールでは color を「常に渡す」か「常に渡さない」かを統一する
 // (instanceColor バッファは初期値0=黒のため混在させると未設定分が黒くなる)
 function poolAdd(pool, x, y, z, ry, sx, sy, sz, color) {
-  if (pool.n >= pool.max) return;
+  if (pool.n >= pool.max) return -1;
+  const idx = pool.n; // 呼び出し元がインスタンス番号を覚えておけば、後から位置だけ更新できる
   _dummy.position.set(x, y, z);
   _dummy.rotation.set(0, ry || 0, 0);
   _dummy.scale.set(sx || 1, sy || 1, sz || 1);
   _dummy.updateMatrix();
-  pool.mesh.setMatrixAt(pool.n, _dummy.matrix);
-  if (color !== undefined) pool.mesh.setColorAt(pool.n, _tmpColor.setHex(color));
+  pool.mesh.setMatrixAt(idx, _dummy.matrix);
+  if (color !== undefined) pool.mesh.setColorAt(idx, _tmpColor.setHex(color));
   pool.n++;
   pool.mesh.count = pool.n;
   pool.mesh.instanceMatrix.needsUpdate = true;
   if (pool.mesh.instanceColor) pool.mesh.instanceColor.needsUpdate = true;
+  return idx;
+}
+// 指定インスタンスのY位置だけ書き換える(向き・スケール・XZは維持)。
+// 橋脚など「地形更新に追従して高さだけ直したい」インスタンスの再配置に使う。
+const _instMat = new THREE.Matrix4(), _instPos = new THREE.Vector3(),
+      _instQuat = new THREE.Quaternion(), _instScale = new THREE.Vector3();
+function poolSetY(pool, idx, newY) {
+  if (idx == null || idx < 0) return;
+  pool.mesh.getMatrixAt(idx, _instMat);
+  _instMat.decompose(_instPos, _instQuat, _instScale);
+  _instPos.y = newY;
+  _instMat.compose(_instPos, _instQuat, _instScale);
+  pool.mesh.setMatrixAt(idx, _instMat);
+  pool.mesh.instanceMatrix.needsUpdate = true;
 }
 // プールのジオメトリ・マテリアルはモードで決める(生成ロジック側は共通)
 // 電柱: 江戸=木柱(行灯付き) / メルヘン=ピンクのキャンディ街灯 / 宇宙=発光エネルギーポール
@@ -1282,6 +1337,7 @@ function getBuildingStyle(tags) {
 }
 
 function addBuilding(x, z, w, d, h, style) {
+  const _origH = h; // 遠方アンロード時、再生成できるよう元のhを覚えておく(下でhを斜面ぶん延長するため)
   // 4隅+中心の地形高さを見て、最低点を基礎にし最高点まで胴体を延長。
   // (中心1点だけだと斜面で山側が埋まり、谷側が浮いていた)
   const hs = [
@@ -1490,16 +1546,21 @@ function addBuilding(x, z, w, d, h, style) {
     new THREE.Vector3(x+w/2, gy + h, z+d/2)
   );
   cbox.chunkKey = currentChunkKey;
+  // 実OSM建物を遠方アンロードする際、collisionBoxes/minimapBuildings/placedBuildings
+  // からもこのbuilding分だけ一括で取り除けるよう、共通のIDを振っておく。
+  const bid = _buildingIdSeq++;
+  cbox.buildingId = bid;
   collisionBoxes.push(cbox);
   collGridAdd(cbox);
 
   // Minimap record
-  minimapBuildings.push({x, z, w, d, ck: currentChunkKey});
+  minimapBuildings.push({x, z, w, d, ck: currentChunkKey, bid});
   // Spatial index for landuse fill de-duplication
-  placedBuildings.push({x, z, r: Math.max(w,d)/2, ck: currentChunkKey});
+  placedBuildings.push({x, z, r: Math.max(w,d)/2, ck: currentChunkKey, bid});
 
-  // resnap用の記録(地形が後から更新された時にこのbuilding一式をY方向へ平行移動する)
-  const brec = { x, z, w, d, gy, parts, cbox, ck: currentChunkKey };
+  // resnap用の記録(地形が後から更新された時にこのbuilding一式をY方向へ平行移動する)。
+  // h/styleも保持しておき、遠方アンロード時にpendingBuildingsへ戻して再訪時に再生成できるようにする。
+  const brec = { x, z, w, d, h: _origH, style, gy, parts, cbox, ck: currentChunkKey, bid };
   buildingRecords.push(brec);
   buildingGridAdd(brec);
 }
@@ -1692,12 +1753,35 @@ function makeMotorwayGeo(x1, z1, x2, z2) {
 }
 
 // 高架の桁メッシュを、現在の地形高さに合わせて作り直す(rebuildRoadMeshから呼ばれる)
+// 高架の見た目(桁)だけでなく、床スラブ・橋脚の当たり判定も現在の地形高さへ合わせ直す。
+// 【重要】以前はここで桁の見た目(mesh.geometry)だけ再構築し、当たり判定のBox3群は
+// 生成時の高さのまま放置していた。NEAR地形が後から更新されて見た目の桁が正しい高さへ
+// 動いても、当たり判定・橋脚の見た目は古い高さに取り残されたままになり、「見た目の
+// 道路面には乗れず、桁の上の何もない空間(=古い当たり判定の位置)に乗れてしまう」上に
+// 橋脚だけが空中に浮いて見えるバグの原因になっていた。
+// 道路面と同じ考え方(位置は変えずジオメトリ/高さだけ作り直す)を、当たり判定・
+// 橋脚インスタンス(poolSetYでY座標だけ書き換え、向き・スケールは維持)にも適用する。
 function rebuildMotorwayMesh(r) {
   if (!r.mesh) return;
   const geo = makeMotorwayGeo(r.x1, r.z1, r.x2, r.z2);
   if (!geo) return;
   r.mesh.geometry.dispose();
   r.mesh.geometry = geo;
+  if (r.slabBoxes) {
+    for (const sb of r.slabBoxes) {
+      const y = Math.min(getGroundY(sb.ax, sb.az), getGroundY(sb.bx, sb.bz)) + MWY_H;
+      sb.box.min.y = y - 0.25;
+      sb.box.max.y = y + 0.35;
+    }
+  }
+  if (r.pierBoxes) {
+    for (const pb of r.pierBoxes) {
+      const gy = getGroundY(pb.cx, pb.cz);
+      pb.box.min.y = gy;
+      pb.box.max.y = gy + MWY_H - 1.1;
+      poolSetY(pierP, pb.poolIdx, gy + (MWY_H - 1.1) / 2); // 見た目の柱も同じ高さへ
+    }
+  }
 }
 
 function addMotorway(x1, z1, x2, z2) {
@@ -1712,18 +1796,22 @@ function addMotorway(x1, z1, x2, z2) {
   mesh.renderOrder = 1;
   scene.add(mesh);
 
-  // 橋脚(約26m間隔)+柱の当たり判定(通り抜け不可)
+  // 橋脚(約26m間隔)+柱の当たり判定(通り抜け不可)。resnapできるよう座標をpierBoxesに記録する。
+  const pierBoxes = [];
   for (let s = 14; s < len - 6; s += 26) {
     const cx = x1 + nx * s, cz = z1 + nz * s;
     const gy = getGroundY(cx, cz);
-    poolAdd(pierP, cx, gy + (MWY_H - 1.1) / 2, cz, Math.atan2(-nz, nx), 2.4, MWY_H - 1.1, 6);
+    const pierIdx = poolAdd(pierP, cx, gy + (MWY_H - 1.1) / 2, cz, Math.atan2(-nz, nx), 2.4, MWY_H - 1.1, 6);
     const pb = new THREE.Box3(
       new THREE.Vector3(cx - 1.6, gy, cz - 1.6),
       new THREE.Vector3(cx + 1.6, gy + MWY_H - 1.1, cz + 1.6));
     pb.chunkKey = currentChunkKey;
     collisionBoxes.push(pb); collGridAdd(pb);
+    pierBoxes.push({ box: pb, cx, cz, poolIdx: pierIdx });
   }
-  // 桁上の床スラブ(22m刻みの薄い水平ボックス)。y範囲が桁の高さだけなので高架下の通行は妨げない
+  // 桁上の床スラブ(22m刻みの薄い水平ボックス)。y範囲が桁の高さだけなので高架下の通行は妨げない。
+  // resnapできるよう区間の端点座標をslabBoxesに記録する。
+  const slabBoxes = [];
   for (let s = 0; s < len; s += 22) {
     const e = Math.min(len, s + 22);
     const ax = x1 + nx * s, az = z1 + nz * s, bx = x1 + nx * e, bz = z1 + nz * e;
@@ -1733,9 +1821,11 @@ function addMotorway(x1, z1, x2, z2) {
       new THREE.Vector3(Math.max(ax, bx) + hw2, y + 0.35, Math.max(az, bz) + hw2));
     cb.chunkKey = currentChunkKey;
     collisionBoxes.push(cb); collGridAdd(cb);
+    slabBoxes.push({ box: cb, ax, az, bx, bz });
   }
-  // mesh を記録し、NEAR地形更新時に桁を現在の地形高さへ作り直せるようにする(浮き/埋まり対策)
-  addRoadRecord({ x1, z1, x2, z2, type: 'motorway', rw: MWY_W, mesh });
+  // mesh・当たり判定の座標を記録し、NEAR地形更新時に桁と当たり判定を一緒に
+  // 現在の地形高さへ作り直せるようにする(浮き/埋まり・判定ズレ対策)
+  addRoadRecord({ x1, z1, x2, z2, type: 'motorway', rw: MWY_W, mesh, pierBoxes, slabBoxes });
 }
 
 // Shared road materials (created once, reused)
@@ -4497,6 +4587,9 @@ function animate() {
   if (pendingBuildingIdx > 0 && pendingBuildingIdx === pendingBuildings.length) {
     pendingBuildings.length = 0; pendingBuildingIdx = 0;
   }
+  // 実OSM建物が距離に関係なく無限に溜まり続けメモリ・描画負荷が際限なく増える
+  // (長時間プレイでの重量化→クラッシュ)のを防ぐため、遠方の建物を解放する
+  unloadFarBuildings();
   // Tile-based OSM fetch — loads roads/buildings for newly entered areas
   checkOSMTiles();
   // 遠景標高グリッドをプレイヤーに追従(遠くへジャンプしても実地形・標高が出る)
