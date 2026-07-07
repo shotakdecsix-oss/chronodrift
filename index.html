@@ -2899,7 +2899,9 @@ async function loadOSM(preFetchedData) {
     if (tags.highway && el.geometry && el.geometry.length >= 2) {
       const hw = tags.highway;
       const isImportant = hw==='trunk' || hw==='primary' || hw==='secondary' || hw==='motorway';
-      if (!isImportant && roadCount >= 2500) return; // 800では市街地の細街路が途中で打ち切られ歯抜けになっていた
+      // 2500だと伊勢原駅周辺など密な市街地で細街路が途中打ち切りになり、その空白地に
+      // (別キャップの)建物だけは生成されてしまうため「建物が道路をふさぐ」ように見えていた。
+      if (!isImportant && roadCount >= 6000) return;
       const width = hw==='trunk'||hw==='primary' ? 8 : hw==='secondary' ? 6 : hw==='tertiary'||hw==='residential' ? 4 : 2.5;
       const type = hw==='motorway' ? 'motorway' : hw==='motorway_link' ? 'trunk'
                  : (hw==='trunk'||hw==='primary'||hw==='secondary'||hw==='tertiary') ? hw : 'road';
@@ -2942,7 +2944,7 @@ async function loadOSM(preFetchedData) {
       const st = getBuildingStyle(tags);
       if (!st || (st.type !== 'shrine' && st.type !== 'temple')) return;
     }
-    if (tags.building && buildingCount < 1200 && el.geometry && el.geometry.length >= 4) { // 700では初期エリア内でも歯抜けが出ていた
+    if (tags.building && buildingCount < 3000 && el.geometry && el.geometry.length >= 4) { // 700/1200では初期エリア内でも歯抜けが出ていた
       const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
       let cx = 0, cz = 0;
       pts.forEach(p => { cx += p.x; cz += p.z; });
@@ -3588,9 +3590,13 @@ function floorHeightAt(x, z, fromY) {
 // Overpassの公開サーバーは(プロキシ側で守っている)実質1リクエスト/秒程度の上限があり、
 // これはタイルをどれだけ並行リクエストしても変わらない(サーバー側でホスト単位に直列化されるため)。
 // つまり「1秒間に処理できるタイル数」はほぼ固定で、稼げるのは「1タイルでカバーする面積」だけ。
-// 以前は700m四方だったため、ダッシュ(最大45m/s)で移動すると新規エリアのカバーが追いつかない
-// ことがあった。1タイルを大きくして、同じ範囲を埋めるのに必要なリクエスト数自体を減らす。
-const OSM_TILE_M = 1100;
+// 以前は700m→1100m四方だったが、ダッシュ(最大45m/s)や地図ジャンプでの新規エリア
+// カバーがまだ追いつかない場合があった。overpass-api.deへは server/server.js 側の
+// scheduleUpstream が「1ホストにつき1.1秒間隔」で直列化しており、これはポリシー
+// 遵守のため下げられない固定の下限。そのためスループットを上げる唯一の手段は
+// 「1リクエストでカバーする面積を広げる」こと。1600mへ拡大し、同じ範囲を埋めるのに
+// 必要なリクエスト数自体を減らす(面積比で1100m時の約2.1倍/リクエストをカバー)。
+const OSM_TILE_M = 1600;
 const fetchedOSMTiles = new Set();   // キュー投入済み(取得中 or 取得完了)のタイル
 const loadedOSMTiles = new Set();    // 実際に処理が完了した(道路が確定した)タイル。
                                       // 「地形→道路→建物→木」の順を守るため、チャンクの
@@ -3599,8 +3605,12 @@ const osmTileQueue = [];
 // タイル取得の同時実行数。以前は1件ずつ完全直列だったため、ダッシュ(最大45m/s)で
 // 移動すると描写エリアの拡大がまったく追いつかず、未読み込みの端に突き当たっていた。
 // 一方で4は欲張りすぎで、遠景地形の高解像度化(WIDE_SEGS増)による大量リクエストと
-// 重なった際にプロキシ/サーバーを詰まらせていたため、控えめな2に落とす。
-const OSM_TILE_CONCURRENCY = 2;
+// 重なった際にプロキシ/サーバーを詰まらせていたため2に落とした経緯がある。
+// 上流へは結局サーバー側が1.1秒間隔で直列化するので、クライアント側の同時実行数を
+// 上げても「待ち行列に同時に何本置いておけるか」が変わるだけで上流を溢れさせる心配は
+// 薄い(以前詰まったのはWIDE_SEGS引き上げによる別口の大量リクエストと重なったため)。
+// 往復レイテンシ分の無駄な間隔を減らすため3に戻す。
+const OSM_TILE_CONCURRENCY = 3;
 let osmTileActiveCount = 0;
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
 // 【重要】標高データ+初期OSMのロード完了までタイル取得を止めるゲート。
@@ -3759,7 +3769,7 @@ async function fetchOneOSMTile() {
   const minLon = Math.min(ll00.lon, ll11.lon), maxLon = Math.max(ll00.lon, ll11.lon);
   const bb = `${minLat.toFixed(5)},${minLon.toFixed(5)},${maxLat.toFixed(5)},${maxLon.toFixed(5)}`;
   // 駅ノードを追加(以前はここに含まれておらず、初期範囲外の駅が一切表示されなかった)
-  const query = `[out:json][timeout:20];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal|riverbank"](${bb});relation["natural"="water"](${bb});relation["waterway"="riverbank"](${bb});way["railway"="rail"](${bb});node["railway"="station"](${bb});node["railway"="halt"](${bb});node["public_transport"="station"](${bb}););out geom;`;
+  const query = `[out:json][timeout:30];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal|riverbank"](${bb});relation["natural"="water"](${bb});relation["waterway"="riverbank"](${bb});way["railway"="rail"](${bb});node["railway"="station"](${bb});node["railway"="halt"](${bb});node["public_transport"="station"](${bb}););out geom;`;
   let failed = false;
   try {
     const res = await fetch('https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query));
@@ -3812,7 +3822,8 @@ function checkOSMTiles() {
     const key = `${tx},${tz}`;
     if (!fetchedOSMTiles.has(key)) { fetchedOSMTiles.add(key); osmTileQueue.push({ tx, tz }); }
   };
-  // 周囲7x7(±約2.1km)を先読み。道路・建物データは建物生成(±360m)より広い範囲で先に用意する
+  // 周囲7x7(±約4.8km。OSM_TILE_M拡大に伴い先読み範囲も自動的に広がる)を先読み。
+  // 道路・建物データは建物生成(±360m)より広い範囲で先に用意する
   for (let dx = -3; dx <= 3; dx++)
     for (let dz = -3; dz <= 3; dz++)
       queueTile(px + dx * OSM_TILE_M, pz + dz * OSM_TILE_M);
@@ -4342,11 +4353,20 @@ function animate() {
   // OSMタイルのポリゴンから来るこちらの経路で生成されるため、浮き/埋まりが直りきって
   // いなかった。同じ判定をここにも入れ、NEARがまだその位置を覆っていなければこのフレームは
   // ここで足踏みする(同じ建物から次フレームで再判定。手前で止めるだけなのでコストは低い)。
+  // 【重要】以前はここでNEAR未準備の建物に当たった時点でbreakしており、キューが
+  // OSM出現順(=場所とは無関係)のFIFOだったため、たまたま先頭付近にNEAR未到達の
+  // 建物が1つあるだけで、後続の「もう準備が整っている」他エリアの建物まで全部
+  // 足止めされていた。これが移動速度に読み込みが追いつかない主因の一つ。
+  // → 未準備の建物は諦めずキュー末尾へ回して次を試す(他が足止めされないように)。
   for (let n = 0; n < 20 && pendingBuildingIdx < pendingBuildings.length; n++) {
-    const b = pendingBuildings[pendingBuildingIdx];
+    const b = pendingBuildings[pendingBuildingIdx++];
     const bcx = Math.floor(b.x / CHUNK_SIZE), bcz = Math.floor(b.z / CHUNK_SIZE);
-    if (!IS_MEIJI && !chunkNearTerrainReady(bcx, bcz)) break;
-    pendingBuildingIdx++;
+    if (!IS_MEIJI && !chunkNearTerrainReady(bcx, bcz)) {
+      b._tries = (b._tries || 0) + 1;
+      // 200回(プレイヤーが二度と戻らない遠方チャンク等)試しても揃わなければ、
+      // 諦めてFAR基準のまま生成する(無限に足踏みし続けるのを防ぐ)。
+      if (b._tries < 200) { pendingBuildings.push(b); continue; }
+    }
     if (!isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style);
   }
   if (pendingBuildingIdx > 0 && pendingBuildingIdx === pendingBuildings.length) {
