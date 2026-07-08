@@ -583,7 +583,6 @@ function queryPolyGrid(grid, x0, x1, z0, z1) {
 // (=プレイヤー付近のチャンクが生成された=近くまで戻ってきた)でメッシュを作り直して復元する。
 function rebuildRoadMesh(r) {
   if (r.type === 'motorway') { if (r.mesh) rebuildMotorwayMesh(r); return; } // 高架はアンロード対象外(常にmesh有り)
-  if (r.simpleBridge) { if (r.mesh) rebuildSimpleBridgeMesh(r); return; } // 簡易橋も同様にアンロード対象外
   const geo = makeRoadGeo(r.x1, r.z1, r.x2, r.z2, r.rw, r.yOff);
   if (!geo) return;
   if (r.mesh) {
@@ -629,7 +628,7 @@ function unloadFarRoads() {
   const px = player.position.x, pz = player.position.z;
   const d2 = ROAD_UNLOAD_DIST * ROAD_UNLOAD_DIST;
   for (const r of minimapRoads) {
-    if (r.type === 'motorway' || r.simpleBridge || !r.mesh) continue; // 高架・簡易橋は対象外/既にアンロード済みはスキップ
+    if (r.type === 'motorway' || !r.mesh) continue; // 高架は対象外/既にアンロード済みはスキップ
     const mx = (r.x1 + r.x2) / 2, mz = (r.z1 + r.z2) / 2;
     const dx = mx - px, dz = mz - pz;
     if (dx * dx + dz * dz <= d2) continue; // まだ範囲内
@@ -2196,90 +2195,6 @@ function addRoad(x1, z1, x2, z2, width, type='road') {
   decorateRoad(x1, z1, x2, z2, type, w);
 }
 
-// ======= 一般道の簡易橋(bridge=yes。高速道路の高架ほど作り込まない簡素版) =======
-// 橋脚・防音壁は置かず、端点の地形高さ+一定クリアランスを直線的に結んだ路面のみ。
-// 当たり判定は薄いスラブを1つ登録するだけ(floorHeightAtが既存の仕組みでそのまま拾う)。
-const BRIDGE_CLEARANCE = 1.6;
-function makeSimpleBridgeGeo(x1, z1, x2, z2, width) {
-  const dx = x2 - x1, dz = z2 - z1;
-  const len = Math.sqrt(dx * dx + dz * dz);
-  if (len < 0.5) return null;
-  const nx = dx / len, nz = dz / len, px = -nz, pz = nx;
-  const hw = width / 2;
-  const y1 = getGroundY(x1, z1) + BRIDGE_CLEARANCE, y2 = getGroundY(x2, z2) + BRIDGE_CLEARANCE;
-  const segs = Math.max(1, Math.round(len));
-  const verts = [], idxs = [], uvs = [];
-  for (let i = 0; i <= segs; i++) {
-    const t = i / segs;
-    const cx = x1 + dx * t, cz = z1 + dz * t;
-    const cy = y1 + (y2 - y1) * t; // 地形は追わず、端点間を直線的に結ぶ(=簡易橋の面)
-    for (const u of [0, 1]) {
-      const off = hw - u * width;
-      verts.push(cx + px * off, cy, cz + pz * off);
-      uvs.push(u, t * len);
-    }
-    if (i < segs) {
-      const b0 = i * 2, b1 = (i + 1) * 2;
-      idxs.push(b0, b0 + 1, b1, b0 + 1, b1 + 1, b1);
-    }
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
-  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-  geo.setIndex(idxs);
-  geo.computeVertexNormals();
-  return geo;
-}
-// NEAR地形更新時の再構築(rebuildRoadMeshから呼ばれる)。地形は追わないので端点の高さだけ引き直す。
-function rebuildSimpleBridgeMesh(r) {
-  if (!r.mesh) return;
-  const geo = makeSimpleBridgeGeo(r.x1, r.z1, r.x2, r.z2, r.rw);
-  if (!geo) return;
-  r.mesh.geometry.dispose();
-  r.mesh.geometry = geo;
-  if (r.bridgeBox) {
-    const y1 = getGroundY(r.x1, r.z1) + BRIDGE_CLEARANCE, y2 = getGroundY(r.x2, r.z2) + BRIDGE_CLEARANCE;
-    r.bridgeBox.min.y = Math.min(y1, y2) - 0.25;
-    r.bridgeBox.max.y = Math.max(y1, y2) + 0.35;
-  }
-}
-function addSimpleBridge(x1, z1, x2, z2, width, type) {
-  const len = Math.hypot(x2 - x1, z2 - z1);
-  if (len < 2) { addRoad(x1, z1, x2, z2, width, type); return; } // 短すぎる区間は通常道路にフォールバック
-  const geo = makeSimpleBridgeGeo(x1, z1, x2, z2, width);
-  if (!geo) { addRoad(x1, z1, x2, z2, width, type); return; }
-  const mat = (IS_REAL)
-    ? realRoadMat(type === 'trunk' ? 'trunk' : type === 'primary' ? 'primary' : type === 'secondary' ? 'secondary' : 'minor', 24)
-    : (ROAD_MAT[type] || ROAD_MAT.road);
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.renderOrder = 1;
-  scene.add(mesh);
-
-  // 当たり判定: 橋面に立てるよう薄いスラブを1つ登録する(floorHeightAtの既存ロジックがそのまま拾う)
-  const y1 = getGroundY(x1, z1) + BRIDGE_CLEARANCE, y2 = getGroundY(x2, z2) + BRIDGE_CLEARANCE;
-  const hw = width / 2;
-  const bridgeBox = new THREE.Box3(
-    new THREE.Vector3(Math.min(x1, x2) - hw, Math.min(y1, y2) - 0.25, Math.min(z1, z2) - hw),
-    new THREE.Vector3(Math.max(x1, x2) + hw, Math.max(y1, y2) + 0.35, Math.max(z1, z2) + hw));
-  collisionBoxes.push(bridgeBox); collGridAdd(bridgeBox);
-
-  // 道路記録(ミニマップ・isOnRoad等が使う軽量データ。typeは元のまま=色分けは維持)。
-  // simpleBridge=trueで、resnap/距離アンロードは専用扱いにする(高速道路と同様、本数が少なく影響は小さい)。
-  addRoadRecord({ x1, z1, x2, z2, type, rw: width, mesh, mat, yOff: 0, simpleBridge: true, bridgeBox });
-
-  // 欄干(簡易ガードレール。既存プールを使い回すので負荷は増えない)
-  const nx = (x2 - x1) / len, nz = (z2 - z1) / len, px = -nz, pz = nx;
-  const ry = Math.atan2(-nz, nx);
-  for (let s = 4; s < len - 4; s += 8) {
-    const t = s / len;
-    const cy = y1 + (y2 - y1) * t;
-    for (const side of [-1, 1]) {
-      const gx = x1 + nx * s + px * side * (hw + 0.4), gz = z1 + nz * s + pz * side * (hw + 0.4);
-      poolAdd(guardP, gx, cy + 0.7, gz, ry, 8, 1, 1, PROP_GUARD_C);
-    }
-  }
-}
-
 // ======= 道路沿いの小物自動配置 =======
 // すべてインスタンスプールへの追記なのでメッシュ・マテリアルは増えない
 function decorateRoad(x1, z1, x2, z2, type, w) {
@@ -3279,7 +3194,7 @@ function setupSeaSlider() {
 // 直列で呼んでおり、地形取得+OSM取得の待ち時間がそのまま合算されていた)。
 async function fetchOSMData() {
   const bb = `${OSM_BOUNDS.minLat},${OSM_BOUNDS.minLon},${OSM_BOUNDS.maxLat},${OSM_BOUNDS.maxLon}`;
-  const query = `[out:json][timeout:40];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal|riverbank"](${bb});relation["natural"="water"](${bb});relation["waterway"="riverbank"](${bb});way["railway"="rail"](${bb});node["railway"="station"](${bb});node["railway"="halt"](${bb});node["public_transport"="station"](${bb});node["natural"="tree"](${bb});node["highway"="traffic_signals"](${bb});node["amenity"="bench"](${bb}););out geom;`;
+  const query = `[out:json][timeout:40];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal|riverbank"](${bb});relation["natural"="water"](${bb});relation["waterway"="riverbank"](${bb});way["railway"="rail"](${bb});node["railway"="station"](${bb});node["railway"="halt"](${bb});node["public_transport"="station"](${bb}););out geom;`;
   const url = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
   // 一度の失敗(429やタイムアウト)ですぐ単純格子状のフォールバックマップに落とすと、Overpassが
   // 一時的に混雑していただけでも見た目が大きく崩れてしまう。最大3回、間隔を空けて再試行する。
@@ -3339,13 +3254,10 @@ async function loadOSM(preFetchedData) {
       const type = hw==='motorway' ? 'motorway' : hw==='motorway_link' ? 'trunk'
                  : (hw==='trunk'||hw==='primary'||hw==='secondary'||hw==='tertiary') ? hw : 'road';
       if (IS_MEIJI && (type === 'road' || type === 'motorway')) return; // 明治: 細街路も高速道路もない
-      // 一般道の橋(bridge=yes/viaduct)は簡易橋として表現(高速道路は専用の高架処理があるので対象外)
-      const isBridge = !IS_MEIJI && type !== 'motorway' && (tags.bridge === 'yes' || tags.bridge === 'viaduct');
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
-        if (isBridge) addSimpleBridge(a.x, a.z, b.x, b.z, width, type);
-        else addRoad(a.x, a.z, b.x, b.z, width, type);
+        addRoad(a.x, a.z, b.x, b.z, width, type);
       }
       roadCount++;
     }
@@ -4069,48 +3981,17 @@ let pendingBuildingIdx = 0;
 // クエリにも駅ノードが含まれていなかったため、初期範囲の外にある駅(愛甲石田以外)が
 // 一切表示されなかった。初期ロード・タイル取得の両方から呼べる共通関数にする。
 const seenStations = new Set();
-// 街路樹・信号機・ベンチ(OSM実データの点)の重複排除(タイル境界の再取得対策。IDは全ノードで一意)
-const seenPointNodes = new Set();
-// 実データの信号機: 既存の道路沿いランダム配置(decorateRoad)と同じプール・見た目を使い回すため負荷は増えない
-function addRealTrafficSignal(x, z) {
-  const gy = getGroundY(x, z);
-  poolAdd(poleP, x, gy + 3, z, 0, 0.8, 0.72, 0.8);
-  poolAdd(signalP, x, gy + 5.6, z, Math.random() * 3);
-  poolAdd(lampP, x, gy + 5.6, z, Math.random() * 3, 0.9, 0.9, 0.9, Math.random() < 0.6 ? 0x33ff66 : 0xff4433);
-}
-// 実データのベンチ: 公園内ランダム配置と同じプールを使い回す
-function addRealBench(x, z) {
-  poolAdd(benchP, x, getGroundY(x, z) + 0.35, z, Math.random() * Math.PI);
-}
 function processStationNodes(elements) {
-  if (IS_MEIJI) return; // 明治: 鉄道開通前なので駅・信号機・ベンチもなし
+  if (IS_MEIJI) return; // 明治: 鉄道開通前なので駅なし
   elements.forEach(el => {
     if (el.type !== 'node' || !el.tags) return;
-    const tags = el.tags;
-    const isStation = tags.railway === 'station' || tags.railway === 'halt' || tags.public_transport === 'station';
-    if (isStation) {
-      const name = tags.name || tags['name:ja'] || '駅';
-      if (seenStations.has(name)) return;
-      seenStations.add(name);
-      const pos = latLonToXZ(el.lat, el.lon);
-      addStation(pos.x, pos.z, name);
-      return;
-    }
-    // 街路樹・信号機・ベンチ: 既存のInstancedMeshプール(上限あり)を使い回すので負荷は増えない
-    if (seenPointNodes.has(el.id)) return;
-    if (tags.natural === 'tree') {
-      seenPointNodes.add(el.id);
-      const pos = latLonToXZ(el.lat, el.lon);
-      if (!isOnRoad(pos.x, pos.z, 2, 2)) addTree(pos.x, pos.z, 0.7 + Math.random() * 0.7);
-    } else if (tags.highway === 'traffic_signals') {
-      seenPointNodes.add(el.id);
-      const pos = latLonToXZ(el.lat, el.lon);
-      addRealTrafficSignal(pos.x, pos.z);
-    } else if (tags.amenity === 'bench') {
-      seenPointNodes.add(el.id);
-      const pos = latLonToXZ(el.lat, el.lon);
-      addRealBench(pos.x, pos.z);
-    }
+    const isStation = el.tags.railway === 'station' || el.tags.railway === 'halt' || el.tags.public_transport === 'station';
+    if (!isStation) return;
+    const name = el.tags.name || el.tags['name:ja'] || '駅';
+    if (seenStations.has(name)) return;
+    seenStations.add(name);
+    const pos = latLonToXZ(el.lat, el.lon);
+    addStation(pos.x, pos.z, name);
   });
 }
 
@@ -4150,12 +4031,10 @@ function processTileData(data) {
       const type = hw==='motorway' ? 'motorway' : hw==='motorway_link' ? 'trunk'
                  : (hw==='trunk'||hw==='primary'||hw==='secondary'||hw==='tertiary') ? hw : 'road';
       if (IS_MEIJI && (type === 'road' || type === 'motorway')) return; // 明治: 細街路も高速道路もない
-      const isBridge = !IS_MEIJI && type !== 'motorway' && (tags.bridge === 'yes' || tags.bridge === 'viaduct');
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
-        if (isBridge) addSimpleBridge(a.x, a.z, b.x, b.z, width, type);
-        else addRoad(a.x, a.z, b.x, b.z, width, type);
+        addRoad(a.x, a.z, b.x, b.z, width, type);
       }
     }
     if (!IS_MEIJI && tags.railway === 'rail') {
@@ -4245,9 +4124,6 @@ const OSM_TILE_CLAUSES = [
   'node["railway"="station"]',
   'node["railway"="halt"]',
   'node["public_transport"="station"]',
-  'node["natural"="tree"]',
-  'node["highway"="traffic_signals"]',
-  'node["amenity"="bench"]',
 ];
 // 1リクエストにまとめる最大タイル数。スポーン直後・地図ジャンプ直後・急旋回時は
 // 一度に何十枚も新規タイルが必要になるが、Overpassは1ホスト1.1秒間隔の直列制限
