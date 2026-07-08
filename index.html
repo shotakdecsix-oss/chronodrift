@@ -1972,14 +1972,19 @@ function addMotorway(x1, z1, x2, z2) {
   // (座標ではなく距離で持つことで、resnap時にrebuildMotorwayMeshと全く同じ式で再計算できる)。
   const y1 = getGroundY(x1, z1) + MWY_H, y2 = getGroundY(x2, z2) + MWY_H;
   const slabBoxes = [];
-  for (let s = 0; s < len; s += 22) {
-    const e = Math.min(len, s + 22);
+  // 登り坂では、区間が長いほど「区間内の最低点〜最高点」を覆う縦長のBoxになり、
+  // 見た目には滑らかな斜面でも当たり判定は22m置きの階段状になっていた。
+  // 見た目(6mおきサンプリング)と同じ密度まで刻みを細かくし、1区間あたりの縦の厚みを
+  // 抑える(=段差をほぼ解消する)。floorOnlyフラグでwouldCollideの横方向ブロックからも除外済み。
+  for (let s = 0; s < len; s += 6) {
+    const e = Math.min(len, s + 6);
     const ax = x1 + nx * s, az = z1 + nz * s, bx = x1 + nx * e, bz = z1 + nz * e;
     const ya = y1 + (y2 - y1) * (s / len), yb = y1 + (y2 - y1) * (e / len);
     const cb = new THREE.Box3(
       new THREE.Vector3(Math.min(ax, bx) - hw2, Math.min(ya, yb) - 0.25, Math.min(az, bz) - hw2),
       new THREE.Vector3(Math.max(ax, bx) + hw2, Math.max(ya, yb) + 0.35, Math.max(az, bz) + hw2));
     cb.chunkKey = currentChunkKey;
+    cb.floorOnly = true; // 横移動をブロックせず、乗れる床としてのみ扱う
     collisionBoxes.push(cb); collGridAdd(cb);
     slabBoxes.push({ box: cb, s, e });
   }
@@ -3919,7 +3924,11 @@ function wouldCollide(nx, nz, yBase) {
   for (let gx = x0; gx <= x1; gx++) for (let gz = z0; gz <= z1; gz++) {
     const arr = collGrid.get(gx + ',' + gz);
     if (!arr) continue;
-    for (const box of arr) if (box.intersectsBox(tempBox)) return true;
+    // floorOnly(登れる床のためだけの当たり判定。高速道路の傾斜スラブ等)は、
+    // 傾斜を表すため縦方向に厚みを持たせてあり、横移動のブロック判定に使うと
+    // 高さが追いつくまで見えない壁にぶつかったように感じてしまう。
+    // 横移動のブロックにはfloorHeightAt側の段差判定だけで十分なのでここでは無視する。
+    for (const box of arr) if (!box.floorOnly && box.intersectsBox(tempBox)) return true;
   }
   return false;
 }
