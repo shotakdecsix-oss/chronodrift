@@ -579,13 +579,68 @@ function queryPolyGrid(grid, x0, x1, z0, z1) {
 // 以前は道路メッシュを最初に生成した瞬間の地形高さで永久に固定していたため、
 // 後からNEAR高解像度地形グリッドが届いて地形の高さが変わると、道路が地面に埋まったり
 // 逆に浮いて見えたりしていた。ジオメトリだけ差し替え、Mesh自体・マテリアルは使い回す。
+// 【重要】unloadFarRoadsで遠方アンロードされた道路(r.mesh===null)は、このタイミング
+// (=プレイヤー付近のチャンクが生成された=近くまで戻ってきた)でメッシュを作り直して復元する。
 function rebuildRoadMesh(r) {
-  if (!r.mesh) return;
-  if (r.type === 'motorway') { rebuildMotorwayMesh(r); return; } // 高架は専用の桁ジオメトリで再構築
+  if (r.type === 'motorway') { if (r.mesh) rebuildMotorwayMesh(r); return; } // 高架はアンロード対象外(常にmesh有り)
   const geo = makeRoadGeo(r.x1, r.z1, r.x2, r.z2, r.rw, r.yOff);
   if (!geo) return;
-  r.mesh.geometry.dispose();
-  r.mesh.geometry = geo;
+  if (r.mesh) {
+    r.mesh.geometry.dispose();
+    r.mesh.geometry = geo;
+  } else {
+    const mesh = new THREE.Mesh(geo, r.mat);
+    mesh.renderOrder = 1;
+    scene.add(mesh);
+    r.mesh = mesh;
+  }
+  // 非現実モードの線路(白帯オーバーレイ)も同じタイミングで復元/追従
+  if (r.type === 'railway' && !IS_REAL) {
+    const rg = makeRoadGeo(r.x1, r.z1, r.x2, r.z2, 1.5, 0.5);
+    if (rg) {
+      if (r.railWhite) {
+        r.railWhite.geometry.dispose();
+        r.railWhite.geometry = rg;
+      } else {
+        const rail = new THREE.Mesh(rg, ROAD_MAT.rail_white);
+        rail.renderOrder = 2;
+        scene.add(rail);
+        r.railWhite = rail;
+      }
+    }
+  }
+}
+
+// 【重要】道路・線路は建物と違い、これまで距離に関係なく永久にscene・GPUメモリに
+// 残り続けていた(1本ごとに専用ジオメトリのMeshをscene.addするだけで、チャンクアンロード
+// でも消えない)。探索範囲が広がるほど道路メッシュが際限なく積み上がり、長時間移動を
+// 続けるとGPUメモリ・描画コールが持たずに重くなって落ちる症状の主因になっていた。
+// ここでは建物と違い、minimapRoads/roadGrid(=isOnRoad判定・ミニマップ・踏切検出が
+// 恒久的に参照する軽量データ)自体は消さず、GPU側の重いMesh/ジオメトリだけを距離に応じて
+// 破棄・復元する(復元は上のrebuildRoadMeshが、プレイヤーが近づいてチャンクが再生成される
+// タイミングで自動的に行う)。高架(motorway)は橋脚がInstancedMeshで個別解放できないため
+// 対象外とする(高速道路は本数が少なく、影響は小さい)。
+const ROAD_UNLOAD_DIST = 2500;
+let _roadUnloadFrame = 0;
+function unloadFarRoads() {
+  _roadUnloadFrame++;
+  if (_roadUnloadFrame % 90 !== 0) return; // 建物と同様、毎フレームやる必要はない(~1.5秒ごと)
+  const px = player.position.x, pz = player.position.z;
+  const d2 = ROAD_UNLOAD_DIST * ROAD_UNLOAD_DIST;
+  for (const r of minimapRoads) {
+    if (r.type === 'motorway' || !r.mesh) continue; // 高架は対象外/既にアンロード済みはスキップ
+    const mx = (r.x1 + r.x2) / 2, mz = (r.z1 + r.z2) / 2;
+    const dx = mx - px, dz = mz - pz;
+    if (dx * dx + dz * dz <= d2) continue; // まだ範囲内
+    scene.remove(r.mesh);
+    r.mesh.geometry.dispose();
+    r.mesh = null;
+    if (r.railWhite) {
+      scene.remove(r.railWhite);
+      r.railWhite.geometry.dispose();
+      r.railWhite = null;
+    }
+  }
 }
 
 // 矩形範囲(ワールド座標)にかかる道路を、現在の地形に合わせてまとめて再構築する。
@@ -2034,6 +2089,7 @@ function addRoad(x1, z1, x2, z2, width, type='road') {
   road.renderOrder = 1;
   scene.add(road);
 
+  let railWhite = null;
   if (isRailway) {
     if (IS_REAL) {
       // レールはテクスチャで表現済み(白帯オーバーレイ廃止)。踏切検出+駅ホーム用に記録
@@ -2051,13 +2107,15 @@ function addRoad(x1, z1, x2, z2, width, type='road') {
         const rail = new THREE.Mesh(rg, ROAD_MAT.rail_white);
         rail.renderOrder = 2;
         scene.add(rail);
+        railWhite = rail; // 距離アンロード/復元で本体メッシュと一緒に扱えるよう記録
       }
     }
   }
 
   // mesh/mat/yOff も記録しておく: NEAR高解像度地形が後から届いたとき、プレイヤー付近の
-  // 道路だけ現在の地形高さに合わせて再構築できるようにする(rebuildRoadsNearChunk)
-  addRoadRecord({x1, z1, x2, z2, type, rw: w, mesh: road, mat, yOff});
+  // 道路だけ現在の地形高さに合わせて再構築できるようにする(rebuildRoadsNearChunk)。
+  // railWhiteは距離アンロード(unloadFarRoads)/復元(rebuildRoadMesh)で本体と一緒に扱う。
+  addRoadRecord({x1, z1, x2, z2, type, rw: w, mesh: road, mat, yOff, railWhite});
 
   if (IS_REAL && !isRailway && type !== 'water') {
     // 踏切(線路が先に生成済みの場合はこちらで検出)
@@ -4672,6 +4730,8 @@ function animate() {
   // 実OSM建物が距離に関係なく無限に溜まり続けメモリ・描画負荷が際限なく増える
   // (長時間プレイでの重量化→クラッシュ)のを防ぐため、遠方の建物を解放する
   unloadFarBuildings();
+  // 道路・線路も同様に、遠方のものはGPUメッシュだけ解放する(記録データは残す)
+  unloadFarRoads();
   // Tile-based OSM fetch — loads roads/buildings for newly entered areas
   checkOSMTiles();
   // 遠景標高グリッドをプレイヤーに追従(遠くへジャンプしても実地形・標高が出る)
