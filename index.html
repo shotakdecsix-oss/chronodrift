@@ -1936,14 +1936,7 @@ function rebuildMotorwayMesh(r) {
       sb.box.max.y = y + 0.35;
     }
   }
-  if (r.pierBoxes) {
-    for (const pb of r.pierBoxes) {
-      const gy = getGroundY(pb.cx, pb.cz);
-      pb.box.min.y = gy;
-      pb.box.max.y = gy + MWY_H - 1.1;
-      poolSetY(pierP, pb.poolIdx, gy + (MWY_H - 1.1) / 2); // 見た目の柱も同じ高さへ
-    }
-  }
+  // 橋脚(見た目・当たり判定とも)は挙動が不安定だったため廃止。高速道路は橋脚なしで空中に浮く形で表示する。
 }
 
 function addMotorway(x1, z1, x2, z2) {
@@ -1958,19 +1951,8 @@ function addMotorway(x1, z1, x2, z2) {
   mesh.renderOrder = 1;
   scene.add(mesh);
 
-  // 橋脚(約26m間隔)+柱の当たり判定(通り抜け不可)。resnapできるよう座標をpierBoxesに記録する。
-  const pierBoxes = [];
-  for (let s = 14; s < len - 6; s += 26) {
-    const cx = x1 + nx * s, cz = z1 + nz * s;
-    const gy = getGroundY(cx, cz);
-    const pierIdx = poolAdd(pierP, cx, gy + (MWY_H - 1.1) / 2, cz, Math.atan2(-nz, nx), 2.4, MWY_H - 1.1, 6);
-    const pb = new THREE.Box3(
-      new THREE.Vector3(cx - 1.6, gy, cz - 1.6),
-      new THREE.Vector3(cx + 1.6, gy + MWY_H - 1.1, cz + 1.6));
-    pb.chunkKey = currentChunkKey;
-    collisionBoxes.push(pb); collGridAdd(pb);
-    pierBoxes.push({ box: pb, cx, cz, poolIdx: pierIdx });
-  }
+  // 橋脚は見た目・当たり判定とも挙動が不安定(見えない当たり判定が動きをブロックする不具合)だったため廃止。
+  // 高速道路は橋脚なしで空中に浮く形で表示する(桁上のスラブには引き続き乗れる)。
   // 桁上の床スラブ(22m刻みの薄い水平ボックス)。y範囲が桁の高さだけなので高架下の通行は妨げない。
   // resnapできるよう区間の端点座標をslabBoxesに記録する。
   const slabBoxes = [];
@@ -1987,7 +1969,7 @@ function addMotorway(x1, z1, x2, z2) {
   }
   // mesh・当たり判定の座標を記録し、NEAR地形更新時に桁と当たり判定を一緒に
   // 現在の地形高さへ作り直せるようにする(浮き/埋まり・判定ズレ対策)
-  addRoadRecord({ x1, z1, x2, z2, type: 'motorway', rw: MWY_W, mesh, pierBoxes, slabBoxes });
+  addRoadRecord({ x1, z1, x2, z2, type: 'motorway', rw: MWY_W, mesh, slabBoxes });
 }
 
 // Shared road materials (created once, reused)
