@@ -56,13 +56,25 @@ const INJECT = `<script>
     ['https://nominatim.openstreetmap.org/reverse', '/api/nominatim'],
   ];
   let lastApiWasCacheHit = false;
+  // プロキシ経由が上流に拒否された(5xx)APIは、以後ブラウザ→上流の直接アクセスに切り替える。
+  // 【背景】Renderなど共有IPのホスティングはOverpass等の公開APIにIP単位で拒否/制限される
+  // ことがある(2026-07: Render経由のOverpassが502連発→道路が格子状フォールバックになる
+  // 症状の原因)。上流はいずれもCORS対応なのでブラウザから直接叩け、その場合は各プレイヤー
+  // 自身のIPでレート制限枠を使うため、共有IPよりむしろ通りやすい。
+  // プロキシが健在な間は従来どおりプロキシ+ディスクキャッシュを使う(ローカルで有効)。
+  const proxyDown = {};
   const origFetch = window.fetch.bind(window);
   window.fetch = function(input, init) {
     let url = (typeof input === 'string') ? input : (input && input.url) || '';
     for (const [prefix, local] of MAP) {
       if (url.startsWith(prefix)) {
-        const p = origFetch(local + url.slice(prefix.length), init);
-        return p.then(res => { lastApiWasCacheHit = res.headers.get('X-Cache') === 'HIT'; return res; });
+        const direct = () => origFetch(url, init);
+        if (proxyDown[prefix]) return direct();
+        return origFetch(local + url.slice(prefix.length), init).then(res => {
+          lastApiWasCacheHit = res.headers.get('X-Cache') === 'HIT';
+          if (res.status >= 500) { proxyDown[prefix] = true; return direct(); }
+          return res;
+        }, () => { proxyDown[prefix] = true; return direct(); });
       }
     }
     return origFetch(input, init);
