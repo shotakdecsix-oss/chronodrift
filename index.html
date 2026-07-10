@@ -2626,6 +2626,51 @@ function buildAreaPoly(pts, mat, yOff, holes) {
   polyGridAdd(areaPolyGrid, entry);
 }
 
+// buildAreaPolyは元のOSM way頂点(数個)だけで平らな三角形を張るため、起伏のある地形では
+// 頂点間で地面から浮いたり埋まったりする(校庭・田畑など、実際に上を歩く地物で顕著)。
+// この版はポリゴンの外接矩形をcellSize間隔の格子に分割し、格子点ごとにgetGroundYを
+// サンプルするので、地形の起伏に追従する。境界セルはポリゴン外の頂点を含む場合スキップする
+// (輪郭がわずかに内側へ痩せるが、実用上は問題ない簡易対応)。
+// worldUV=true: UVを世界座標(m)にする(repeatラップの田畑テクスチャ用)。
+// worldUV=false: UVをポリゴン外接矩形基準の0..1にする(校庭のトラック等、1枚だけ収めたいテクスチャ用)。
+function buildTerrainFollowingAreaPoly(pts, mat, yOff, cellSize, worldUV) {
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  pts.forEach(p => { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); });
+  const nx = Math.max(1, Math.min(80, Math.ceil((maxX - minX) / cellSize)));
+  const nz = Math.max(1, Math.min(80, Math.ceil((maxZ - minZ) / cellSize)));
+  const verts = [], uvs = [], idx = [];
+  const grid = [];
+  for (let j = 0; j <= nz; j++) {
+    const row = [];
+    for (let i = 0; i <= nx; i++) {
+      const x = minX + (maxX - minX) * i / nx;
+      const z = minZ + (maxZ - minZ) * j / nz;
+      if (!pointInPolygon(x, z, pts)) { row.push(-1); continue; }
+      row.push(verts.length / 3);
+      verts.push(x, getGroundY(x, z) + yOff, z);
+      uvs.push(worldUV ? x : i / nx, worldUV ? z : j / nz);
+    }
+    grid.push(row);
+  }
+  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
+    const a = grid[j][i], b = grid[j][i + 1], c = grid[j + 1][i + 1], d = grid[j + 1][i];
+    if (a < 0 || b < 0 || c < 0 || d < 0) continue; // 境界セル(ポリゴン外の頂点を含む)は張らない
+    idx.push(a, b, c, a, c, d);
+  }
+  if (idx.length === 0) return; // 細すぎる/境界だけのポリゴンはフォールバックなしで諦める
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.renderOrder = 1;
+  scene.add(mesh);
+  const entry = { mesh, yOff, minX, maxX, minZ, maxZ };
+  areaPolyMeshes.push(entry);
+  polyGridAdd(areaPolyGrid, entry);
+}
+
 function scatterTreesIn(poly, sqmPerTree, cap) {
   const area = (poly.maxX - poly.minX) * (poly.maxZ - poly.minZ);
   const n = Math.min(cap, Math.max(2, Math.floor(area / sqmPerTree)));
@@ -2805,7 +2850,7 @@ function handleAreaFeature(el) {
   // また面メッシュ=1ドローコールなので種類ごとに総数予算を設ける(超過分は回避領域としてのみ機能)
   const span = Math.max(maxX - minX, maxZ - minZ);
   if (isPark) {
-    if (span < 400 && areaPolyBudget.park-- > 0) buildAreaPoly(pts, lawnMat, 0.14);
+    if (span < 400 && areaPolyBudget.park-- > 0) buildTerrainFollowingAreaPoly(pts, lawnMat, 0.14, 20, false);
     scatterTreesIn(poly, 170, 40);
     const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
     for (let i = 0; i < 3; i++) { // ベンチ
@@ -2827,11 +2872,11 @@ function handleAreaFeature(el) {
       polyGridAdd(minimapWaterGrid, _wpEntry);
     }
   } else if (isFarm) {
-    if (span >= 15 && span < 500 && areaPolyBudget.farm-- > 0) buildAreaPoly(pts, farmMat, 0.1);
+    if (span >= 15 && span < 500 && areaPolyBudget.farm-- > 0) buildTerrainFollowingAreaPoly(pts, farmMat, 0.1, 20, true);
   } else if (isForest) {
     scatterTreesIn(poly, 380, 70);
   } else if (isCampus) {
-    if (span < 900 && areaPolyBudget.campus-- > 0) buildAreaPoly(pts, campusGroundMat, 0.13);
+    if (span < 900 && areaPolyBudget.campus-- > 0) buildTerrainFollowingAreaPoly(pts, campusGroundMat, 0.13, 25, false);
   }
   return true;
 }
