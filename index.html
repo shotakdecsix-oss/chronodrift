@@ -2536,6 +2536,41 @@ const farmMat = (() => {
   return new THREE.MeshLambertMaterial({ map: tex, side: THREE.DoubleSide });
 })();
 
+// 校庭(学校の敷地全体): 土の粒状テクスチャ+陸上トラックの白線を1枚のcanvasに焼き込む。
+// buildAreaPoly(ShapeGeometry)は敷地の外接矩形基準で自動的にUV0..1を割り振るため、
+// このテクスチャはrepeatさせず、敷地の外接矩形にちょうど1つ収まるように描けばよい。
+const campusGroundMat = (() => {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 384;
+  const g = c.getContext('2d');
+  const W = c.width, H = c.height;
+  g.fillStyle = '#b89868'; // 土
+  g.fillRect(0, 0, W, H);
+  for (let i = 0; i < 3500; i++) { // 粒状ノイズ
+    const rgb = [100 + Math.random()*50|0, 80 + Math.random()*40|0, 50 + Math.random()*30|0];
+    g.fillStyle = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0.35)`;
+    g.fillRect(Math.random()*W, Math.random()*H, 2, 2);
+  }
+  // 陸上トラック(白線、スタジアム形=直線+半円のレーンを6本)
+  const cx = W/2, cy = H/2;
+  g.strokeStyle = 'rgba(255,255,255,0.85)';
+  for (let lane = 0; lane < 6; lane++) {
+    const rx = W*0.42 - lane*15, ry = H*0.36 - lane*11;
+    if (rx < 30 || ry < 18) break;
+    const straight = Math.max(0.1, rx - ry);
+    g.lineWidth = 2;
+    g.beginPath();
+    g.moveTo(cx - straight, cy - ry);
+    g.lineTo(cx + straight, cy - ry);
+    g.arc(cx + straight, cy, ry, -Math.PI/2, Math.PI/2, false);
+    g.lineTo(cx - straight, cy + ry);
+    g.arc(cx - straight, cy, ry, Math.PI/2, -Math.PI/2, false);
+    g.closePath();
+    g.stroke();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  return new THREE.MeshLambertMaterial({ map: tex, side: THREE.DoubleSide });
+})();
+
 // ポリゴンから地形に沿った面メッシュを1枚生成(三角形分割はShapeGeometry=earcut)
 // holes: 内周リング(中州など)の配列(省略可)
 // 水域・公園・田畑ポリゴンのメッシュ一覧。NEAR高解像度地形が更新されたとき、
@@ -2796,7 +2831,7 @@ function handleAreaFeature(el) {
   } else if (isForest) {
     scatterTreesIn(poly, 380, 70);
   } else if (isCampus) {
-    if (span < 900 && areaPolyBudget.campus-- > 0) buildAreaPoly(pts, YARD_MAT, 0.13);
+    if (span < 900 && areaPolyBudget.campus-- > 0) buildAreaPoly(pts, campusGroundMat, 0.13);
   }
   return true;
 }
