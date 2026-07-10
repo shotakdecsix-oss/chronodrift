@@ -611,6 +611,40 @@ function rebuildRoadMesh(r) {
   }
 }
 
+// ======= 道路メッシュ生成のフレーム分割 =======
+// 以前は addRoad が呼ばれた瞬間に makeRoadGeo(1mごとの地形サンプリング)+Mesh生成+scene.add
+// を同期実行していた。密集市街地のOSMタイル(6枚バッチ)が届くと数千セグメントを1フレームで
+// 生成することになり、数秒〜数十秒のフリーズの主因だった(東京都心で45秒超を確認)。
+// → addRoad はレコード登録(軽量。isOnRoad判定・ミニマップは即座に正しく動く)だけ行い、
+//   重いメッシュ生成はこのキューで1フレームあたり時間バジェット内だけ処理する。
+const pendingRoadMeshes = [];
+function queueRoadMesh(r) {
+  if (r._q) return; // 二重投入防止
+  r._q = true;
+  pendingRoadMeshes.push(r);
+}
+function processRoadMeshQueue() {
+  if (pendingRoadMeshes.length === 0) return;
+  const t0 = performance.now();
+  const px = player.position.x, pz = player.position.z;
+  const lim2 = ROAD_UNLOAD_DIST * ROAD_UNLOAD_DIST;
+  let i = 0;
+  while (i < pendingRoadMeshes.length) {
+    if ((i & 7) === 0 && performance.now() - t0 > 6) break; // 6ms/フレームまで
+    const r = pendingRoadMeshes[i++];
+    r._q = false;
+    const mx = (r.x1 + r.x2) / 2 - px, mz = (r.z1 + r.z2) / 2 - pz;
+    // 遠方(unloadFarRoadsの解放距離の外)はどうせすぐ解放されるので作らない。
+    // プレイヤーが近づけばチャンク再生成(rebuildRoadsNearChunk)やNEAR更新
+    // (rebuildRoadsInBounds)が再キューするので、恒久的に欠けることはない。
+    if (mx * mx + mz * mz > lim2) { r._dirty = false; continue; }
+    if (r.mesh && !r._dirty) continue; // 既に構築済みで地形も変わっていない
+    rebuildRoadMesh(r);
+    r._dirty = false;
+  }
+  pendingRoadMeshes.splice(0, i);
+}
+
 // 【重要】道路・線路は建物と違い、これまで距離に関係なく永久にscene・GPUメモリに
 // 残り続けていた(1本ごとに専用ジオメトリのMeshをscene.addするだけで、チャンクアンロード
 // でも消えない)。探索範囲が広がるほど道路メッシュが際限なく積み上がり、長時間移動を
@@ -654,7 +688,10 @@ function rebuildRoadsInBounds(x0, x1, z0, z1) {
     for (const r of arr) {
       if (seen.has(r)) continue;
       seen.add(r);
-      rebuildRoadMesh(r);
+      // 同期一括再構築(数百〜数千本)はNEAR更新のたびに大きなカクつきを生んでいたため、
+      // フレーム分割キューに回す。_dirty=trueで「メッシュ生成済みでも作り直す」指定。
+      r._dirty = true;
+      queueRoadMesh(r);
     }
   }
 }
@@ -2194,39 +2231,28 @@ function addRoad(x1, z1, x2, z2, width, type='road') {
   // 水面リボンは実形状の水面ポリゴン(+0.15)より低い+0.05に置き、
   // 実形状がある区間では推定幅リボンが完全に隠れるようにする
   const yOff = type === 'water' ? 0.05 : 0.35;
-  const geo = makeRoadGeo(x1, z1, x2, z2, w, yOff);
-  if (!geo) return;
-  const road = new THREE.Mesh(geo, mat);
-  road.renderOrder = 1;
-  scene.add(road);
 
-  let railWhite = null;
-  if (isRailway) {
-    if (IS_REAL) {
-      // レールはテクスチャで表現済み(白帯オーバーレイ廃止)。踏切検出+駅ホーム用に記録
-      const seg = { x1, z1, x2, z2 };
-      railSegs.push(seg);
-      // 既存の道路との交差=踏切(道路側の方向で判定)
-      for (const r of minimapRoads) {
-        if (r.type !== 'road' && r.type !== 'tertiary' && r.type !== 'secondary') continue;
-        const pt = segCross(r, seg);
-        if (pt) addRailXing(pt);
-      }
-    } else {
-      const rg = makeRoadGeo(x1, z1, x2, z2, 1.5, 0.5);
-      if (rg) {
-        const rail = new THREE.Mesh(rg, ROAD_MAT.rail_white);
-        rail.renderOrder = 2;
-        scene.add(rail);
-        railWhite = rail; // 距離アンロード/復元で本体メッシュと一緒に扱えるよう記録
-      }
+  if (isRailway && IS_REAL) {
+    // レールはテクスチャで表現済み(白帯オーバーレイ廃止)。踏切検出+駅ホーム用に記録
+    const seg = { x1, z1, x2, z2 };
+    railSegs.push(seg);
+    // 既存の道路との交差=踏切(道路側の方向で判定)
+    for (const r of minimapRoads) {
+      if (r.type !== 'road' && r.type !== 'tertiary' && r.type !== 'secondary') continue;
+      const pt = segCross(r, seg);
+      if (pt) addRailXing(pt);
     }
   }
+  // 非現実モードの線路(白帯オーバーレイ)はrebuildRoadMeshが本体メッシュと同時に生成する
 
   // mesh/mat/yOff も記録しておく: NEAR高解像度地形が後から届いたとき、プレイヤー付近の
   // 道路だけ現在の地形高さに合わせて再構築できるようにする(rebuildRoadsNearChunk)。
   // railWhiteは距離アンロード(unloadFarRoads)/復元(rebuildRoadMesh)で本体と一緒に扱う。
-  addRoadRecord({x1, z1, x2, z2, type, rw: w, mesh: road, mat, yOff, railWhite});
+  // 【重要】重いメッシュ生成はここでは行わず、レコード登録+フレーム分割キュー投入だけにする
+  // (密集タイル到着時の数十秒フリーズ対策。isOnRoad・ミニマップはレコードだけで正しく動く)。
+  const rec = {x1, z1, x2, z2, type, rw: w, mesh: null, mat, yOff, railWhite: null};
+  addRoadRecord(rec);
+  queueRoadMesh(rec);
 
   if (IS_REAL && !isRailway && type !== 'water') {
     // 踏切(線路が先に生成済みの場合はこちらで検出)
@@ -3092,6 +3118,84 @@ async function runLimited(items, worker, limit = FETCH_CONCURRENCY) {
   return results;
 }
 
+// ======= 国土地理院(GSI)標高タイル =======
+// opentopodataには「1リクエスト/秒・1リクエスト最大100地点・1日最大1000コール」の制限があり、
+// 初回起動だけで約21コール(初期7+遠景9+NEAR5)、移動のたびにさらに消費するため、
+// 「地形待ち→道路・建物生成が全部ゲートされて遅い」の根本原因だった。
+// 日本国内では国土地理院の標高タイル(dem_png: DEM10B相当、z14、約10mメッシュ)を
+// 並列取得する。レート制限・日次上限が無く、地形読み込みが数十秒→数秒になる。
+// ・タイルはCORS対応なのでプロキシを通さず直接fetchできる(ブラウザHTTPキャッシュも効く)
+// ・海上などタイルが無い場所は404が正常応答 → 「データ無し」(呼び出し側で海底/0m扱い)
+// ・日本のカバー範囲外の点が混じるグリッドや、ネットワークエラー時は null を返し、
+//   呼び出し側が従来どおり opentopodata へフォールバックする(挙動の安全網は従来のまま)
+const GSI_DEM_Z = 14;
+const _gsiTiles = new Map(); // "tx,ty" -> Promise<Float32Array|null> (null=タイル無し/海上)
+const GSI_TILE_CACHE_MAX = 120; // 約30MB。超えたら古い順に捨てる(HTTPキャッシュがあるので再取得は速い)
+function gsiCovers(lat, lon) { return lat >= 20 && lat <= 46 && lon >= 122 && lon <= 154; }
+function _gsiLoadTile(tx, ty) {
+  const key = tx + ',' + ty;
+  let p = _gsiTiles.get(key);
+  if (p) return p;
+  p = (async () => {
+    const res = await fetch(`https://cyberjapandata.gsi.go.jp/xyz/dem_png/${GSI_DEM_Z}/${tx}/${ty}.png`);
+    if (res.status === 404) return null; // 海上など: タイルが存在しない(正常系)
+    if (!res.ok) throw new Error('GSI HTTP ' + res.status);
+    const bmp = await createImageBitmap(await res.blob());
+    const cv = document.createElement('canvas');
+    cv.width = 256; cv.height = 256;
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bmp, 0, 0);
+    const d = ctx.getImageData(0, 0, 256, 256).data;
+    const out = new Float32Array(65536);
+    for (let i = 0; i < 65536; i++) {
+      // 標高 = (R*2^16 + G*2^8 + B) * 0.01m。2^23 は無効値(海など)。それ以上は負値(2^24を引く)
+      const x = d[i * 4] * 65536 + d[i * 4 + 1] * 256 + d[i * 4 + 2];
+      out[i] = (x === 8388608) ? NaN : (x < 8388608 ? x : x - 16777216) * 0.01;
+    }
+    return out;
+  })();
+  p.catch(() => _gsiTiles.delete(key)); // 失敗Promiseをキャッシュに残すと永久に失敗し続けるため取り除く
+  _gsiTiles.set(key, p);
+  if (_gsiTiles.size > GSI_TILE_CACHE_MAX) {
+    for (const k of _gsiTiles.keys()) {
+      if (_gsiTiles.size <= GSI_TILE_CACHE_MAX) break;
+      if (k !== key) _gsiTiles.delete(k);
+    }
+  }
+  return p;
+}
+// latlons([{lat,lon},...])に対応する標高(m)の配列を返す。データ無し地点(海上)は null。
+// グリッド全体が使えない場合(国外の点が混じる/ネットワーク失敗)は null を返す。
+async function fetchElevationsGSI(latlons) {
+  if (!latlons.length || !latlons.every(ll => gsiCovers(ll.lat, ll.lon))) return null;
+  try {
+    const n = 2 ** GSI_DEM_Z;
+    const jobs = latlons.map(ll => {
+      const xt = (ll.lon + 180) / 360 * n;
+      const latR = ll.lat * Math.PI / 180;
+      const yt = (1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * n;
+      const tx = Math.floor(xt), ty = Math.floor(yt);
+      return { key: tx + ',' + ty, tx, ty,
+        px: Math.min(255, Math.floor((xt - tx) * 256)),
+        py: Math.min(255, Math.floor((yt - ty) * 256)) };
+    });
+    // タイル単位に重複排除して並列取得(キャッシュ削除に巻き込まれないようローカルに保持)
+    const tiles = new Map();
+    const keys = [...new Set(jobs.map(j => j.key))];
+    await runLimited(keys, async (k, i) => {
+      const j = jobs.find(jb => jb.key === k);
+      tiles.set(k, await _gsiLoadTile(j.tx, j.ty));
+    }, 8);
+    return jobs.map(j => {
+      const tile = tiles.get(j.key);
+      const h = tile ? tile[j.py * 256 + j.px] : NaN;
+      return Number.isFinite(h) ? h : null;
+    });
+  } catch (e) {
+    return null; // ネットワークエラー等 → 呼び出し側で opentopodata にフォールバック
+  }
+}
+
 async function loadElevations() {
   statusEl.textContent = '🏔 地形データ取得中...';
   // Build lat/lon for each vertex
@@ -3106,7 +3210,11 @@ async function loadElevations() {
   }
   const elevs = new Array(latlons.length).fill(0);
   let ok = true;
-  try {
+  // まず国土地理院タイルから並列取得(数秒)。国外・失敗時のみopentopodata(直列・低速)へ
+  const gsi = await fetchElevationsGSI(latlons);
+  if (gsi) {
+    for (let i = 0; i < elevs.length; i++) elevs[i] = gsi[i] || 0; // データ無し(海上)は0m
+  } else try {
     // バッチを少数ずつ並列発行する(FETCH_CONCURRENCY件まで)。opentopodataの1req/秒
     // レート制限は server/server.js のプロキシ側(scheduleUpstream)が直列キューで既に
     // 守っているため、クライアント側でさらに1.1秒ずつ待つのは二重の待機だった。
@@ -3282,7 +3390,12 @@ async function loadNearTerrain(centerX = 0, centerZ = 0) {
       pts.push(xzToLatLon(wx, wz));
     }
   const raw = new Array(pts.length).fill(null);
-  try {
+  // まず国土地理院タイル(並列・数秒)。NEARは建物生成のゲートなので、ここが速いほど
+  // 道路・建物の読み込み体感が改善する。国外・失敗時のみopentopodataへ。
+  const gsi = await fetchElevationsGSI(pts);
+  if (gsi) {
+    for (let i = 0; i < raw.length; i++) raw[i] = gsi[i]; // null(海上)は下でoceanFloor扱い
+  } else try {
     const batches = [];
     for (let i = 0; i < pts.length; i += 100) batches.push(pts.slice(i, i + 100));
     const results = await runLimited(batches, batch => {
@@ -5021,6 +5134,7 @@ function animate() {
   // Dynamic chunk streaming — generates buildings around player as they explore
   updateChunks();
   processChunkQueue(); // フレーム分割: 1チャンク/フレーム
+  processRoadMeshQueue(); // 道路メッシュもフレーム分割(密集タイル到着時のフリーズ防止)
   // タイル取得分の建物もフレーム分割(20棟/フレーム)で生成。
   // 【重要】以前はここでNEAR地形の準備状況を一切見ていなかった。チャンク生成側
   // (processChunkQueue/chunkNearTerrainReady)だけをゲートしても、実際の建物の大半は
