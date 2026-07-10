@@ -4505,7 +4505,12 @@ async function fetchOSMTileBatch() {
   osmTileQueue.sort((a, b) =>
     (Math.abs(a.tx + 0.5 - ptx) + Math.abs(a.tz + 0.5 - ptz)) -
     (Math.abs(b.tx + 0.5 - ptx) + Math.abs(b.tz + 0.5 - ptz)));
-  const batch = osmTileQueue.splice(0, OSM_TILE_BATCH); // 近い順に最大OSM_TILE_BATCH枚をまとめて1リクエストへ
+  // ジャンプ直後(現在地のタイルすら未確定)は、まず1枚だけの小さいクエリで最速で足元の
+  // 道路・建物を出す。6枚まとめの大クエリはOverpass側の実行に20〜40秒かかるため、
+  // ジャンプ後「道路が出るまで1〜2分」の主因だった(同時実行枠は1IPあたり2つしかない)。
+  // 現在地のタイルが確定したら、従来どおり6枚まとめで効率よく外側を埋める。
+  const ptKey = `${Math.floor(player.position.x / OSM_TILE_M)},${Math.floor(player.position.z / OSM_TILE_M)}`;
+  const batch = osmTileQueue.splice(0, loadedOSMTiles.has(ptKey) ? OSM_TILE_BATCH : 1); // 近い順
   const keys = batch.map(({tx, tz}) => `${tx},${tz}`);
   const bboxes = batch.map(({tx, tz}) => {
     const worldX0 = tx * OSM_TILE_M, worldZ0 = tz * OSM_TILE_M;
@@ -4518,7 +4523,13 @@ async function fetchOSMTileBatch() {
   const query = buildOSMBatchQuery(bboxes);
   let failed = false;
   try {
-    const res = await fetch('https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query));
+    // 【重要】ブラウザ→Overpass直接アクセス時(プロキシ迂回フォールバック)はサーバー側の
+    // 45秒タイムアウトが効かないため、ハングしたリクエストがこのワーカー枠を永久に塞ぐ。
+    // クライアント側でも50秒で見切る(失敗扱い→既存のバックオフ・再試行に乗る)。
+    const res = await Promise.race([
+      fetch('https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query)),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 50000))
+    ]);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     if (!data || !data.elements) throw new Error('no elements');
