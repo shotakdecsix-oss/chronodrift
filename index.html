@@ -2796,7 +2796,7 @@ function handleAreaFeature(el) {
   } else if (isForest) {
     scatterTreesIn(poly, 380, 70);
   } else if (isCampus) {
-    if (span < 500 && areaPolyBudget.campus-- > 0) buildAreaPoly(pts, YARD_MAT, 0.13);
+    if (span < 900 && areaPolyBudget.campus-- > 0) buildAreaPoly(pts, YARD_MAT, 0.13);
   }
   return true;
 }
@@ -3421,7 +3421,12 @@ async function loadOSM(preFetchedData) {
       const st = getBuildingStyle(tags);
       if (!st || (st.type !== 'shrine' && st.type !== 'temple')) return;
     }
-    if (tags.building && buildingCount < 3000 && el.geometry && el.geometry.length >= 4) { // 700/1200では初期エリア内でも歯抜けが出ていた
+    // 学校・大学・病院は、校舎そのものにbuildingタグが無く敷地全体(amenity)しか
+    // マッピングされていないケースが多い。その場合も敷地の中心に代表的な校舎を1棟
+    // 建てる(敷地いっぱいの巨大建物にならないよう、サイズは後段でキャップする)。
+    const isCampusOnly = !IS_MEIJI && !tags.building &&
+      ['school','university','college','hospital'].includes(tags.amenity || '');
+    if ((tags.building || isCampusOnly) && buildingCount < 3000 && el.geometry && el.geometry.length >= 4) { // 700/1200では初期エリア内でも歯抜けが出ていた
       const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
       let cx = 0, cz = 0;
       pts.forEach(p => { cx += p.x; cz += p.z; });
@@ -3432,8 +3437,9 @@ async function loadOSM(preFetchedData) {
         maxDx = Math.max(maxDx, Math.abs(p.x - cx));
         maxDz = Math.max(maxDz, Math.abs(p.z - cz));
       });
-      const w = Math.max(maxDx * 2, 2);
-      const d = Math.max(maxDz * 2, 2);
+      let w = Math.max(maxDx * 2, 2);
+      let d = Math.max(maxDz * 2, 2);
+      if (isCampusOnly) { w = Math.min(w, 34); d = Math.min(d, 22); } // 敷地全体でなく校舎サイズに収める
 
       let style = getBuildingStyle(tags);
       const resolvedH = resolveBuildingHeight(tags);
@@ -4213,7 +4219,11 @@ function processTileData(data) {
     if (el.type !== 'way' || !el.geometry || el.geometry.length < 4) return;
     if (seenOSMWays.has(el.id)) return;
     const tags = el.tags || {};
-    if (!tags.building) return;
+    // 学校・大学・病院は、校舎そのものにbuildingタグが無く敷地全体(amenity)しか
+    // マッピングされていないケースが多い。その場合も敷地の中心に代表的な校舎を1棟建てる。
+    const isCampusOnly = !IS_MEIJI && !tags.building &&
+      ['school','university','college','hospital'].includes(tags.amenity || '');
+    if (!tags.building && !isCampusOnly) return;
     if (IS_MEIJI) { // 明治: 神社仏閣以外のOSM建物は出さない
       const st = getBuildingStyle(tags);
       if (!st || (st.type !== 'shrine' && st.type !== 'temple')) return;
@@ -4224,7 +4234,8 @@ function processTileData(data) {
     cx/=pts.length; cz/=pts.length;
     let maxDx=0, maxDz=0;
     pts.forEach(p => { maxDx=Math.max(maxDx,Math.abs(p.x-cx)); maxDz=Math.max(maxDz,Math.abs(p.z-cz)); });
-    const w=Math.max(maxDx*2,2), d=Math.max(maxDz*2,2);
+    let w=Math.max(maxDx*2,2), d=Math.max(maxDz*2,2);
+    if (isCampusOnly) { w = Math.min(w, 34); d = Math.min(d, 22); } // 敷地全体でなく校舎サイズに収める
     let style = getBuildingStyle(tags);
     const resolvedH = resolveBuildingHeight(tags);
     const levels = parseInt(tags['building:levels']) || 1+Math.floor(Math.random()*3);
