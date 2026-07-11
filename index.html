@@ -5,90 +5,143 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>伊勢原ファンタジー</title>
 <style>
+:root {
+  --hud-bg: rgba(15,18,32,0.55);
+  --hud-border: rgba(255,255,255,0.14);
+  --hud-blur: 12px;
+  --hud-radius: 14px;
+  --accent: #8b7bff;          /* 時代モード連動で将来差し替え可能(このCSS変数1個のみ) */
+  --text: #eef0fa;
+  --text-dim: rgba(238,240,250,0.65);
+  --shadow: 0 4px 24px rgba(0,0,0,0.35);
+  --safe-top: max(16px, env(safe-area-inset-top));
+  --safe-left: max(16px, env(safe-area-inset-left));
+  --safe-right: max(16px, env(safe-area-inset-right));
+  --safe-bottom: max(16px, env(safe-area-inset-bottom));
+}
 * { margin:0; padding:0; box-sizing:border-box; }
-body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
+body {
+  overflow:hidden; background:#000;
+  font-family:"Hiragino Sans","Yu Gothic","Noto Sans JP",sans-serif;
+  color:var(--text);
+}
 #canvas { display:block; width:100vw; height:100vh; }
-#ui {
-  position:fixed; top:0; left:0; width:100%; height:100%;
-  pointer-events:none; z-index:10;
+
+.glass {
+  background:var(--hud-bg);
+  backdrop-filter:blur(var(--hud-blur));
+  -webkit-backdrop-filter:blur(var(--hud-blur));
+  border:1px solid var(--hud-border);
+  box-shadow:var(--shadow);
 }
-#viewBtn {
-  position:fixed; top:16px; left:16px;
-  background:rgba(80,40,120,0.85); color:#e8c8ff;
-  border:1px solid #a060ff; border-radius:8px;
-  padding:8px 14px; font-size:14px; cursor:pointer;
-  pointer-events:all; z-index:20;
-  text-shadow:0 0 8px #c080ff;
-  box-shadow:0 0 12px rgba(160,96,255,0.5);
+@supports not (backdrop-filter: blur(1px)) {
+  .glass { background:rgba(15,18,32,0.8); }
 }
-#viewBtn:hover { background:rgba(120,60,180,0.9); }
-#info {
-  position:fixed; top:64px; right:16px;
-  background:rgba(30,10,60,0.8); color:#c8a8ff;
-  border:1px solid #6040a0; border-radius:8px;
-  padding:10px 14px; font-size:12px; line-height:1.7;
-  pointer-events:none;
-}
-#status {
-  position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
-  background:rgba(30,10,60,0.85); color:#e8c8ff;
-  border:1px solid #8060c0; border-radius:12px;
-  padding:10px 20px; font-size:13px;
-  pointer-events:none; text-align:center;
-}
-/* #tileLoading(周辺データ読み込み中バッジ)は、常時表示され続けて意味を成さなかったため廃止した。 */
-/* 現在地の住所(市区町村+町名レベル)。移動中に常時表示し続ける */
+
+/* ── ロケーションカプセル(住所+GPS座標・標高を統合。タップで展開) ── */
 #addressDisplay {
-  position:fixed; top:16px; left:50%; transform:translateX(-50%);
-  background:rgba(20,20,40,0.75); color:#d8e8ff;
-  border:1px solid rgba(120,150,220,0.6); border-radius:8px;
-  padding:6px 16px; font-size:13px;
-  pointer-events:none; z-index:21; white-space:nowrap;
+  position:fixed; top:var(--safe-top); left:50%; transform:translateX(-50%);
+  border-radius:999px; padding:8px 18px; font-size:13px;
+  cursor:pointer; z-index:40; white-space:nowrap; text-align:center;
+  color:var(--text);
 }
+#addressDisplay::after { content:' ▾'; color:var(--text-dim); }
+#gpsDisplay {
+  position:fixed; top:calc(var(--safe-top) + 44px); left:50%; transform:translateX(-50%);
+  border-radius:var(--hud-radius); padding:12px 18px; font-size:12px;
+  line-height:2; z-index:40; text-align:center;
+  font-variant-numeric:tabular-nums; color:var(--text-dim);
+  display:none; pointer-events:all;
+}
+#gpsDisplay.open { display:block; }
+
+/* ── アイコンレール(視点/上空/マップジャンプ/時代モード/海面/視点回転/ヘルプ) ── */
+#hudRail {
+  position:fixed; top:50%; left:var(--safe-left); transform:translateY(-50%);
+  display:flex; flex-direction:column; gap:10px; z-index:30;
+}
+.railBtn {
+  width:48px; height:48px; border-radius:50%;
+  font-size:20px; cursor:pointer; color:var(--text);
+  display:flex; align-items:center; justify-content:center;
+  position:relative; transition:transform .1s;
+}
+.railBtn:active { transform:scale(.94); }
+.railBtn.active { box-shadow:var(--shadow), 0 0 0 2px var(--accent); }
+.railBtn .sub {
+  position:absolute; bottom:-14px; left:50%; transform:translateX(-50%);
+  font-size:9px; color:var(--text-dim); white-space:nowrap;
+}
+.railBtn.hasSub { margin-bottom:12px; } /* subラベル分の余白 */
+
+/* 海面ポップオーバー(🌊タップで開閉) */
+#seaCtrl {
+  position:fixed; left:calc(var(--safe-left) + 58px); top:50%; transform:translateY(-50%);
+  border-radius:var(--hud-radius); padding:14px 16px; width:220px; z-index:35;
+  font-size:12px; display:none; touch-action:none;
+}
+#seaCtrl.open { display:block; }
+#seaCtrl input { width:100%; margin-top:8px; accent-color:var(--accent); }
+#seaVal { color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; }
+
+/* ── 右上 UI非表示トグル(常時表示。スティック・ジャンプ・このボタン以外を隠す) ── */
+#uiToggleBtn {
+  position:fixed; top:var(--safe-top); right:var(--safe-right);
+  width:40px; height:40px; border-radius:50%;
+  font-size:16px; cursor:pointer; color:var(--text); z-index:50;
+  display:flex; align-items:center; justify-content:center;
+}
+
 /* Touch joystick */
 #joystick {
-  position:fixed; bottom:100px; left:40px;
-  width:130px; height:130px;
-  background:rgba(80,40,120,0.45);
-  border:2px solid rgba(160,100,255,0.7);
-  border-radius:50%; pointer-events:all; z-index:30;
-  touch-action:none; user-select:none;
+  position:fixed; bottom:calc(var(--safe-bottom) + 24px); left:calc(var(--safe-left) + 12px);
+  width:120px; height:120px; border-radius:50%;
+  pointer-events:all; z-index:30; touch-action:none; user-select:none;
 }
 #joystickKnob {
-  position:absolute; top:50%; left:50%;
-  width:52px; height:52px;
-  background:rgba(160,100,255,0.8);
-  border:2px solid #e0a0ff;
-  border-radius:50%; transform:translate(-50%,-50%);
-  pointer-events:none;
+  position:absolute; top:50%; left:50%; width:48px; height:48px;
+  background:rgba(139,123,255,0.55); border:1px solid var(--accent);
+  border-radius:50%; transform:translate(-50%,-50%); pointer-events:none;
 }
 /* Minimap */
 #minimap {
-  position:fixed; bottom:20px; right:16px;
-  width:200px; height:200px;
-  border:2px solid rgba(160,100,255,0.7);
-  border-radius:8px; overflow:hidden;
-  background:rgba(10,5,25,0.85);
+  position:fixed; bottom:calc(var(--safe-bottom) + 84px); right:var(--safe-right);
+  width:160px; height:160px; border-radius:var(--hud-radius); overflow:hidden;
   z-index:25; pointer-events:none;
 }
-#gpsDisplay {
-  position:fixed; bottom:230px; right:16px;
-  background:rgba(10,30,60,0.85); color:#a0e0ff;
-  border:1px solid rgba(80,180,255,0.5); border-radius:8px;
-  padding:8px 12px; font-size:11px; line-height:1.8;
-  pointer-events:all; z-index:25;
-  text-decoration:none; display:block;
-}
-#gpsDisplay:hover { background:rgba(20,50,100,0.9); }
 #jumpBtn {
-  position:fixed; top:96px; left:16px;
-  background:rgba(20,80,40,0.85); color:#a0ffb0;
-  border:1px solid #40c060; border-radius:8px;
-  padding:8px 14px; font-size:14px; cursor:pointer;
-  pointer-events:all; z-index:20;
-  box-shadow:0 0 12px rgba(64,192,96,0.4);
+  /* レール内のボタンなので個別配置は不要(.railBtnが担当) */
 }
-#jumpBtn:hover { background:rgba(30,120,60,0.9); }
+/* トースト(旧#status。読み込み中系は完了まで保持し完了メッセージに差し替える) */
+#status {
+  position:fixed; bottom:calc(var(--safe-bottom) + 100px); left:50%; transform:translateX(-50%);
+  border-radius:999px; padding:9px 20px; font-size:13px; z-index:60;
+  color:var(--text); pointer-events:none; text-align:center;
+  transition:opacity .4s;
+}
+/* ヘルプモーダル(初回のみ自動表示。以後は?ボタンから) */
+#helpModal {
+  position:fixed; inset:0; z-index:80; display:none;
+  align-items:center; justify-content:center;
+  background:rgba(0,0,0,0.55);
+}
+#helpModal.active { display:flex; }
+#info {
+  border-radius:var(--hud-radius); padding:20px 24px; max-width:min(92vw,420px);
+  font-size:13px; line-height:1.9; color:var(--text);
+}
+#infoCloseBtn {
+  display:block; margin:16px auto 0; padding:8px 22px;
+  border-radius:999px; border:1px solid var(--hud-border);
+  background:rgba(255,255,255,0.08); color:var(--text); font-size:13px; cursor:pointer;
+}
+#hopBtn {
+  position:fixed; bottom:var(--safe-bottom); right:var(--safe-right);
+  width:64px; height:64px; border-radius:50%;
+  font-size:26px; color:var(--text); cursor:pointer; pointer-events:all; z-index:30;
+  touch-action:none; user-select:none;
+}
+#hopBtn:active { background:rgba(139,123,255,0.35); }
 /* Map overlay */
 #mapOverlay {
   position:fixed; top:0; left:0; width:100%; height:100%;
@@ -123,51 +176,6 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
   white-space:nowrap;
 }
 #mapSearchBtn:hover, #geoBtn:hover { background:rgba(30,110,160,0.95); }
-#mapBtn {
-  position:fixed; top:56px; left:16px;
-  background:rgba(80,40,120,0.85); color:#e8c8ff;
-  border:1px solid #a060ff; border-radius:8px;
-  padding:8px 14px; font-size:14px; cursor:pointer;
-  pointer-events:all; z-index:20;
-  text-shadow:0 0 8px #c080ff;
-  box-shadow:0 0 12px rgba(160,96,255,0.5);
-}
-#mapBtn:hover { background:rgba(120,60,180,0.9); }
-#hopBtn {
-  position:fixed; bottom:24px; right:232px;
-  width:64px; height:64px; border-radius:50%;
-  background:rgba(40,90,160,0.7); color:#cfe8ff;
-  border:2px solid rgba(120,190,255,0.8);
-  font-size:28px; cursor:pointer; pointer-events:all; z-index:30;
-  touch-action:none; user-select:none;
-}
-#hopBtn:active { background:rgba(70,130,210,0.9); }
-#modeBtn {
-  position:fixed; top:136px; left:16px;
-  background:rgba(120,80,30,0.85); color:#ffe0b0;
-  border:1px solid #d09040; border-radius:8px;
-  padding:8px 14px; font-size:14px; cursor:pointer;
-  pointer-events:all; z-index:20;
-  box-shadow:0 0 12px rgba(208,144,64,0.4);
-}
-#modeBtn:hover { background:rgba(160,100,40,0.9); }
-#camDirBtn {
-  position:fixed; top:176px; left:16px;
-  background:rgba(50,50,70,0.85); color:#c8d0e8;
-  border:1px solid #8090c0; border-radius:8px;
-  padding:8px 14px; font-size:14px; cursor:pointer;
-  pointer-events:all; z-index:20;
-}
-#camDirBtn:hover { background:rgba(70,70,100,0.9); }
-#seaCtrl {
-  position:fixed; top:216px; left:16px;
-  background:rgba(20,50,80,0.85); color:#bfe6ff;
-  border:1px solid rgba(80,180,255,0.6); border-radius:8px;
-  padding:6px 10px; font-size:12px; width:190px;
-  pointer-events:all; z-index:20; touch-action:none;
-  box-shadow:0 0 12px rgba(64,160,255,0.3);
-}
-#seaCtrl input { width:100%; margin-top:5px; accent-color:#40c0ff; }
 /* 水中エフェクト(キャラが完全に水没した時) */
 #waterOverlay {
   position:fixed; inset:0; z-index:100; display:none; pointer-events:none;
@@ -181,33 +189,39 @@ body { overflow:hidden; background:#000; font-family:'Segoe UI',sans-serif; }
 }
 #waterOverlay.active { display:block; }
 @keyframes waterShimmer { 0%,100% { opacity:0.82; } 50% { opacity:1; } }
-/* UI非表示トグル(常時表示。スティック・ジャンプ・このボタン以外を隠す) */
-#uiToggleBtn {
-  position:fixed; top:16px; right:16px;
-  width:40px; height:40px; border-radius:50%;
-  background:rgba(30,10,60,0.55); color:#e8c8ff;
-  border:1px solid rgba(160,96,255,0.5);
-  font-size:18px; cursor:pointer;
-  pointer-events:all; z-index:40;
-}
-body.uiHidden #info, body.uiHidden #viewBtn, body.uiHidden #mapBtn,
-body.uiHidden #jumpBtn, body.uiHidden #modeBtn, body.uiHidden #camDirBtn,
-body.uiHidden #gpsDisplay, body.uiHidden #minimap, body.uiHidden #credit,
-body.uiHidden #seaCtrl, body.uiHidden #status { display:none !important; }
+/* UI非表示: スティック・ジャンプ・👁トグル以外を隠して景色を全画面で楽しむモード */
+body.uiHidden #hudRail, body.uiHidden #addressDisplay, body.uiHidden #gpsDisplay,
+body.uiHidden #seaCtrl, body.uiHidden #minimap, body.uiHidden #credit,
+body.uiHidden #status, body.uiHidden #helpModal { display:none !important; }
 body.uiHidden #uiToggleBtn { opacity:0.45; }
 </style>
 </head>
 <body>
 <canvas id="canvas"></canvas>
 <div id="waterOverlay"></div>
-<div id="addressDisplay">📍 現在地を取得中...</div>
-<button id="viewBtn">👁 一人称</button>
-<button id="mapBtn">🗺 上空</button>
-<button id="jumpBtn">📍 マップジャンプ</button>
-<button id="modeBtn">🏙 現実</button>
-<button id="camDirBtn">🔄 視点</button>
-<div id="seaCtrl">🌊 海面 <span id="seaVal">3.0</span>m<input id="seaSlider" type="range" min="1" max="10" step="0.5" value="3"></div>
-<button id="uiToggleBtn" title="UI表示/非表示">🙈</button>
+
+<!-- 上中央: ロケーションカプセル(タップでGPS座標・標高を展開) -->
+<div id="addressDisplay" class="glass">📍 現在地を取得中...</div>
+<a id="gpsDisplay" class="glass" href="#" target="_blank">📍 座標取得中...</a>
+
+<!-- 左: アイコンレール -->
+<nav id="hudRail">
+  <button class="railBtn glass hasSub active" id="viewBtn" title="視点切替"><span class="ico" id="viewIco">👁</span><span class="sub" id="viewSub">一人称</span></button>
+  <button class="railBtn glass" id="mapBtn" title="上空視点">🗺</button>
+  <button class="railBtn glass" id="jumpBtn" title="マップジャンプ">📍</button>
+  <button class="railBtn glass hasSub" id="modeBtn" title="時代モード"><span class="ico" id="modeIco">🏙</span><span class="sub" id="modeSub">現実</span></button>
+  <button class="railBtn glass" id="seaBtn" title="海面設定">🌊</button>
+  <button class="railBtn glass" id="camDirBtn" title="視点回転">🔄</button>
+  <button class="railBtn glass" id="helpBtn" title="操作ヘルプ">?</button>
+</nav>
+
+<!-- 海面ポップオーバー(🌊タップで開閉) -->
+<div id="seaCtrl" class="glass">
+  🌊 海面の高さ <span id="seaVal">3.0</span>m
+  <input id="seaSlider" type="range" min="1" max="10" step="0.5" value="3">
+</div>
+
+<button id="uiToggleBtn" class="glass" title="UI表示/非表示">🙈</button>
 <div id="credit" style="display:none; position:fixed; bottom:2px; left:8px; font-size:10px; color:rgba(255,255,255,0.65); z-index:30; pointer-events:all;"></div>
 <div id="mapOverlay">
   <div id="mapHint">タップした場所にジャンプします</div>
@@ -219,15 +233,20 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
   <div id="leafletMap"></div>
   <button id="mapCloseBtn">✕ 閉じる</button>
 </div>
-<div id="info">
-  PC: WASD移動 / Shiftダッシュ / Spaceジャンプ / ドラッグ回転<br>
-  スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ
+
+<!-- 操作ヘルプ(初回のみ自動表示。以後は?ボタンから) -->
+<div id="helpModal">
+  <div id="info" class="glass">
+    PC: WASD移動 / Shiftダッシュ / Spaceジャンプ / ドラッグ回転<br>
+    スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ
+    <button id="infoCloseBtn">閉じる</button>
+  </div>
 </div>
-<div id="status">🗺 伊勢原マップ読み込み中...</div>
-<a id="gpsDisplay" href="#" target="_blank">📍 座標取得中...</a>
-<div id="minimap"><canvas id="minimapCanvas" width="200" height="200"></canvas></div>
-<div id="joystick"><div id="joystickKnob"></div></div>
-<button id="hopBtn">⤴</button>
+
+<div id="status" class="glass">🗺 伊勢原マップ読み込み中...</div>
+<div id="minimap" class="glass"><canvas id="minimapCanvas" width="200" height="200"></canvas></div>
+<div id="joystick" class="glass"><div id="joystickKnob"></div></div>
+<button id="hopBtn" class="glass">⤴</button>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -255,7 +274,9 @@ try {
 (function initModeBtn() {
   const btn = document.getElementById('modeBtn');
   const idx = VISUAL_MODES.findIndex(v => v.id === MODE);
-  btn.textContent = VISUAL_MODES[idx].label;
+  const [icoText, ...labelParts] = VISUAL_MODES[idx].label.split(' ');
+  document.getElementById('modeIco').textContent = icoText;
+  document.getElementById('modeSub').textContent = labelParts.join(' ');
   btn.addEventListener('click', () => {
     const next = VISUAL_MODES[(idx + 1) % VISUAL_MODES.length].id;
     try {
@@ -2518,6 +2539,21 @@ function addStation(x, z, name) {
 
 // ======= OSM DATA LOADER =======
 const statusEl = document.getElementById('status');
+// トースト化: sticky=true の間は自動で消えない(次の呼び出しか手動再表示まで保持)
+let _toastTimer = null;
+function showToast(msg, opts) {
+  opts = opts || {};
+  statusEl.textContent = msg;
+  statusEl.style.display = 'block';
+  statusEl.style.opacity = '1';
+  clearTimeout(_toastTimer);
+  if (!opts.sticky) {
+    _toastTimer = setTimeout(() => {
+      statusEl.style.opacity = '0';
+      setTimeout(() => { statusEl.style.display = 'none'; }, 400);
+    }, opts.duration || 3000);
+  }
+}
 // 初期スポーン: 神奈川県伊勢原市東成瀬2-2-11
 // (国土地理院ジオコーディング「東成瀬2番地」= 35.409103, 139.342331)
 const SPAWN_LAT = 35.409103, SPAWN_LON = 139.342331;
@@ -2749,14 +2785,14 @@ async function loadMeijiMesh(lat, lon) {
 }
 
 async function loadMeijiLanduse() {
-  statusEl.textContent = '🌾 明治期土地利用データ取得中...';
+  showToast('🌾 明治期土地利用データ取得中...', { sticky: true });
   const jobs = [];
   for (const lat of [OSM_BOUNDS.minLat, OSM_BOUNDS.maxLat])
     for (const lon of [OSM_BOUNDS.minLon, OSM_BOUNDS.maxLon])
       jobs.push(loadMeijiMesh(lat, lon));
   await Promise.all(jobs);
   meijiReady = true;
-  statusEl.textContent = `🌾 明治期土地利用 ${meijiCells.size} 地点読込`;
+  showToast(`🌾 明治期土地利用 ${meijiCells.size} 地点読込`);
 }
 
 // ======= 頂点間引きほか =======
@@ -3197,7 +3233,7 @@ async function fetchElevationsGSI(latlons) {
 }
 
 async function loadElevations() {
-  statusEl.textContent = '🏔 地形データ取得中...';
+  showToast('🏔 地形データ取得中...', { sticky: true });
   // Build lat/lon for each vertex
   // PlaneGeometry vertex (ix, iz): worldX = -W/2 + ix*W/SEGS, worldZ = -D/2 + iz*D/SEGS
   const latlons = [];
@@ -3232,7 +3268,7 @@ async function loadElevations() {
   } catch(e) { ok = false; }
 
   if (!ok) {
-    statusEl.textContent = '⚠️ 地形API失敗 - 擬似地形を生成';
+    showToast('⚠️ 地形API失敗 - 擬似地形を生成');
     proceduralElevs(elevs);
   }
 
@@ -3247,7 +3283,7 @@ async function loadElevations() {
   // 地形確定後、松明ライトを地表の高さに再配置(固定y=4のままだと丘に埋まる)
   torchLights.forEach(l => { l.position.y = getGroundY(l.position.x, l.position.z) + 4; });
   initDistantSea(); // elevBase 確定後に海面を作る
-  if (ok) statusEl.textContent = '🏔 地形反映完了';
+  if (ok) showToast('🏔 地形反映完了');
 }
 
 // ======= 遠景の実地形(北西=大山の山塊 / 南=相模湾へ下る海岸) =======
@@ -3322,7 +3358,7 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
   if (wideLoading) return;
   wideLoading = true;
   const reCenter = (wideElev !== null); // 2回目以降(=別地域へ移動しての取り直し)
-  if (reCenter) { statusEl.style.display = 'block'; statusEl.textContent = '🏔 この地域の地形を取得中...'; }
+  if (reCenter) showToast('🏔 この地域の地形を取得中...', { sticky: true });
   const pts = [];
   for (let iz = 0; iz < WIDE_SEGS1; iz++)
     for (let ix = 0; ix < WIDE_SEGS1; ix++) {
@@ -3355,7 +3391,7 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
   wideElev = arr; wideCX = centerX; wideCZ = centerZ; // データと中心を同時に更新
   wideLoading = false;
   updateFarMesh(true); // 遠景メッシュを新しい実地形で再構築
-  if (reCenter) { statusEl.textContent = '🏔 地形反映完了'; setTimeout(() => { statusEl.style.display = 'none'; }, 2500); }
+  if (reCenter) showToast('🏔 地形反映完了', { duration: 2500 });
 }
 
 // プレイヤーが遠景(FAR)グリッドの中心から離れすぎたら、その場所を中心に取り直す
@@ -3515,6 +3551,20 @@ function setupSeaSlider() {
 // loadElevations() と並行に開始できる(以前は awaitloadElevations() の後に
 // 直列で呼んでおり、地形取得+OSM取得の待ち時間がそのまま合算されていた)。
 async function fetchOSMData() {
+  // 伊勢原本体エリア(OSM_BOUNDS)は起動のたびに全く同じ範囲・同じクエリになるため、
+  // 一度取得した結果を静的JSONとして同梱してある(data/isehara-osm-seed.json)。
+  // まずこれを同一オリジンから取りに行く — Overpass本体の混雑やRender等の共有IP制限の
+  // 影響を受けず、静的ファイル配信なので通常数百ms〜1秒程度で完了する。これが
+  // 「起動時に道路・建物の読み込みが遅い」の主因(Overpassへの40〜45秒クエリ)を消す。
+  // ファイルが無い/壊れている場合のみ、従来どおりOverpassへ直接問い合わせる。
+  try {
+    const seedRes = await fetch('/data/isehara-osm-seed.json');
+    if (seedRes.ok) {
+      const seedJson = await seedRes.json();
+      if (seedJson && Array.isArray(seedJson.elements) && seedJson.elements.length > 0) return seedJson;
+    }
+  } catch (e) { /* 静的ファイル取得失敗時は下のOverpass直接取得にフォールバック */ }
+
   const bb = `${OSM_BOUNDS.minLat},${OSM_BOUNDS.minLon},${OSM_BOUNDS.maxLat},${OSM_BOUNDS.maxLon}`;
   const query = `[out:json][timeout:40];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal|riverbank"](${bb});relation["natural"="water"](${bb});relation["waterway"="riverbank"](${bb});way["railway"="rail"](${bb});node["railway"="station"](${bb});node["railway"="halt"](${bb});node["public_transport"="station"](${bb}););out geom;`;
   const url = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
@@ -3522,9 +3572,9 @@ async function fetchOSMData() {
   // 一時的に混雑していただけでも見た目が大きく崩れてしまう。最大3回、間隔を空けて再試行する。
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      statusEl.textContent = attempt === 1
+      showToast(attempt === 1
         ? '🗺 伊勢原マップ取得中... (最大45秒)'
-        : `🗺 伊勢原マップ取得再試行中... (${attempt}/3)`;
+        : `🗺 伊勢原マップ取得再試行中... (${attempt}/3)`, { sticky: true });
       // クエリ自体のOverpass側タイムアウトが40秒なのに、以前クライアント側は32秒で見切っていたため、
       // サーバーがまだ処理中でも早期に諦めてフォールバックになることがあった。サーバー側より余裕を持たせる。
       const res = await Promise.race([
@@ -3547,11 +3597,11 @@ async function loadOSM(preFetchedData) {
   const data = preFetchedData !== undefined ? preFetchedData : await fetchOSMData();
 
   if (!data || !data.elements) {
-    statusEl.textContent = '⚠️ OSM取得失敗 - フォールバックマップ使用';
+    showToast('⚠️ OSM取得失敗 - フォールバックマップ使用');
     buildFallbackMap();
     return;
   }
-  statusEl.textContent = `✅ OSMデータ取得完了 (${data.elements.length} 要素)`;
+  showToast(`✅ OSMデータ取得完了 (${data.elements.length} 要素)`);
 
   const nodeMap = {};
   data.elements.forEach(el => {
@@ -3678,8 +3728,7 @@ async function loadOSM(preFetchedData) {
   // 初期ロードで処理したway IDを記録(境界タイルの再取得時に二重生成しないため)
   data.elements.forEach(el => { if (el.type === 'way') seenOSMWays.add(el.id); });
 
-  statusEl.textContent = `✨ 伊勢原ファンタジー世界へようこそ！ (建物:${buildingCount} 道路:${roadCount})`;
-  setTimeout(()=>{ statusEl.style.display='none'; }, 4000);
+  showToast(`✨ 伊勢原ファンタジー世界へようこそ！ (建物:${buildingCount} 道路:${roadCount})`, { duration: 4000 });
 
   // モード切替リロードなら切替前の位置・向きから再開、通常起動は東成瀬2-2-11にスポーン
   const resume = consumeResumePos();
@@ -3713,8 +3762,7 @@ function buildFallbackMap() {
     addRoad(-1200, i, 1200, i, 6);
     addRoad(i, -1200, i, 1200, 6);
   }
-  statusEl.textContent = '✨ 伊勢原ファンタジー世界（フォールバック）へようこそ！';
-  setTimeout(()=>{ statusEl.style.display='none'; }, 3000);
+  showToast('✨ 伊勢原ファンタジー世界（フォールバック）へようこそ！', { duration: 3000 });
   const resume2 = consumeResumePos();
   if (resume2) {
     const rp2 = latLonToXZ(resume2.lat, resume2.lon);
@@ -3978,7 +4026,11 @@ const viewBtnLabels = ['👁 一人称', '👁 三人称', '🗺 上空'];
 
 function setViewMode(mode) {
   viewMode = mode % 3;
-  document.getElementById('viewBtn').textContent = viewBtnLabels[viewMode];
+  const [icoText, ...labelParts] = viewBtnLabels[viewMode].split(' ');
+  document.getElementById('viewIco').textContent = icoText;
+  document.getElementById('viewSub').textContent = labelParts.join(' ');
+  document.getElementById('viewBtn').classList.toggle('active', viewMode !== 2);
+  document.getElementById('mapBtn').classList.toggle('active', viewMode === 2);
   const showBody = (viewMode !== 1); // hide body in first-person
   body.visible = cape.visible = leftArm.visible = rightArm.visible = staff.visible =
   hatBrim.visible = hatTop.visible = head.visible = orb.visible = showBody;
@@ -4115,7 +4167,10 @@ function drawMinimap() {
 let CAM_DIR = 1;
 try { if (localStorage.getItem('iseharaCamDir') === 'legacy') CAM_DIR = -1; } catch (e) {}
 const camDirBtn = document.getElementById('camDirBtn');
-function updateCamDirBtn() { camDirBtn.textContent = CAM_DIR === 1 ? '🔄 視点:反転' : '🔄 視点:標準'; }
+function updateCamDirBtn() {
+  camDirBtn.title = CAM_DIR === 1 ? '視点:反転' : '視点:標準';
+  camDirBtn.classList.toggle('active', CAM_DIR === -1);
+}
 camDirBtn.addEventListener('click', () => {
   CAM_DIR = -CAM_DIR;
   try { localStorage.setItem('iseharaCamDir', CAM_DIR === -1 ? 'legacy' : 'inverted'); } catch (e) {}
@@ -4137,6 +4192,47 @@ uiToggleBtn.addEventListener('click', () => {
   applyUIHidden();
 });
 applyUIHidden();
+
+// ======= ロケーションカプセル(タップで座標・標高を展開) =======
+if (addressEl && gpsEl) {
+  addressEl.addEventListener('click', (e) => {
+    e.stopPropagation();
+    gpsEl.classList.toggle('open');
+  });
+}
+
+// ======= 海面ポップオーバー(🌊タップで開閉、外側タップで閉じる) =======
+const seaBtn = document.getElementById('seaBtn');
+const seaCtrlEl = document.getElementById('seaCtrl');
+if (seaBtn && seaCtrlEl) {
+  seaBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    seaCtrlEl.classList.toggle('open');
+    seaBtn.classList.toggle('active', seaCtrlEl.classList.contains('open'));
+  });
+}
+document.addEventListener('click', () => {
+  if (seaCtrlEl && seaCtrlEl.classList.contains('open')) {
+    seaCtrlEl.classList.remove('open');
+    seaBtn.classList.remove('active');
+  }
+  if (gpsEl && gpsEl.classList.contains('open')) gpsEl.classList.remove('open');
+});
+
+// ======= 操作ヘルプ: 初回のみ自動表示、以後は?ボタンから =======
+const helpModal = document.getElementById('helpModal');
+const helpBtn = document.getElementById('helpBtn');
+const infoCloseBtn = document.getElementById('infoCloseBtn');
+function openHelp() { helpModal.classList.add('active'); }
+function closeHelp() { helpModal.classList.remove('active'); }
+if (helpBtn) helpBtn.addEventListener('click', (e) => { e.stopPropagation(); openHelp(); });
+if (infoCloseBtn) infoCloseBtn.addEventListener('click', (e) => { e.stopPropagation(); closeHelp(); });
+try {
+  if (!localStorage.getItem('iseharaHelpSeen')) {
+    openHelp();
+    localStorage.setItem('iseharaHelpSeen', '1');
+  }
+} catch (e) { openHelp(); }
 
 // ======= INPUT =======
 const keys = {};
@@ -4307,11 +4403,14 @@ const osmTileQueue = [];
 // 移動すると描写エリアの拡大がまったく追いつかず、未読み込みの端に突き当たっていた。
 // 一方で4は欲張りすぎで、遠景地形の高解像度化(WIDE_SEGS増)による大量リクエストと
 // 重なった際にプロキシ/サーバーを詰まらせていたため2に落とした経緯がある。
-// 上流へは結局サーバー側が1.1秒間隔で直列化するので、クライアント側の同時実行数を
-// 上げても「待ち行列に同時に何本置いておけるか」が変わるだけで上流を溢れさせる心配は
-// 薄い(以前詰まったのはWIDE_SEGS引き上げによる別口の大量リクエストと重なったため)。
-// 往復レイテンシ分の無駄な間隔を減らすため3に戻す。
-const OSM_TILE_CONCURRENCY = 3;
+// その後「上流へは結局サーバー側が1.1秒間隔で直列化するので3に戻して問題ない」という
+// 判断で3に上げていたが、これはプロキシ経由(ローカル/プロキシ健在時)の前提。
+// Render等でプロキシが上流に5xxされて直接アクセスにフォールバックした場合、
+// サーバー側の直列化は効かず、Overpass側の実際の同時実行枠(公式に2/IPと明言されている。
+// 2026年時点でもgall/lambertの2台がそれぞれ独立してrate limit=2を課している)に直接ぶつかる。
+// 3のままだと3本目が恒常的に429になり、バックオフ待ち(最大30秒)が積み重なって
+// 「道路が読み込まれない/ものすごく時間がかかる」の主因になっていた。実際の上限に合わせて2に戻す。
+const OSM_TILE_CONCURRENCY = 2;
 let osmTileActiveCount = 0;
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
 // 【重要】標高データ+初期OSMのロード完了までタイル取得を止めるゲート。
