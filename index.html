@@ -4490,22 +4490,20 @@ document.addEventListener('keydown', e => { if (e.key === ' ' && !e.repeat) hopH
 document.addEventListener('keyup',   e => { if (e.key === ' ') hopHeld = false; });
 
 // Mouse drag for camera
-// 「地面や建物を指(カーソル)でつかんで動かす」感覚にするため、ドラッグを開始した位置が
-// 画面の上半分(空側=キャラより奥)か下半分(地面側=キャラより手前)かで、上下ドラッグに
-// 対する視点の動く向きを反転させる(掴んだ場所がその指の動きに追従するイメージ)。
-// 符号はドラッグ開始時に1回だけ決め、ドラッグ中に指が中心線を跨いでも変えない
-// (掴んだのはその時点の場所、という感覚を保つため)。
-let mouseDown = false, lastMouseX = 0, lastMouseY = 0, mouseDragSign = 1;
-canvas.addEventListener('mousedown', e => {
-  mouseDown = true; lastMouseX = e.clientX; lastMouseY = e.clientY;
-  mouseDragSign = (e.clientY < window.innerHeight / 2) ? -1 : 1;
-});
+// 「地面や建物を指(カーソル)でつかんで動かす」感覚にするため、ドラッグしている位置が
+// キャラより画面の上半分(空側=キャラより奥)か下半分(地面側=キャラより手前)かで、
+// 左右ドラッグに対する視点の回る向きを反転させる(掴んだ場所がその指の動きに追従する
+// イメージ。地面をつかんで左へ引けば視点も左へ、空をつかんで左へ引けば逆に視点は右へ)。
+// 上下半分の判定はドラッグ中の現在位置ごとに毎回更新する(境界を跨いだらそこで切り替わる)。
+let mouseDown = false, lastMouseX = 0, lastMouseY = 0;
+canvas.addEventListener('mousedown', e => { mouseDown = true; lastMouseX = e.clientX; lastMouseY = e.clientY; });
 canvas.addEventListener('mouseup',   () => { mouseDown = false; });
 canvas.addEventListener('mousemove', e => {
   if (!mouseDown) return;
+  const dragSign = (e.clientY < window.innerHeight / 2) ? -1 : 1; // 上半分なら反転
   // CAM_DIR=+1(新デフォルト)で従来と上下左右が反転した向きになる
-  camYaw   += (e.clientX - lastMouseX) * 0.004 * CAM_DIR;
-  camPitch += (e.clientY - lastMouseY) * 0.003 * CAM_DIR * mouseDragSign;
+  camYaw   += (e.clientX - lastMouseX) * 0.004 * CAM_DIR * dragSign;
+  camPitch += (e.clientY - lastMouseY) * 0.003 * CAM_DIR;
   camPitch = Math.max(-0.2, Math.min(1.2, camPitch));
   lastMouseX = e.clientX; lastMouseY = e.clientY;
 });
@@ -4514,7 +4512,7 @@ canvas.addEventListener('mousemove', e => {
 const joystickKnob = document.getElementById('joystickKnob');
 let joyActive = false, joyId = null, joyOx = 0, joyOz = 0;
 let joyCenterX = 0, joyCenterY = 0;
-let camTouchId = null, camLastX = 0, camLastY = 0, camTouchSign = 1;
+let camTouchId = null, camLastX = 0, camLastY = 0;
 
 // Joystick zone: bottom-left corner
 function getJoyBounds() {
@@ -4534,9 +4532,6 @@ document.addEventListener('touchstart', e => {
       joyCenterX = joy.cx; joyCenterY = joy.cy;
     } else if (camTouchId === null) {
       camTouchId = t.identifier; camLastX = t.clientX; camLastY = t.clientY;
-      // 「地面や建物を指でつかんで動かす」感覚にするため、つかんだ位置が画面の上半分
-      // (空側)か下半分(地面側)かで上下ドラッグに対する視点の向きを反転させる
-      camTouchSign = (t.clientY < window.innerHeight / 2) ? -1 : 1;
     }
   }
 }, { passive: true });
@@ -4557,9 +4552,12 @@ document.addEventListener('touchmove', e => {
       joyOx = cx / maxR;
       joyOz = cy / maxR;
     } else if (t.identifier === camTouchId) {
+      // 「地面や建物を指でつかんで動かす」感覚にするため、指の現在位置が画面の上半分
+      // (空側)か下半分(地面側)かで左右ドラッグに対する視点の回る向きを反転させる
+      const dragSign = (t.clientY < window.innerHeight / 2) ? -1 : 1; // 上半分なら反転
       // CAM_DIR=+1(新デフォルト)で従来と上下左右が反転した向きになる
-      camYaw   += (t.clientX - camLastX) * 0.005 * CAM_DIR;
-      camPitch += (t.clientY - camLastY) * 0.004 * CAM_DIR * camTouchSign;
+      camYaw   += (t.clientX - camLastX) * 0.005 * CAM_DIR * dragSign;
+      camPitch += (t.clientY - camLastY) * 0.004 * CAM_DIR;
       camPitch = Math.max(-0.3, Math.min(1.4, camPitch));
       camLastX = t.clientX; camLastY = t.clientY;
     }
