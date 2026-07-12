@@ -918,6 +918,27 @@ function hasRealBuildingNearby(cx, cz, dist) {
   return false;
 }
 
+// hasRealBuildingNearbyの「一戸建て限定」版。landuseタグが無い(=luTypeAtがnullを返す)
+// 場所でも、近くの本物のOSM建物が工場(industrial)などの非住宅用途だと分かっていれば、
+// それを一戸建て補完(buildable)の根拠にしない。landuse=industrialのポリゴンが
+// 描かれていない工場・倉庫の構内でも一戸建てが誤って並ぶのを防ぐための追加ガード。
+function hasRealHouseNearby(cx, cz, dist) {
+  const d2 = dist * dist;
+  const gx0 = Math.floor((cx - dist) / BUILDING_CELL), gx1 = Math.floor((cx + dist) / BUILDING_CELL);
+  const gz0 = Math.floor((cz - dist) / BUILDING_CELL), gz1 = Math.floor((cz + dist) / BUILDING_CELL);
+  for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
+    const arr = buildingGrid.get(gx + ',' + gz);
+    if (!arr) continue;
+    for (const rec of arr) {
+      if (!rec.real) continue;
+      if (rec.style && (rec.style.type === 'industrial' || rec.style.type === 'shop')) continue;
+      const dx = rec.x - cx, dz = rec.z - cz;
+      if (dx*dx + dz*dz < d2) return true;
+    }
+  }
+  return false;
+}
+
 // ======= PLAYER CHARACTER (少年/少女 選択可・魔法使い風) =======
 const player = new THREE.Group();
 scene.add(player);
@@ -4905,6 +4926,15 @@ function generateChunk(chunkX, chunkZ) {
   const nearLanduse = queryPolyGrid(landuseGrid, x0 - 30, x1 + 30, z0 - 30, z1 + 30);
   const inLanduse = (x, z) => nearLanduse.some(p =>
     x >= p.minX && x <= p.maxX && z >= p.minZ && z <= p.maxZ && pointInPolygon(x, z, p.pts));
+  // その地点がどのlanduse区画に属するか(無ければnull)。一戸建て補完(buildable)が
+  // 工場・倉庫・商業地の敷地内にまで一戸建てを建ててしまわないよう、区画の種別を見分けるのに使う。
+  const luTypeAt = (x, z) => {
+    for (const p of nearLanduse) {
+      if (x < p.minX || x > p.maxX || z < p.minZ || z > p.maxZ) continue;
+      if (pointInPolygon(x, z, p.pts)) return p.lu;
+    }
+    return null;
+  };
 
   if (IS_MEIJI) {
     // ======= 明治: 迅速測図の100m土地利用グリッドに従って生成 =======
@@ -4959,7 +4989,19 @@ function generateChunk(chunkX, chunkZ) {
   // 区画内にあるか、近く(60m以内)に本物のOSM建物が既に建っているか)で判定するよう厳格化する。
   // denseAreaはチャンク全体のフラグとして残し、3)の充填ループに入るかどうかの粗い足切り
   // (探索コスト削減)にだけ使う。
-  const buildable = (qx, qz) => (inLanduse(qx, qz) || hasRealBuildingNearby(qx, qz, 60)) && !inAvoid(qx, qz);
+  // 【重要】buildable()は「一戸建て(house)」専用の補完なので、landuseが工場・倉庫(industrial)
+  // 商業(commercial/retail/mixed_use)の区画内では、たとえ道路やlanduseポリゴンの条件を
+  // 満たしても一戸建てを建てない。以前はinLanduse()が「residential/commercial/industrial/
+  // retail/mixed_useのどれかに入っていればtrue」という判定だったため、工場の敷地内を走る
+  // 構内道路沿いにまで一戸建てが並んでいた(2)の区画内グリッド充填は種別ごとに適切な
+  // スタイルを選んでいるので影響なし、ここで絞るのは1)/3)の一戸建て限定パスだけ)。
+  const NON_HOUSE_LU = new Set(['industrial', 'commercial', 'retail', 'mixed_use']);
+  const buildable = (qx, qz) => {
+    if (inAvoid(qx, qz)) return false;
+    const lu = luTypeAt(qx, qz);
+    if (lu && NON_HOUSE_LU.has(lu)) return false;
+    return lu === 'residential' || hasRealHouseNearby(qx, qz, 60);
+  };
   // 細街路から maxD 以内か(奥地の空き野原まで埋めないためのガード)
   const nearMinorRoad = (qx, qz, maxD) => {
     for (const r of nearMinor) {
