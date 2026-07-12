@@ -1582,6 +1582,25 @@ function addTree(x, z, s) {
           s * (round ? 1.3 : 1), s * (round ? 0.95 : 0.9 + Math.random() * 0.5), s * (round ? 1.3 : 1));
 }
 
+// ======= 空き地の下草・雑木(疎林) =======
+// landuse・実建物・denseAreaのどれの根拠も無い(=OSM上「無所属」の)平地は、家も畑も
+// 森も生成されずただの空き地として放置されていた。伊勢原市の実態(山林・原野が
+// 市域の1〜2割程度を占める)に近づけるため、そういう土地には低木を疎らに生やす。
+// 山の森(plantTree/forestTrunkP)より低密度・低背にして、住宅街の並木(addTree)とも
+// 見分けがつくようにする(専用プール・専用関数)。generateChunk() から低頻度で呼ぶ。
+const SCRUB_MAX = 2400;
+const scrubMat = new THREE.MeshLambertMaterial({
+  color: MODE === 'space' ? 0x3a5a4a : MODE === 'marchen' ? 0x8fd9a0 : MODE === 'edo' ? 0x5c7a3a : 0x5a6b3a,
+});
+const scrubP = makePool(new THREE.SphereGeometry(0.6, 6, 5), scrubMat, SCRUB_MAX);
+function plantScrub(x, z) {
+  if (scrubP.n >= scrubP.max) return;
+  const gy = getGroundY(x, z);
+  const r1 = _fhash(Math.floor(x * 9.1) + 11, Math.floor(z * 9.1) + 5); // 位置から決定的に決める(ちらつき防止)
+  const s = 0.5 + r1 * 0.6; // 木よりだいぶ小さい茂み
+  poolAdd(scrubP, x, gy + 0.35 * s, z, r1 * 6.283, s, s * (0.7 + r1 * 0.4), s);
+}
+
 // 全道路種別中の最大幅(河川60m。waterwayWidthのMath.min(60,...)参照)の半分。
 // isOnRoadで「この距離まで探せば取りこぼしがない」近傍セル数を見積もるのに使う。
 const MAX_ROAD_HALF_W = 30;
@@ -5025,11 +5044,22 @@ function generateChunk(chunkX, chunkZ) {
   // 構内道路沿いにまで一戸建てが並んでいた(2)の区画内グリッド充填は種別ごとに適切な
   // スタイルを選んでいるので影響なし、ここで絞るのは1)/3)の一戸建て限定パスだけ)。
   const NON_HOUSE_LU = new Set(['industrial', 'commercial', 'retail', 'mixed_use']);
+  // 判定の優先順位:
+  //  1) inAvoid → 田畑・山林・公園・水域には絶対に建てない
+  //  2) landuseがindustrial/commercial/retail/mixed_use → 工場・商業地には建てない
+  //  3) landuse=residential → 建ててよい(実データの裏付けあり)
+  //  4) 近く(60m)に本物の(工場・店舗でない)建物がある → 建ててよい
+  //  5) landuseタグが一切無い(lu===null。1)で回避対象でもない)土地に限り、
+  //     周辺の道路が格子状+近くに実建物があるというチャンク単位の状況証拠(denseArea)
+  //     を根拠に補完してよいことにする。工場・商業・農地・山林・公園・水域は1)2)で
+  //     既に弾かれているので、ここが誤って工場等に効くことはない。
   const buildable = (qx, qz) => {
     if (inAvoid(qx, qz)) return false;
     const lu = luTypeAt(qx, qz);
     if (lu && NON_HOUSE_LU.has(lu)) return false;
-    return lu === 'residential' || hasRealHouseNearby(qx, qz, 60);
+    if (lu === 'residential') return true;
+    if (hasRealHouseNearby(qx, qz, 60)) return true;
+    return lu === null && denseArea;
   };
   // 細街路から maxD 以内か(奥地の空き野原まで埋めないためのガード)
   const nearMinorRoad = (qx, qz, maxD) => {
@@ -5128,6 +5158,25 @@ function generateChunk(chunkX, chunkZ) {
         const _f2 = applySizeFloor(style, bw, bd, bh); // マンションになったら最低サイズを底上げ
         addBuilding(jx, jz, _f2.w, _f2.d, _f2.h, style);
       }
+    }
+  }
+
+  // --- 4) どの分類にも該当しない空き地に、疎らな下草・雑木を生やす ---
+  // 1)〜3)のどれにも該当しない(=一戸建ても建たない、田畑・山林・公園・水域でもない)
+  // 平地は、実際の伊勢原市では山林・原野であることが多いのに、これまでは
+  // 何も生えないただの空き地として放置されていた(「無所属の土地」の見た目対策)。
+  // 山(FOREST_MIN_H以上)は既にrebuildForest()が別途カバーしているので、ここでは
+  // 平地だけを対象にする(二重に生やさない)。ここは既にif(IS_MEIJI)のelse節の中。
+  for (let bx = worldX; bx < worldX + CHUNK_SIZE; bx += 22) {
+    for (let bz = worldZ; bz < worldZ + CHUNK_SIZE; bz += 22) {
+      if (Math.random() > 0.4) continue; // 疎らに(密な藪にしない)
+      const jx = bx + (Math.random() - 0.5) * 10, jz = bz + (Math.random() - 0.5) * 10;
+      if (inAvoid(jx, jz)) continue;        // 田畑・山林・公園・水域は既に専用の見た目がある
+      if (buildable(jx, jz)) continue;      // 家が建つ(建ちうる)場所には生やさない
+      if (getGroundY(jx, jz) >= FOREST_MIN_H) continue; // 山はrebuildForest()の担当
+      if (isOnRoad(jx, jz, 2, 2)) continue;
+      if (hasBuildingNearby(jx, jz, 4)) continue;
+      plantScrub(jx, jz);
     }
   }
   } // end if(IS_MEIJI)/else
