@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>伊勢原ファンタジー HUDモックアップ</title>
+<style>
+:root {
+  --hud-bg: rgba(15,18,32,0.55);
+  --hud-border: rgba(255,255,255,0.14);
+  --hud-blur: 12px;
+  --hud-radius: 14px;
+  --accent: #8b7bff;
+  --text: #eef0fa;
+  --text-dim: rgba(238,240,250,0.65);
+  --shadow: 0 4px 24px rgba(0,0,0,0.35);
+  --safe-top: max(16px, env(safe-area-inset-top));
+  --safe-left: max(16px, env(safe-area-inset-left));
+  --safe-right: max(16px, env(safe-area-inset-right));
+  --safe-bottom: max(16px, env(safe-area-inset-bottom));
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  overflow:hidden; height:100vh;
+  font-family:"Hiragino Sans","Yu Gothic","Noto Sans JP",sans-serif;
+  color:var(--text);
+  /* 3D画面のダミー背景 */
+  background:
+    radial-gradient(ellipse 80% 50% at 50% 110%, #3d5a3a 0%, transparent 60%),
+    radial-gradient(ellipse 60% 40% at 20% 100%, #4a6b45 0%, transparent 55%),
+    linear-gradient(180deg, #7ab0e8 0%, #a8cdf0 45%, #cfe4d8 70%, #5a7d55 100%);
+}
+.mountain { position:fixed; bottom:0; width:100%; height:38vh; pointer-events:none;
+  background: linear-gradient(160deg, transparent 40%, rgba(60,90,55,.7) 41%),
+              linear-gradient(200deg, transparent 55%, rgba(45,75,45,.8) 56%); }
+
+.glass {
+  background:var(--hud-bg);
+  backdrop-filter:blur(var(--hud-blur));
+  -webkit-backdrop-filter:blur(var(--hud-blur));
+  border:1px solid var(--hud-border);
+  box-shadow:var(--shadow);
+}
+@supports not (backdrop-filter: blur(1px)) {
+  .glass { background:rgba(15,18,32,0.8); }
+}
+
+/* ── ロケーションカプセル ── */
+#locCapsule {
+  position:fixed; top:var(--safe-top); left:50%; transform:translateX(-50%);
+  border-radius:999px; padding:8px 18px; font-size:13px;
+  cursor:pointer; z-index:40; white-space:nowrap; text-align:center;
+}
+#locDetail {
+  position:fixed; top:calc(var(--safe-top) + 44px); left:50%; transform:translateX(-50%);
+  border-radius:var(--hud-radius); padding:12px 18px; font-size:12px;
+  line-height:2; z-index:40; text-align:center;
+  font-variant-numeric:tabular-nums; color:var(--text-dim);
+}
+#locDetail a { color:var(--accent); text-decoration:none; font-weight:600; }
+
+/* ── アイコンレール ── */
+#hudRail {
+  position:fixed; top:50%; left:var(--safe-left); transform:translateY(-50%);
+  display:flex; flex-direction:column; gap:10px; z-index:30;
+}
+.railBtn {
+  width:48px; height:48px; border-radius:50%;
+  font-size:20px; cursor:pointer; color:var(--text);
+  display:flex; align-items:center; justify-content:center;
+  position:relative; transition:transform .1s;
+}
+.railBtn:active { transform:scale(.94); }
+.railBtn.active { box-shadow:var(--shadow), 0 0 0 2px var(--accent); }
+.railBtn .sub {
+  position:absolute; bottom:-14px; left:50%; transform:translateX(-50%);
+  font-size:9px; color:var(--text-dim); white-space:nowrap;
+}
+.railBtn[data-mode] { margin-bottom:12px; } /* subラベル分の余白 */
+
+/* 海面ポップオーバー */
+#seaPop {
+  position:fixed; left:calc(var(--safe-left) + 58px); top:50%;
+  border-radius:var(--hud-radius); padding:14px 16px; width:220px; z-index:35;
+  font-size:12px;
+}
+#seaPop .val { color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; }
+#seaPop input { width:100%; margin-top:8px; accent-color:var(--accent); }
+
+/* ── 右上 UIトグル ── */
+#uiToggleBtn {
+  position:fixed; top:var(--safe-top); right:var(--safe-right);
+  width:40px; height:40px; border-radius:50%;
+  font-size:16px; cursor:pointer; color:var(--text); z-index:50;
+  display:flex; align-items:center; justify-content:center;
+}
+
+/* ── ミニマップ＋ホップ ── */
+#minimap {
+  position:fixed; bottom:calc(var(--safe-bottom) + 84px); right:var(--safe-right);
+  width:160px; height:160px; border-radius:var(--hud-radius); overflow:hidden; z-index:25;
+}
+#minimap .dummy { width:100%; height:100%;
+  background:
+    radial-gradient(circle 6px at 50% 50%, var(--accent) 0 40%, transparent 50%),
+    repeating-linear-gradient(0deg, rgba(255,255,255,.05) 0 1px, transparent 1px 20px),
+    repeating-linear-gradient(90deg, rgba(255,255,255,.05) 0 1px, transparent 1px 20px),
+    #141828; }
+#hopBtn {
+  position:fixed; bottom:var(--safe-bottom); right:var(--safe-right);
+  width:64px; height:64px; border-radius:50%;
+  font-size:26px; color:var(--text); cursor:pointer; z-index:30;
+  display:flex; align-items:center; justify-content:center;
+}
+
+/* ── ジョイスティック ── */
+#joystick {
+  position:fixed; bottom:calc(var(--safe-bottom) + 24px); left:calc(var(--safe-left) + 12px);
+  width:120px; height:120px; border-radius:50%; z-index:30;
+}
+#joystickKnob {
+  position:absolute; top:50%; left:50%; width:48px; height:48px;
+  background:rgba(139,123,255,0.55); border:1px solid var(--accent);
+  border-radius:50%; transform:translate(-50%,-50%);
+}
+
+/* ── トースト ── */
+#toast {
+  position:fixed; bottom:calc(var(--safe-bottom) + 100px); left:50%; transform:translateX(-50%);
+  border-radius:999px; padding:9px 20px; font-size:13px; z-index:60;
+  color:var(--text);
+}
+
+/* 注記 */
+#note { position:fixed; bottom:4px; left:50%; transform:translateX(-50%);
+  font-size:10px; color:rgba(0,0,0,.45); z-index:5; white-space:nowrap; }
+</style>
+</head>
+<body>
+<div class="mountain"></div>
+
+<!-- 上中央: ロケーションカプセル（タップで展開） -->
+<div id="locCapsule" class="glass">📍 神奈川県伊勢原市田中 ▾</div>
+<div id="locDetail" class="glass">
+  35.40273, 139.31487 ・ 標高 26m<br>
+  <a href="#">Googleマップで開く ↗</a>
+</div>
+
+<!-- 左: アイコンレール -->
+<nav id="hudRail">
+  <button class="railBtn glass active" id="viewBtn" title="視点切替">👁</button>
+  <button class="railBtn glass" id="mapBtn" title="上空視点">🗺</button>
+  <button class="railBtn glass" id="jumpBtn" title="マップジャンプ">📍</button>
+  <button class="railBtn glass" id="modeBtn" data-mode title="時代モード">🏙<span class="sub">現実</span></button>
+  <button class="railBtn glass" id="seaBtn" title="海面設定">🌊</button>
+  <button class="railBtn glass" id="camDirBtn" title="視点回転">🔄</button>
+  <button class="railBtn glass" id="helpBtn" title="操作ヘルプ">?</button>
+</nav>
+
+<!-- 海面ポップオーバー（🌊タップで開く状態のモック） -->
+<div id="seaPop" class="glass">
+  🌊 海面の高さ <span class="val">3.0m</span>
+  <input type="range" min="1" max="10" step="0.5" value="3">
+</div>
+
+<!-- 右上: UI非表示トグル -->
+<button id="uiToggleBtn" class="glass">🙈</button>
+
+<!-- 右下: ミニマップ＋ホップ -->
+<div id="minimap" class="glass"><div class="dummy"></div></div>
+<button id="hopBtn" class="glass">⤴</button>
+
+<!-- 左下: ジョイスティック -->
+<div id="joystick" class="glass"><div id="joystickKnob"></div></div>
+
+<!-- トースト -->
+<div id="toast" class="glass">🌲 周辺の地形を読み込みました</div>
+
+<div id="note">※モックアップ: 背景は3D画面のダミー。HUDの配置・マテリアルが実装対象</div>
+
+<script>
+// モック用の最小インタラクション（実装の参考）
+document.getElementById('locCapsule').onclick = () => {
+  const d = document.getElementById('locDetail');
+  d.style.display = d.style.display === 'none' ? 'block' : 'none';
+};
+document.getElementById('seaBtn').onclick = () => {
+  const p = document.getElementById('seaPop');
+  p.style.display = p.style.display === 'none' ? 'block' : 'none';
+};
+// トーストは3秒で消えるデモ
+setTimeout(() => { document.getElementById('toast').style.transition = 'opacity .4s';
+  document.getElementById('toast').style.opacity = '0'; }, 3000);
+</script>
+</body>
+</html>

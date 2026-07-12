@@ -84,6 +84,20 @@ body {
 #seaCtrl input { width:100%; margin-top:8px; accent-color:var(--accent); }
 #seaVal { color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; }
 
+/* キャラクター選択ポップオーバー(🧍タップで開閉) */
+#charCtrl {
+  position:fixed; left:calc(var(--safe-left) + 58px); top:50%; transform:translateY(-50%);
+  border-radius:var(--hud-radius); padding:14px 16px; width:200px; z-index:35;
+  font-size:12px; display:none;
+}
+#charCtrl.open { display:block; }
+#charCtrl .charRow { display:flex; gap:8px; margin-top:8px; }
+#charCtrl button {
+  flex:1; padding:8px 0; border-radius:999px; border:1px solid var(--hud-border);
+  background:rgba(255,255,255,0.08); color:var(--text); font-size:13px; cursor:pointer;
+}
+#charCtrl button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+
 /* ── 右上 UI非表示トグル(常時表示。スティック・ジャンプ・このボタン以外を隠す) ── */
 #uiToggleBtn {
   position:fixed; top:var(--safe-top); right:var(--safe-right);
@@ -191,7 +205,7 @@ body {
 @keyframes waterShimmer { 0%,100% { opacity:0.82; } 50% { opacity:1; } }
 /* UI非表示: スティック・ジャンプ・👁トグル以外を隠して景色を全画面で楽しむモード */
 body.uiHidden #hudRail, body.uiHidden #addressDisplay, body.uiHidden #gpsDisplay,
-body.uiHidden #seaCtrl, body.uiHidden #minimap, body.uiHidden #credit,
+body.uiHidden #seaCtrl, body.uiHidden #charCtrl, body.uiHidden #minimap, body.uiHidden #credit,
 body.uiHidden #status, body.uiHidden #helpModal { display:none !important; }
 body.uiHidden #uiToggleBtn { opacity:0.45; }
 </style>
@@ -211,6 +225,7 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
   <button class="railBtn glass" id="jumpBtn" title="マップジャンプ">📍</button>
   <button class="railBtn glass hasSub" id="modeBtn" title="時代モード"><span class="ico" id="modeIco">🏙</span><span class="sub" id="modeSub">現実</span></button>
   <button class="railBtn glass" id="seaBtn" title="海面設定">🌊</button>
+  <button class="railBtn glass" id="charBtn" title="キャラクター選択">🧍</button>
   <button class="railBtn glass" id="camDirBtn" title="視点回転">🔄</button>
   <button class="railBtn glass" id="helpBtn" title="操作ヘルプ">?</button>
 </nav>
@@ -218,7 +233,16 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 <!-- 海面ポップオーバー(🌊タップで開閉) -->
 <div id="seaCtrl" class="glass">
   🌊 海面の高さ <span id="seaVal">3.0</span>m
-  <input id="seaSlider" type="range" min="1" max="10" step="0.5" value="3">
+  <input id="seaSlider" type="range" min="-10" max="10" step="0.5" value="3">
+</div>
+
+<!-- キャラクター選択ポップオーバー(🧍タップで開閉) -->
+<div id="charCtrl" class="glass">
+  🧍 キャラクター
+  <div class="charRow">
+    <button id="charBoyBtn" data-sex="boy">👦 少年</button>
+    <button id="charGirlBtn" data-sex="girl">👧 少女</button>
+  </div>
 </div>
 
 <button id="uiToggleBtn" class="glass" title="UI表示/非表示">🙈</button>
@@ -724,6 +748,7 @@ function rebuildRoadsNearChunk(chunkX, chunkZ) {
   const x0 = chunkX * CHUNK_SIZE - margin, x1 = chunkX * CHUNK_SIZE + CHUNK_SIZE + margin;
   const z0 = chunkZ * CHUNK_SIZE - margin, z1 = chunkZ * CHUNK_SIZE + CHUNK_SIZE + margin;
   rebuildRoadsInBounds(x0, x1, z0, z1);
+  rebuildStationsInBounds(x0, x1, z0, z1); // 駅もY方向だけ地形に合わせて追従させる
   rebuildAreaPolysInBounds(x0, x1, z0, z1); // 川・公園・田畑ポリゴンも同じタイミングで合わせ直す
   rebuildBuildingsInBounds(x0, x1, z0, z1); // 建物もY方向だけ地形に合わせて追従させる
 }
@@ -888,16 +913,35 @@ function hasRealBuildingNearby(cx, cz, dist) {
   return false;
 }
 
-// ======= PLAYER CHARACTER (Wizard) =======
+// ======= PLAYER CHARACTER (少年/少女 選択可・魔法使い風) =======
 const player = new THREE.Group();
 scene.add(player);
 
-// Body (robe)
+// Body (tunic) — 以前は足元まで届く長いローブで脚が隠れていたため、歩く/走るアニメーションを
+// 見せられるよう丈を短くし、下に独立した脚パーツを追加した。
 const bodyMat = new THREE.MeshLambertMaterial({ color: 0x3020a0 });
-const body = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.5, 1.4, 8), bodyMat);
-body.position.y = 0.7;
+const body = new THREE.Mesh(new THREE.CylinderGeometry(0.30, 0.40, 0.9, 8), bodyMat);
+body.position.y = 1.05;
 body.castShadow = true;
 player.add(body);
+
+// Legs (歩く/走る/ジャンプのアニメーションで振る)
+const legMat = new THREE.MeshLambertMaterial({ color: 0x24243a });
+const leftLeg = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.14, 0.64, 8), legMat);
+leftLeg.position.set(-0.15, 0.32, 0);
+leftLeg.castShadow = true;
+player.add(leftLeg);
+const rightLeg = leftLeg.clone();
+rightLeg.position.set(0.15, 0.32, 0);
+player.add(rightLeg);
+// Shoes
+const shoeMat = new THREE.MeshLambertMaterial({ color: 0x1a1420 });
+const leftShoe = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 0.12, 8), shoeMat);
+leftShoe.position.set(-0.15, 0.06, 0.03);
+player.add(leftShoe);
+const rightShoe = leftShoe.clone();
+rightShoe.position.set(0.15, 0.06, 0.03);
+player.add(rightShoe);
 
 // Head
 const headMat = new THREE.MeshLambertMaterial({ color: 0xf5c8a0 });
@@ -906,7 +950,7 @@ head.position.y = 1.65;
 head.castShadow = true;
 player.add(head);
 
-// Hat
+// Hat(少年)
 const hatMat = new THREE.MeshLambertMaterial({ color: 0x1a0a50 });
 const hatBrim = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 0.07, 12), hatMat);
 hatBrim.position.y = 1.9;
@@ -915,21 +959,36 @@ const hatTop = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.38, 0.6, 12), h
 hatTop.position.y = 2.22;
 player.add(hatTop);
 
+// Hair(少女) — 帽子の代わりにツインテールの髪型。既定では非表示(setCharacterSexで切替)
+const girlHairMat = new THREE.MeshLambertMaterial({ color: 0x3a2210 });
+const girlHairTop = new THREE.Mesh(new THREE.SphereGeometry(0.31, 12, 10), girlHairMat);
+girlHairTop.position.set(0, 1.68, -0.03);
+girlHairTop.scale.set(1.05, 1.05, 0.95);
+player.add(girlHairTop);
+const girlPonyL = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.04, 0.55, 8), girlHairMat);
+girlPonyL.position.set(-0.32, 1.45, 0.02);
+girlPonyL.rotation.z = 0.35;
+player.add(girlPonyL);
+const girlPonyR = girlPonyL.clone();
+girlPonyR.position.set(0.32, 1.45, 0.02);
+girlPonyR.rotation.z = -0.35;
+player.add(girlPonyR);
+
 // Cape
 const capeMat = new THREE.MeshLambertMaterial({ color: 0xc0001a, side: THREE.DoubleSide });
 const capeGeo = new THREE.PlaneGeometry(0.9, 1.2);
 const cape = new THREE.Mesh(capeGeo, capeMat);
-cape.position.set(0, 0.8, -0.38);
+cape.position.set(0, 1.05, -0.32);
 cape.castShadow = true;
 player.add(cape);
 
 // Arms
 const armMat = new THREE.MeshLambertMaterial({ color: 0x2818a0 });
 const leftArm = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.7, 8), armMat);
-leftArm.position.set(-0.52, 0.9, 0);
+leftArm.position.set(-0.42, 1.15, 0);
 player.add(leftArm);
 const rightArm = leftArm.clone();
-rightArm.position.set(0.52, 0.9, 0);
+rightArm.position.set(0.42, 1.15, 0);
 player.add(rightArm);
 
 // Staff
@@ -946,6 +1005,33 @@ orbLight.position.copy(orb.position);
 player.add(orbLight);
 
 player.position.set(0, 0, 0);
+
+// ======= キャラクター選択(少年/少女) =======
+// 帽子/髪型と服の色だけを切り替える(パーツ構成・アニメーションは共通)。
+let charSex = 'boy';
+function applyCharacterSex(sex) {
+  charSex = sex;
+  const isGirl = sex === 'girl';
+  bodyMat.color.setHex(isGirl ? 0xe0448a : 0x3020a0);
+  armMat.color.setHex(isGirl ? 0xc23a78 : 0x2818a0);
+  // body.visible は setViewMode が管理する「一人称では非表示」の現在状態を反映している
+  // (初期化時はTHREE.Meshの既定値どおりtrue)。これを見て一人称中に帽子/髪を誤って
+  // 表示してしまわないようにする。
+  hatBrim.visible = hatTop.visible = body.visible && !isGirl;
+  girlHairTop.visible = girlPonyL.visible = girlPonyR.visible = body.visible && isGirl;
+}
+function setCharacterSex(sex) {
+  applyCharacterSex(sex);
+  try { localStorage.setItem('iseharaCharacterSex', sex); } catch (e) {}
+  const boyBtn = document.getElementById('charBoyBtn'), girlBtn = document.getElementById('charGirlBtn');
+  if (boyBtn) boyBtn.classList.toggle('active', sex === 'boy');
+  if (girlBtn) girlBtn.classList.toggle('active', sex === 'girl');
+}
+(() => {
+  let savedSex = 'boy';
+  try { savedSex = localStorage.getItem('iseharaCharacterSex') || 'boy'; } catch (e) {}
+  setCharacterSex(savedSex === 'girl' ? 'girl' : 'boy');
+})();
 
 // ======= BUILDING MATERIAL =======
 // スタイル不明のOSM建物の壁色(江戸・メルヘン・宇宙モードは幻想紫のまま。窓はファサードテクスチャで表現)
@@ -2387,9 +2473,18 @@ function decorateRoad(x1, z1, x2, z2, type, w) {
 
 // ======= STATION LANDMARKS =======
 const stationLabels = []; // for billboard update each frame
+// 駅を構成する全パーツ(駅舎・プラットホーム・看板等)をrecordにまとめておき、
+// NEAR高解像度地形が後から届いた時にrebuildStationHeight()でY方向にまとめて
+// 追従させる。以前は生成時のgy(=届いていればNEAR、届いていなければFAR基準)で
+// 固定していたため、FAR基準で建った駅がNEAR到着後も浮いたまま取り残されていた
+// (建物・道路と違って駅だけこの追従の仕組みが無かった)。
+const stationRecords = [];
 
 function addStation(x, z, name) {
   const gy = getGroundY(x, z); // 地表基準にしないと高地の駅ランドマークが埋まる
+  const parts = []; // このパーツをまとめて後からY方向に平行移動する(rebuildStationHeight)
+  const dm = (...a) => { const m = detailMesh(...a); parts.push(m); return m; };
+  let refX = x, refZ = z; // rebuild時に地形高さを再サンプリングする基準点(駅舎があればその位置)
 
   // 最寄りの線路(現実モードの駅舎の向き・プラットホーム位置の両方に使うので先に1回だけ探す)
   let bestRail = null;
@@ -2417,6 +2512,7 @@ function addStation(x, z, name) {
     const off = 12; // 線路中心からのオフセット
     const sx = x + px * off, sz = z + pz * off;
     const sgy = getGroundY(sx, sz);
+    refX = sx; refZ = sz; // 駅舎位置を基準にNEAR更新時の高さを再サンプリングする
     const bw = 30, bd = 15, bh = 8; // 線路沿いに長い、堂々とした駅舎
 
     const body = new THREE.Mesh(new THREE.BoxGeometry(bd, bh, bw), lambertMat(0xe8e0cc));
@@ -2424,12 +2520,14 @@ function addStation(x, z, name) {
     body.rotation.y = ry;
     body.castShadow = true;
     scene.add(body);
+    parts.push(body);
 
     // 屋上の帯(濃色パラペットで建物を引き締める)
     const band = new THREE.Mesh(new THREE.BoxGeometry(bd + 0.6, 1.1, bw + 0.6), lambertMat(0x2a4a6a));
     band.position.set(sx, sgy + bh + 0.55, sz);
     band.rotation.y = ry;
     scene.add(band);
+    parts.push(band);
 
     // 線路側(改札口)のガラス張り玄関+庇
     const entX = sx - px * (bd / 2 + 2.0), entZ = sz - pz * (bd / 2 + 2.0);
@@ -2440,12 +2538,14 @@ function addStation(x, z, name) {
     glass.position.set(entX, sgy + bh * 0.4, entZ);
     glass.rotation.y = ry;
     scene.add(glass);
+    parts.push(glass);
     const canopy = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.4, bw * 0.65), lambertMat(0x445566));
     canopy.position.set(entX - px * 1.7, sgy + bh * 0.62, entZ - pz * 1.7);
     canopy.rotation.y = ry;
     scene.add(canopy);
+    parts.push(canopy);
     for (const co of [-bw * 0.28, bw * 0.28]) { // 庇の支柱
-      detailMesh(UNIT_CYL, lambertMat(0x8a8d90),
+      dm(UNIT_CYL, lambertMat(0x8a8d90),
         entX - px * 3.3 + rx * co, sgy + bh * 0.31, entZ - pz * 3.3 + rz * co, 0.22, bh * 0.62, 0.22);
     }
 
@@ -2456,11 +2556,13 @@ function addStation(x, z, name) {
     clock.rotation.z = ry;
     clock.position.set(entX - px * 2.4, sgy + bh * 0.88, entZ - pz * 2.4);
     scene.add(clock);
+    parts.push(clock);
 
     // 駅前の温かい灯り
     const light = new THREE.PointLight(0xffddaa, 3, 100);
     light.position.set(entX - px * 3, sgy + bh * 0.6, entZ - pz * 3);
     scene.add(light);
+    parts.push(light);
 
     labelY = sgy + 30; // 駅名看板は遠くからでも目立つよう駅舎の上空に浮かせる
   } else {
@@ -2474,24 +2576,28 @@ function addStation(x, z, name) {
     pillar.position.set(x, gy + 25, z);
     pillar.castShadow = true;
     scene.add(pillar);
+    parts.push(pillar);
 
     // Glowing star orb on top
     const starMat = new THREE.MeshBasicMaterial({ color: 0xffee44 });
     const star = new THREE.Mesh(new THREE.SphereGeometry(5, 12, 12), starMat);
     star.position.set(x, gy + 53, z);
     scene.add(star);
+    parts.push(star);
 
     // Rotating ring
     const ringMat = new THREE.MeshBasicMaterial({ color: 0xffaa00, side: THREE.DoubleSide });
     const ring = new THREE.Mesh(new THREE.TorusGeometry(8, 0.8, 8, 32), ringMat);
     ring.position.set(x, gy + 45, z);
     scene.add(ring);
+    parts.push(ring);
     stationLabels.push({ type: 'ring', mesh: ring, x, z }); // animate the ring each frame
 
     // Bright light
     const light = new THREE.PointLight(0xffdd44, 4, 600);
     light.position.set(x, gy + 53, z);
     scene.add(light);
+    parts.push(light);
   }
 
   // 現実モード: 最寄りの線路に沿ってプラットホーム(両側)+上屋を置く
@@ -2505,10 +2611,10 @@ function addStation(x, z, name) {
     for (const sd of [-1, 1]) {
       const hx = mx + pxp * sd * 4.6, hz = mz + pzp * sd * 4.6;
       const hgy = getGroundY(hx, hz);
-      detailMesh(UNIT_BOX, lambertMat(0x9c9c96), hx, hgy + 0.6, hz, 46, 1.2, 3.2, ryr); // ホーム
-      detailMesh(UNIT_BOX, lambertMat(0x50545a), hx, hgy + 3.6, hz, 42, 0.2, 3.0, ryr); // 上屋
+      dm(UNIT_BOX, lambertMat(0x9c9c96), hx, hgy + 0.6, hz, 46, 1.2, 3.2, ryr); // ホーム
+      dm(UNIT_BOX, lambertMat(0x50545a), hx, hgy + 3.6, hz, 42, 0.2, 3.0, ryr); // 上屋
       for (const po of [-14, 14]) { // 上屋の支柱
-        detailMesh(UNIT_CYL, lambertMat(0x8a8d90), hx + rx * po, hgy + 2.4, hz + rz * po, 0.24, 2.4, 0.24);
+        dm(UNIT_CYL, lambertMat(0x8a8d90), hx + rx * po, hgy + 2.4, hz + rz * po, 0.24, 2.4, 0.24);
       }
     }
   }
@@ -2534,7 +2640,30 @@ function addStation(x, z, name) {
   );
   labelMesh.position.set(x, labelY, z);
   scene.add(labelMesh);
+  parts.push(labelMesh);
   stationLabels.push({ type: 'label', mesh: labelMesh, x, z });
+
+  // NEAR高解像度地形が後から届いた時にY方向へまとめて追従できるよう記録しておく
+  // (道路・建物と同じ仕組み。以前は駅だけこれが無く、FAR基準で建った駅が浮いたまま残った)
+  stationRecords.push({ refX, refZ, gy: getGroundY(refX, refZ), parts });
+}
+
+// 1駅ぶんを現在の地形に合わせてY方向へ平行移動する(rebuildBuildingHeightと同じ考え方)
+function rebuildStationHeight(rec) {
+  const newGy = getGroundY(rec.refX, rec.refZ);
+  const delta = newGy - rec.gy;
+  if (Math.abs(delta) < 0.05) return; // 誤差レベルは無視
+  for (const p of rec.parts) { if (p) p.position.y += delta; }
+  rec.gy = newGy;
+}
+// 矩形範囲(ワールド座標)にかかる駅を、現在の地形に合わせてまとめて追従させる。
+// rebuildBuildingsInBoundsと同じタイミング(NEAR再取得時・チャンク生成時)で呼ぶ。
+// 駅は数が少ないため建物のような空間グリッドは使わず線形走査で十分。
+function rebuildStationsInBounds(x0, x1, z0, z1) {
+  for (const rec of stationRecords) {
+    if (rec.refX < x0 || rec.refX > x1 || rec.refZ < z0 || rec.refZ > z1) continue;
+    rebuildStationHeight(rec);
+  }
 }
 
 // ======= OSM DATA LOADER =======
@@ -3462,6 +3591,8 @@ async function loadNearTerrain(centerX = 0, centerZ = 0) {
   // 追従するのに建物は生成時の高さで固定されたままだったため、進むほど道路と建物の
   // 高さのズレが蓄積して浮く/埋まるが悪化していた。同じ範囲で建物もY方向に追従させる。
   rebuildBuildingsInBounds(centerX - NEAR_W/2, centerX + NEAR_W/2, centerZ - NEAR_D/2, centerZ + NEAR_D/2);
+  // 駅舎も道路・建物と同じタイミングでY方向に追従させる(浮き対策)
+  rebuildStationsInBounds(centerX - NEAR_W/2, centerX + NEAR_W/2, centerZ - NEAR_D/2, centerZ + NEAR_D/2);
 }
 
 // プレイヤーがNEARグリッドの中心から離れたら取り直す。範囲を広げた(±4km)ぶん、
@@ -3498,7 +3629,7 @@ function initDistantSea() {
   let saved = NaN;
   try { saved = parseFloat(localStorage.getItem('iseharaSeaLevel')); } catch (e) {}
   seaLevelM = Number.isFinite(saved) ? saved : 3;
-  seaLevelM = Math.max(1, Math.min(10, seaLevelM)); // 1〜10m
+  seaLevelM = Math.max(-10, Math.min(10, seaLevelM)); // -10〜10m
   SEA_Y = (seaLevelM - elevBase) * ELEV_SCALE;
   const c = document.createElement('canvas'); c.width = 128; c.height = 128;
   const g = c.getContext('2d');
@@ -3533,11 +3664,11 @@ function setupSeaSlider() {
   const lab = document.getElementById('seaVal');
   const box = document.getElementById('seaCtrl');
   if (!sl || !lab) return;
-  sl.min = 1; sl.max = 10; sl.step = 0.5;   // 海面標高 1〜10m を 0.5m 刻みで
+  sl.min = -10; sl.max = 10; sl.step = 0.5;   // 海面標高 -10〜10m を 0.5m 刻みで
   sl.value = seaLevelM;
   lab.textContent = seaLevelM.toFixed(1);
   sl.addEventListener('input', () => {
-    seaLevelM = Math.max(1, Math.min(10, +sl.value));
+    seaLevelM = Math.max(-10, Math.min(10, +sl.value));
     lab.textContent = seaLevelM.toFixed(1);
     try { localStorage.setItem('iseharaSeaLevel', String(seaLevelM)); } catch (e) {}
     setSeaLevel();
@@ -4033,7 +4164,11 @@ function setViewMode(mode) {
   document.getElementById('mapBtn').classList.toggle('active', viewMode === 2);
   const showBody = (viewMode !== 1); // hide body in first-person
   body.visible = cape.visible = leftArm.visible = rightArm.visible = staff.visible =
-  hatBrim.visible = hatTop.visible = head.visible = orb.visible = showBody;
+  head.visible = orb.visible = leftLeg.visible = rightLeg.visible =
+  leftShoe.visible = rightShoe.visible = showBody;
+  // 帽子/髪型は表示状態(showBody)と選択中の性別の両方を満たす時だけ見せる
+  hatBrim.visible = hatTop.visible = showBody && charSex !== 'girl';
+  girlHairTop.visible = girlPonyL.visible = girlPonyR.visible = showBody && charSex === 'girl';
 }
 
 document.getElementById('viewBtn').addEventListener('click', () => setViewMode(viewMode + 1));
@@ -4216,8 +4351,25 @@ document.addEventListener('click', () => {
     seaCtrlEl.classList.remove('open');
     seaBtn.classList.remove('active');
   }
+  if (charCtrlEl && charCtrlEl.classList.contains('open')) {
+    charCtrlEl.classList.remove('open');
+    charBtn.classList.remove('active');
+  }
   if (gpsEl && gpsEl.classList.contains('open')) gpsEl.classList.remove('open');
 });
+
+// ======= キャラクター選択ポップオーバー(🧍タップで開閉、外側タップで閉じる) =======
+const charBtn = document.getElementById('charBtn');
+const charCtrlEl = document.getElementById('charCtrl');
+if (charBtn && charCtrlEl) {
+  charBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    charCtrlEl.classList.toggle('open');
+    charBtn.classList.toggle('active', charCtrlEl.classList.contains('open'));
+  });
+}
+document.getElementById('charBoyBtn').addEventListener('click', (e) => { e.stopPropagation(); setCharacterSex('boy'); });
+document.getElementById('charGirlBtn').addEventListener('click', (e) => { e.stopPropagation(); setCharacterSex('girl'); });
 
 // ======= 操作ヘルプ: 初回のみ自動表示、以後は?ボタンから =======
 const helpModal = document.getElementById('helpModal');
@@ -5185,14 +5337,34 @@ function animate() {
     player.rotation.y += diff * 8 * dt;
   }
 
-  // Walk animation
-  if (isMoving) {
-    walkCycle += dt * 5;
-    leftArm.rotation.x  =  Math.sin(walkCycle) * 0.5;
-    rightArm.rotation.x = -Math.sin(walkCycle) * 0.5;
-  } else {
+  // Walk / Run animation — 速度(5=歩き 〜 45=全力疾走)に応じて歩幅の速さ・振幅・前傾を変える
+  const runT = Math.max(0, Math.min(1, (speed - 5) / 40)); // 0=歩き, 1=全力疾走
+  if (isMoving && !airborne) {
+    const cadence  = 6 + runT * 8;    // 歩き:6 → 全力疾走:14(1秒あたりの振り速さ)
+    const swingAmp = 0.5 + runT * 0.45; // 歩き:0.5 → 全力疾走:0.95(振り幅)
+    walkCycle += dt * cadence;
+    const swing = Math.sin(walkCycle) * swingAmp;
+    leftArm.rotation.x  =  swing;
+    rightArm.rotation.x = -swing;
+    leftLeg.rotation.x  = -swing; // 腕と脚は逆位相(右腕+左脚が同時に前へ)
+    rightLeg.rotation.x =  swing;
+    player.rotation.x = runT * 0.22; // 走るほど前のめりに(yaw=facingは別軸なので向きには影響しない)
+  } else if (!airborne) {
     leftArm.rotation.x  = 0;
     rightArm.rotation.x = 0;
+    leftLeg.rotation.x  = 0;
+    rightLeg.rotation.x = 0;
+    player.rotation.x += (0 - player.rotation.x) * Math.min(1, dt * 10); // ゆっくり直立姿勢に戻す
+  }
+
+  // Jump pose — 空中では歩行アニメーションの代わりに脚を畳み、上昇/落下で仰け反り/前のめりを付ける
+  if (airborne) {
+    const jumpT = Math.min(1, Math.abs(velY) / 15.6);
+    leftArm.rotation.x  = -0.9 * jumpT;
+    rightArm.rotation.x = -0.9 * jumpT;
+    leftLeg.rotation.x  =  0.7 * jumpT;
+    rightLeg.rotation.x =  0.7 * jumpT;
+    player.rotation.x = velY > 0 ? -0.15 * jumpT : 0.1 * jumpT;
   }
 
   // Orb pulse
