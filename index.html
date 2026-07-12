@@ -4922,7 +4922,14 @@ function generateChunk(chunkX, chunkZ) {
   const roadGridLooksResidential = minorLen >= 250 && dirBuckets.size >= 2 &&
     hasRealBuildingNearby(cx0, cz0, 150);
   const denseArea = hasResidentialNearby || roadGridLooksResidential;
-  const buildable = (qx, qz) => (denseArea || inLanduse(qx, qz)) && !inAvoid(qx, qz);
+  // 【重要】以前はdenseAreaが「チャンク全体(120m四方)」単位のフラグで、チャンクの
+  // どこか1箇所でも住宅街の条件を満たせば、そのチャンク内の道路沿い全部が「建築可」
+  // 扱いになっていた。このため住宅地の縁にある田畑・空き地・農道にまで一戸建てが
+  // 伸びてしまっていた。ここを「候補地点それ自体」の根拠(実際にlanduse=residential等の
+  // 区画内にあるか、近く(60m以内)に本物のOSM建物が既に建っているか)で判定するよう厳格化する。
+  // denseAreaはチャンク全体のフラグとして残し、3)の充填ループに入るかどうかの粗い足切り
+  // (探索コスト削減)にだけ使う。
+  const buildable = (qx, qz) => (inLanduse(qx, qz) || hasRealBuildingNearby(qx, qz, 60)) && !inAvoid(qx, qz);
   // 細街路から maxD 以内か(奥地の空き野原まで埋めないためのガード)
   const nearMinorRoad = (qx, qz, maxD) => {
     for (const r of nearMinor) {
@@ -4999,14 +5006,18 @@ function generateChunk(chunkX, chunkZ) {
   }
 
   // --- 3) landuse未登録の住宅街(細街路が密なチャンク)にもグリッド充填 ---
-  // 道路から45m以内に限定して、道沿い列の隙間・角地を埋める(奥の野原は空けておく)
+  // 道路から35m以内に限定して、道沿い列の隙間・角地を埋める(奥の野原は空けておく)。
+  // 【重要】以前はチャンク単位のdenseAreaフラグ+道路近傍+回避ポリゴン外、という条件だけで
+  // 生成しており、候補地点そのものが実際に住宅地かどうかは一切見ていなかった。denseAreaが
+  // (住宅地の縁の田畑を通る農道などで)誤って立った場合、その空き地全体に一戸建てが
+  // 乱立していた。buildable()による地点ごとの実データ裏付け判定を追加して歯止めをかける。
   if (denseArea) {
     for (let bx = worldX; bx < worldX + CHUNK_SIZE; bx += 14) {
       for (let bz = worldZ; bz < worldZ + CHUNK_SIZE; bz += 14) {
-        if (Math.random() > 0.55) continue;
+        if (Math.random() > 0.45) continue;
         const jx = bx + (Math.random() - 0.5) * 5.6, jz = bz + (Math.random() - 0.5) * 5.6;
-        if (inAvoid(jx, jz)) continue;
-        if (!nearMinorRoad(jx, jz, 45)) continue;
+        if (!buildable(jx, jz)) continue; // 実landuse区画内 or 本物の建物が近くにある場合のみ
+        if (!nearMinorRoad(jx, jz, 35)) continue;
         const bw = 7 + Math.random() * 4, bd = 6.5 + Math.random() * 3.5;
         if (isOnRoad(jx, jz, bw, bd)) continue;
         if (hasBuildingNearby(jx, jz, Math.max(bw, bd) / 2 + 1.5)) continue;
