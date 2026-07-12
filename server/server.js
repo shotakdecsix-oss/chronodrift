@@ -17,6 +17,7 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const crypto = require('crypto');
+const { execSync } = require('child_process');
 
 const PORT = Number(process.env.PORT || process.argv[2] || 8080);
 const HOST = '0.0.0.0';
@@ -25,6 +26,18 @@ const CACHE_DIR = path.join(__dirname, 'cache');
 const MIN_INTERVAL_MS = 1100;                     // 上流レート制限 (1req/秒 + 余裕)
 const UPSTREAM_TIMEOUT_MS = 45000;
 const MAX_ATTEMPTS = 3;
+
+// ---------- デプロイ日時 ----------
+// Renderはデプロイのたびにこのプロセスを新しく起動し直すため、プロセス起動時刻が
+// 実質的な「デプロイ日時」として使える。ビルドコマンドが無い(echo no build)ため
+// ビルド時刻を別途記録する手段が無く、これが最も簡単で確実。
+// あわせて .git が残っていれば直近コミットのハッシュ・日時も拾う(無ければnullのまま)。
+const DEPLOY_TIME = new Date();
+let DEPLOY_COMMIT = null, DEPLOY_COMMIT_TIME = null;
+try {
+  DEPLOY_COMMIT = execSync('git rev-parse --short HEAD', { cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+  DEPLOY_COMMIT_TIME = execSync('git log -1 --format=%cI', { cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+} catch (_) { /* gitが無い/取得失敗時はプロセス起動時刻だけを使う */ }
 
 const APIS = {
   '/api/elevation': { upstream: 'https://api.opentopodata.org', dir: 'elevation' },
@@ -41,6 +54,15 @@ const MIME = {
   '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav',
   '.woff': 'font/woff', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8',
 };
+
+/* ---------- デプロイ情報をゲーム側へ渡すスクリプト ----------
+ * ?ヘルプパネルから確認できるよう window.__DEPLOY_INFO__ に載せる。
+ */
+const DEPLOY_INFO_SCRIPT = `<script>window.__DEPLOY_INFO__ = ${JSON.stringify({
+  time: DEPLOY_TIME.toISOString(),
+  commit: DEPLOY_COMMIT,
+  commitTime: DEPLOY_COMMIT_TIME,
+})};</script>`;
 
 /* ---------- index.html に注入するスクリプト ----------
  * - opentopodata / overpass への fetch を同一オリジンのプロキシに書き換え
@@ -225,8 +247,9 @@ async function handleStatic(req, res) {
   // index.html にはプロキシ用スクリプトを注入して配信 (ファイル自体は無変更)
   if (path.basename(filePath) === 'index.html') {
     let html = data.toString('utf8');
-    if (/<head[^>]*>/i.test(html)) html = html.replace(/<head[^>]*>/i, (m) => m + '\n' + INJECT);
-    else html = INJECT + html;
+    const injected = DEPLOY_INFO_SCRIPT + '\n' + INJECT;
+    if (/<head[^>]*>/i.test(html)) html = html.replace(/<head[^>]*>/i, (m) => m + '\n' + injected);
+    else html = injected + html;
     res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
     res.end(html);
     return;

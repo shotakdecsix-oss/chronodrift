@@ -149,6 +149,10 @@ body {
   border-radius:999px; border:1px solid var(--hud-border);
   background:rgba(255,255,255,0.08); color:var(--text); font-size:13px; cursor:pointer;
 }
+#deployInfo {
+  margin-top:12px; padding-top:10px; border-top:1px solid var(--hud-border);
+  font-size:11px; line-height:1.6; color:var(--text-dim);
+}
 #hopBtn {
   position:fixed; bottom:var(--safe-bottom); right:var(--safe-right);
   width:64px; height:64px; border-radius:50%;
@@ -263,6 +267,7 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
   <div id="info" class="glass">
     PC: WASD移動 / Shiftダッシュ / Spaceジャンプ / ドラッグ回転<br>
     スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ
+    <div id="deployInfo"></div>
     <button id="infoCloseBtn">閉じる</button>
   </div>
 </div>
@@ -4379,6 +4384,31 @@ function openHelp() { helpModal.classList.add('active'); }
 function closeHelp() { helpModal.classList.remove('active'); }
 if (helpBtn) helpBtn.addEventListener('click', (e) => { e.stopPropagation(); openHelp(); });
 if (infoCloseBtn) infoCloseBtn.addEventListener('click', (e) => { e.stopPropagation(); closeHelp(); });
+
+// デプロイ日時の表示。server.js が index.html 配信時に window.__DEPLOY_INFO__ を注入する
+// (Renderはデプロイのたびにプロセスを再起動するため、サーバ起動時刻=デプロイ日時として使える)。
+// index.htmlをサーバ経由でなく直接開いた場合は注入されないため、その場合はその旨を表示する。
+(() => {
+  const el = document.getElementById('deployInfo');
+  if (!el) return;
+  const info = window.__DEPLOY_INFO__;
+  if (!info || !info.time) {
+    el.textContent = 'デプロイ日時: 取得できません(サーバ経由で開いてください)';
+    return;
+  }
+  const fmt = (iso) => new Date(iso).toLocaleString('ja-JP', {
+    timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+  });
+  let txt = `🚀 デプロイ日時: ${fmt(info.time)}`;
+  if (info.commit) {
+    txt += ` (${info.commit}`;
+    if (info.commitTime) txt += `, コミット: ${fmt(info.commitTime)}`;
+    txt += ')';
+  }
+  el.textContent = txt;
+})();
+
 try {
   if (!localStorage.getItem('iseharaHelpSeen')) {
     openHelp();
