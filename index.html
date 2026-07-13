@@ -5828,9 +5828,22 @@ function animate() {
   }
   updateFarMesh(); // 200mグリッドをまたいだ時だけ再サンプリング(それ以外は即return)
 
+  // ModeRegistry: 現状は3D探索(explore)の実処理はここより上に直接書かれたまま。
+  // これは将来モード(RPG/アクション等)が割り込むためのフック呼び出しのみで、
+  // 挙動は変えない。実際の探索ロジックをexploreのonUpdateへ移すのは、
+  // 本体スクリプトを物理的にファイル分割するタイミングで行う。
+  if (window.ModeRegistry) ModeRegistry.update(dt);
+
   renderer.render(scene, camera);
   drawMinimap();
   updateGPS(t);
+}
+
+if (window.ModeRegistry) {
+  // 3D探索を最初のゲームプレイモードとして登録する。
+  // 実処理はまだanimate()側に残っているため、onUpdateは現時点ではプレースホルダ。
+  ModeRegistry.registerMode({ id: 'explore', label: '3D探索' });
+  ModeRegistry.switchMode('explore');
 }
 
 animate();
