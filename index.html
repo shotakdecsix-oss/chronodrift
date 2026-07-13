@@ -5267,6 +5267,33 @@ function generateChunk(chunkX, chunkZ) {
   currentChunkKey = null;
 }
 
+// 指定地点が水面(細い水路の線分、または池・広い川のポリゴン)の近くかどうか。
+// 明治・江戸の地面パッチ(generateMeijiCells)が、面ポリゴンを持たない細い水路(river/
+// stream等。addRoadで道路と同じ線分として描かれる)の上に不透明な農地テクスチャを
+// 重ねて塗りつぶしてしまうのを防ぐために使う(isOnRoadと同じ空間ハッシュだが、
+// water種別の線分と水面ポリゴンだけを対象にする)。
+function isNearWater(cx, cz, r) {
+  const cellR = Math.max(1, Math.ceil((r + MAX_ROAD_HALF_W) / ROAD_CELL)) + 1;
+  const gx = Math.floor(cx / ROAD_CELL), gz = Math.floor(cz / ROAD_CELL);
+  for (let dx = -cellR; dx <= cellR; dx++) for (let dz = -cellR; dz <= cellR; dz++) {
+    const arr = roadGrid.get((gx + dx) + ',' + (gz + dz));
+    if (!arr) continue;
+    for (const rd of arr) {
+      if (rd.type !== 'water') continue;
+      const rdx = rd.x2 - rd.x1, rdz = rd.z2 - rd.z1;
+      const len2 = rdx * rdx + rdz * rdz;
+      if (len2 < 0.01) continue;
+      const t = Math.max(0, Math.min(1, ((cx - rd.x1) * rdx + (cz - rd.z1) * rdz) / len2));
+      const nx = rd.x1 + t * rdx - cx, nz = rd.z1 + t * rdz - cz;
+      if (Math.sqrt(nx * nx + nz * nz) < (rd.rw || 3) / 2 + r) return true;
+    }
+  }
+  for (const p of queryPolyGrid(minimapWaterGrid, cx - r, cx + r, cz - r, cz + r)) {
+    if (pointInPolygon(cx, cz, p.pts)) return true;
+  }
+  return false;
+}
+
 // 明治: チャンク内の100m格子セルを土地利用コードに従って生成
 // 町場ティア: 現代建物密度が高いセルでは、農家の集落ではなく街道沿いに軒を連ねる
 // 町家(machiya)を並べる。密な短冊地割の町家1棟を1点に配置する。
@@ -5361,18 +5388,34 @@ function generateMeijiCells(x0, z0, x1, z1, inAvoid) {
       }
     }
   }
-  // セルをマテリアルごとに1つのBufferGeometryへマージ(チャンクあたり最大でも数ドローコール)
+  // セルをマテリアルごとに1つのBufferGeometryへマージ(チャンクあたり最大でも数ドローコール)。
+  // 【重要】以前は100mセルを4隅だけの1枚の平面(2三角形)で描いていたため、起伏のある
+  // 農地(伊勢原は山際で棚田状に段差がある)では中央部が実際の地形からずれ、実の高さに
+  // 合わせて立つプレイヤーがその平面の上に「埋まって」見えることがあった。GROUND_SUB分割
+  // で小さな区画ごとにgetGroundYを取り直し、実地形への追従精度を上げる。
+  // また、細い水路(river/stream等)は面ポリゴンではなく道路と同じ線分(roadGrid)で描画
+  // されているため、この不透明な地面パッチが上から重なって川を塗りつぶしてしまっていた。
+  // 水面(線・面とも)に重なる区画だけは穴を開け、下の川が見えるようにする。
+  const GROUND_SUB = 4; // 100mセルの分割数(25m四方単位で高さを取り直す)
+  const SUB_SIZE = 100 / GROUND_SUB;
   for (const [mat, cells] of groundGroups) {
     const verts = [], idxs = [], uvs = [];
     for (let i = 0; i < cells.length; i += 2) {
       const cx = cells[i], cz = cells[i + 1];
-      const base = verts.length / 3;
-      [[-50, -50], [50, -50], [50, 50], [-50, 50]].forEach(([ox, oz]) => {
-        const vx = cx + ox, vz = cz + oz;
-        verts.push(vx, getGroundY(vx, vz) + 0.12, vz);
-        uvs.push(vx, vz); // uv=世界座標(テクスチャ側のrepeatで縞周期を制御)
-      });
-      idxs.push(base, base + 2, base + 1, base, base + 3, base + 2);
+      for (let sx = 0; sx < GROUND_SUB; sx++) {
+        for (let sz = 0; sz < GROUND_SUB; sz++) {
+          const qx0 = cx - 50 + sx * SUB_SIZE, qz0 = cz - 50 + sz * SUB_SIZE;
+          const qx1 = qx0 + SUB_SIZE, qz1 = qz0 + SUB_SIZE;
+          const midx = (qx0 + qx1) / 2, midz = (qz0 + qz1) / 2;
+          if (isNearWater(midx, midz, SUB_SIZE * 0.6)) continue; // 川・水路の上には描かない(下の水面を見せる)
+          const base = verts.length / 3;
+          [[qx0, qz0], [qx1, qz0], [qx1, qz1], [qx0, qz1]].forEach(([vx, vz]) => {
+            verts.push(vx, getGroundY(vx, vz) + 0.12, vz);
+            uvs.push(vx, vz); // uv=世界座標(テクスチャ側のrepeatで縞周期を制御)
+          });
+          idxs.push(base, base + 2, base + 1, base, base + 3, base + 2);
+        }
+      }
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
