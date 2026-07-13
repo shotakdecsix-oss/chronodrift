@@ -312,3 +312,29 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
 });
+
+// ======= 起動ブートストラップ(元 part6.js 末尾から移動) =======
+// 【重要】このIIFEはloadElevations()経由でxzToLatLon(part7.js定義)などを同期的に呼ぶため、
+// 9ファイルすべての読み込みが終わった後(=このpart9.jsの実行時点)で初めて安全に実行できる。
+// part6.jsに置いたままだと、part7.js〜part9.jsがまだ読み込まれる前にReferenceErrorで停止していた。
+// Load terrain first, then place OSM world on top
+// 明治モードは迅速測図の土地利用データを先に読む(チャンク生成が依存)
+(async () => {
+  const startLocP = getStartLocation(); // 位置情報の取得を本編ロードと並行で開始
+  // モード切替リロード(江戸↔現実など)では切替前の位置に戻す。その時は現在地ジャンプしない。
+  let isModeSwitch = false;
+  try { isModeSwitch = !!localStorage.getItem('iseharaResumePos'); } catch (e) {}
+  // OSM取得は地形データにもmeiji土地利用データにも依存しないので、それらの取得と
+  // 並行して先に投げておく(以前は地形→OSMの完全直列で、両方の待ち時間がそのまま合算されていた)
+  const osmDataP = fetchOSMData();
+  await loadElevations();
+  if (USES_MEIJI_LANDUSE) await loadMeijiLanduse();
+  await loadOSM(await osmDataP); // モード切替時はここで切替前の位置に復帰する
+  // 通常起動のみ初期位置へ移動(現在地、取れなければ東京駅)。伊勢原の詳細地形は座標基準として残し、
+  // 現在地の地形は遠景グリッド(約1km間隔)+ OSMタイルで表示する。
+  const loc = await startLocP;
+  if (!isModeSwitch) jumpToLatLon(loc.lat, loc.lon);
+  // 最終的なプレイヤー位置を中心に、FAR(広域・低解像度)とNEAR(周辺・高解像度)を両方取得
+  loadWideTerrain(player.position.x, player.position.z);
+  loadNearTerrain(player.position.x, player.position.z);
+})();

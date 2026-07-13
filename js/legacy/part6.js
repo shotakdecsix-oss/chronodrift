@@ -547,24 +547,10 @@ function getStartLocation() {
   });
 }
 
-// Load terrain first, then place OSM world on top
-// 明治モードは迅速測図の土地利用データを先に読む(チャンク生成が依存)
-(async () => {
-  const startLocP = getStartLocation(); // 位置情報の取得を本編ロードと並行で開始
-  // モード切替リロード(江戸↔現実など)では切替前の位置に戻す。その時は現在地ジャンプしない。
-  let isModeSwitch = false;
-  try { isModeSwitch = !!localStorage.getItem('iseharaResumePos'); } catch (e) {}
-  // OSM取得は地形データにもmeiji土地利用データにも依存しないので、それらの取得と
-  // 並行して先に投げておく(以前は地形→OSMの完全直列で、両方の待ち時間がそのまま合算されていた)
-  const osmDataP = fetchOSMData();
-  await loadElevations();
-  if (USES_MEIJI_LANDUSE) await loadMeijiLanduse();
-  await loadOSM(await osmDataP); // モード切替時はここで切替前の位置に復帰する
-  // 通常起動のみ初期位置へ移動(現在地、取れなければ東京駅)。伊勢原の詳細地形は座標基準として残し、
-  // 現在地の地形は遠景グリッド(約1km間隔)+ OSMタイルで表示する。
-  const loc = await startLocP;
-  if (!isModeSwitch) jumpToLatLon(loc.lat, loc.lon);
-  // 最終的なプレイヤー位置を中心に、FAR(広域・低解像度)とNEAR(周辺・高解像度)を両方取得
-  loadWideTerrain(player.position.x, player.position.z);
-  loadNearTerrain(player.position.x, player.position.z);
-})();
+// 【重要】起動ブートストラップIIFE(loadElevations/loadOSM等を呼ぶ処理)は、
+// 元は単一スクリプトの関数巻き上げにより「定義がテキスト上どこにあっても」動いていたが、
+// ファイル分割後は script タグをまたいだ巻き上げが効かない。このIIFEはloadElevations経由で
+// xzToLatLon(part7.js)を同期的に呼ぶため、part7を読み込み終える前に実行されると
+// ReferenceErrorで停止してしまう(実際に発生した不具合)。全ファイル読み込み後に
+// 確実に実行されるよう、このIIFE本体は js/legacy/part9.js の末尾に移動した。
+// (getStartLocation/TOKYO_STATION はこのファイルの他の関数から参照されないためここに残す)
