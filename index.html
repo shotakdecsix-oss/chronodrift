@@ -389,11 +389,13 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.9;
 
 const scene = new THREE.Scene();
-// フォグ: 高密度モード(明治以外)は生成半径を狭めた分だけ濃くして、ポップインを隠す
-const WORLD_FOG = new THREE.FogExp2(MODE_CONF.fog, MODE === 'meiji' ? 0.0004 : 0.00056); // 毎フレーム new しない(GC対策)
+// フォグ: 高密度モード(明治以外)は生成半径を狭めた分だけ濃くして、ポップインを隠す。
+// 宇宙は大気(=光の散乱)が無い設定なので、遠くまでくっきり見えるようフォグをごく薄くする。
+const WORLD_FOG = new THREE.FogExp2(MODE_CONF.fog, MODE === 'meiji' ? 0.0004 : MODE === 'space' ? 0.00008 : 0.00056); // 毎フレーム new しない(GC対策)
 scene.fog = WORLD_FOG;
 
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.5, 5000);
+// 宇宙は遠景メッシュ(半径6km)がカバーする範囲まで見えるよう視界を伸ばす(他モードは従来通り)
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.5, MODE === 'space' ? 5800 : 5000);
 
 // ======= FANTASY SKY =======
 // 半径はカメラの far(5000) より十分小さく。原点固定だったのをカメラ追従に変更
@@ -1523,13 +1525,13 @@ const forestLeafPools = forestLeafColors.map(c => makePool(
 // 同じ場所には同じ木が並び、ちらつき・入れ替わりが起きない。
 function _fhash(a, b) { let h = (a * 374761393 + b * 668265263) | 0; h = (h ^ (h >> 13)) * 1274126177 | 0; return ((h ^ (h >> 16)) >>> 0) / 4294967296; }
 function plantTree(x, z) {
-  if (MODE !== 'space' && forestTrunkP.n >= forestTrunkP.max) return; // 幹が上限なら木ごと追加しない(浮いた樹冠防止)
+  if (MODE === 'space') return; // 宇宙: 大気が無いため植生(三角錐のクリスタル樹)は生やさない
+  if (forestTrunkP.n >= forestTrunkP.max) return; // 幹が上限なら木ごと追加しない(浮いた樹冠防止)
   const gy = getGroundY(x, z);
   const r1 = _fhash(Math.floor(x * 7.3), Math.floor(z * 7.3));
   const s = 0.9 + r1 * 1.3;
   const rot = _fhash(Math.floor(x * 3.1) + 7, Math.floor(z * 5.7) + 3) * 6.283;
   const leaf = forestLeafPools[(Math.floor(Math.abs(x) * 1.7 + Math.abs(z) * 2.3)) % forestLeafPools.length];
-  if (MODE === 'space') { poolAdd(leaf, x, gy + 1.7 * s, z, rot, s, s * 1.3, s); return; }
   poolAdd(forestTrunkP, x, gy + 1.0 * s, z, 0, s, s, s);              // 幹: 根元を gy に
   poolAdd(leaf, x, gy + 2.6 * s, z, rot, s * 1.25, s * 1.3, s * 1.25); // 樹冠: 幹の上に載る球(単色)
 }
@@ -1563,12 +1565,9 @@ function addWireSeg(x1, y1, z1, x2, y2, z2) {
 }
 
 function addTree(x, z, s) {
+  if (MODE === 'space') return; // 宇宙: 大気が無いため植生(三角錐のクリスタル樹)は生やさない
   const gy = getGroundY(x, z);
   const top = treeTopPools[(Math.random() * treeTopPools.length) | 0]; // 色ごとの単色プールから選ぶ
-  if (MODE === 'space') { // クリスタルオブジェ(幹なし)
-    poolAdd(top, x, gy + 1.3 * s, z, Math.random() * 3, s, s * (1.1 + Math.random() * 0.6), s);
-    return;
-  }
   poolAdd(treeTrunkP, x, gy + 0.8 * s, z, 0, s, s, s);
   const round = MODE === 'marchen'; // メルヘンは丸っこく
   poolAdd(top, x, gy + 2.3 * s, z, Math.random() * 3,
@@ -1868,14 +1867,17 @@ function addBuilding(x, z, w, d, h, style, isReal) {
         dm(UNIT_BOX, lambertMat(0xb06050), x + w * 0.22, gy + h + 0.9, z, 0.8, 1.8, 0.8);
     }
   } else if (rtype === '_space') {
-    // パラペット+ガラスドーム+ネオン帯(+たまに発光アンテナ)
-    dm(PARAPET_GEO, lambertMat(shadeHex(wallC, 0.7)), x, gy + h, z, w + 0.2, 0.7, d + 0.2);
-    const dome = dm(UNIT_DOME, SPACE_GLASS, x, gy + h, z, minWD * 1.1, minWD * 1.1, minWD * 1.1);
+    // ドーム型居住区: 屋根の一部を飾るのではなく、建物全体を大きな半球ドームで覆う
+    // (footprintの対角線まで確実に覆う半径にして、四隅がドームからはみ出さないようにする)。
+    // パラペットは廃止し、ドーム基部にネオンリングだけを残す。
+    const domeR = Math.sqrt(w * w + d * d) / 2 * 1.08;
+    const domeBaseY = gy + h * 0.55; // ドームの根元を建物高さの半分あたりに沈め、ドームが主役に見えるようにする
+    const dome = dm(UNIT_DOME, SPACE_GLASS, x, domeBaseY, z, domeR, domeR, domeR);
     dome.renderOrder = 3;
     dm(UNIT_BOX, NEON_MATS[(Math.random() * NEON_MATS.length) | 0],
-               x, gy + h - 0.25, z, w * 1.02, 0.22, d * 1.02);
+               x, domeBaseY + 0.05, z, domeR * 1.85, 0.22, domeR * 1.85);
     if (detailOK() && Math.random() < 0.3)
-      dm(UNIT_CYL, lambertMat(0x223344, 0x2266ff), x + w * 0.2, gy + h + 1.6, z - d * 0.15, 0.12, 3.2, 0.12);
+      dm(UNIT_CYL, lambertMat(0x223344, 0x2266ff), x, domeBaseY + domeR * 0.85, z, 0.12, 3.2, 0.12);
   } else if (rtype === 'shrine') {
     // Pagoda-style double roof
     dm(UNIT_CONE4, rm, x, gy + h + h * 0.2, z, maxWD * 1.6, h * 0.4, maxWD * 1.6, Math.PI / 4);
@@ -3868,6 +3870,7 @@ async function loadOSM(preFetchedData) {
       const type = hw==='motorway' ? 'motorway' : hw==='motorway_link' ? 'trunk'
                  : (hw==='trunk'||hw==='primary'||hw==='secondary'||hw==='tertiary') ? hw : 'road';
       if (USES_MEIJI_LANDUSE && (type === 'road' || type === 'motorway')) return; // 明治・江戸: 細街路も高速道路もない
+      if (MODE === 'space' && (type === 'road' || type === 'tertiary' || type === 'secondary')) return; // 宇宙: 鉄道・高速道路・国道(幹線)以外の小さな道路は出さない
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
@@ -4794,6 +4797,7 @@ function processTileData(data) {
       const type = hw==='motorway' ? 'motorway' : hw==='motorway_link' ? 'trunk'
                  : (hw==='trunk'||hw==='primary'||hw==='secondary'||hw==='tertiary') ? hw : 'road';
       if (USES_MEIJI_LANDUSE && (type === 'road' || type === 'motorway')) return; // 明治・江戸: 細街路も高速道路もない
+      if (MODE === 'space' && (type === 'road' || type === 'tertiary' || type === 'secondary')) return; // 宇宙: 鉄道・高速道路・国道(幹線)以外の小さな道路は出さない
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
