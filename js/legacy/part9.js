@@ -253,7 +253,14 @@ function animate() {
   // 通常時(バックログ小)はコマ落ちさせない20棟のまま、山になった時だけ追いつく。
   const _buildBacklog = pendingBuildings.length - pendingBuildingIdx;
   const _buildBudget = Math.min(80, 20 + Math.floor(_buildBacklog / 25));
+  // 【重要】件数ベースの予算だけだと、1棟あたりのコストが場所によって大きく違う場合に
+  // 対応できない(香港・ニューヨークのような超高密度メガシティは1棟の生成コスト自体が
+  // 伊勢原基準より重く、実機検証で「1フレームが暴走してタブごと固まって見える」不具合が
+  // 確認された)。件数の上限に加えて実測時間(8ms)でも早期に打ち切り、残りは次フレームへ
+  // 回すことで、どんなに1棟が重くても1フレームの処理時間には必ず天井を設ける。
+  const _buildFrameDeadline = performance.now() + 8;
   for (let n = 0; n < _buildBudget && pendingBuildingIdx < pendingBuildings.length; n++) {
+    if (n > 0 && performance.now() > _buildFrameDeadline) break; // 時間切れ: 残りは次フレームへ
     const b = pendingBuildings[pendingBuildingIdx++];
     const bcx = Math.floor(b.x / CHUNK_SIZE), bcz = Math.floor(b.z / CHUNK_SIZE);
     if (!IS_MEIJI && !chunkNearTerrainReady(bcx, bcz)) {

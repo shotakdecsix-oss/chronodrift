@@ -37,7 +37,14 @@ async function updateAddressDisplay() {
     const area = a.suburb || a.neighbourhood || a.quarter || a.city_district || '';
     const text = [city, area].filter(Boolean).join('');
     if (addressEl) addressEl.textContent = text ? `📍 ${text}` : '📍 (住所不明)';
-    if (a.country_code) currentCountryCode = a.country_code.toLowerCase();
+    // Nominatimは香港・マカオを国コード的には"cn"として返す(ISO3166-2の副行政区画で
+    // "CN-HK"/"CN-MO"と区別している)。country_codeだけを見ると香港が中国本土と同じ
+    // 扱いになり建物スタイルの見分けがつかないため、この副行政区画コードを優先する。
+    const iso2 = a['ISO3166-2-lvl3'] || a['ISO3166-2-lvl4'] || '';
+    let cc = a.country_code ? a.country_code.toLowerCase() : null;
+    if (iso2 === 'CN-HK') cc = 'hk';
+    else if (iso2 === 'CN-MO') cc = 'mo';
+    if (cc) currentCountryCode = cc;
   } catch (e) { /* 失敗時は前回表示のまま何もしない */ }
   addrFetching = false;
 }
