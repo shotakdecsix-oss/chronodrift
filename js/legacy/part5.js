@@ -16,7 +16,16 @@ const WORLD_W = (OSM_BOUNDS.maxLon - OSM_BOUNDS.minLon) * SCALE * COS_LAT;
 const WORLD_D = (OSM_BOUNDS.maxLat - OSM_BOUNDS.minLat) * SCALE;
 
 // 地形の色分けマテリアル(高さ別頂点カラー)。唯一の地形メッシュ(farMesh)がこれを使う。
-const terrainMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+// polygonOffset: 海岸線(標高≈海面高さ)でfarMeshとseaMesh(part6.js)がほぼ同じ深度値になり、
+// GPUの深度バッファ精度の限界でどちらが手前か毎フレーム入れ替わって「ちらつく」(z-fighting)。
+// 地形側を深度上だけ少し奥へ押し出す(見た目の頂点位置は変えない)ことで、標高が海面と
+// ほぼ同じ場所では常に海面が地形より手前に描かれるようにし、際どい引き分けを無くす。
+// 標高が海面よりはっきり高い場所は実際の高低差がこのオフセットよりずっと大きいので、
+// 従来どおり地形が正しく手前に来る(海に沈んだように見えたりはしない)。
+const terrainMat = new THREE.MeshLambertMaterial({
+  vertexColors: true,
+  polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 4,
+});
 
 // 遠景の実地形データ(loadWideTerrain/loadNearTerrain がバックグラウンドで代入)。
 // farNodeY が参照するため、初回 updateFarMesh(true) より前に宣言しておく(TDZ回避)。
