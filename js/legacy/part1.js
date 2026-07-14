@@ -406,6 +406,28 @@ function resnapWireSpan(sp) {
   setWireSegY(sp.wireIdx2, midY, topB);
 }
 
+// ======= 新規投入分をプレイヤー近傍優先に並べ替える(2026-07-15) =======
+// 【経緯】OSMタイル1バッチ(密集市街地だと建物・道路とも数千件)は、そのバッチ内では
+// 単にOSMが返した順(=プレイヤー位置とは無関係)でpendingBuildings/pendingRoadMeshesに
+// 積まれ、フレーム分割処理も配列の先頭からFIFOで消化するだけだった。タイル自体は近い順に
+// 取得されるが(fetchOSMTileBatchのソート)、1タイル内の建物・道路の並びまでは近い順に
+// なっていないため、密集地では「今プレイヤーが立っている場所」の建物・道路がバッチの
+// 後方に埋もれ、生成が追いつかず地形・建物の「端」に行き当たる不具合につながっていた。
+// バッチ全体を毎フレーム並べ替えるのはコストが大きいので、新規追加分(fromIdx以降)だけを
+// 1回だけ、そのバッチが積まれた直後にプレイヤー位置を中心とした近い順へ並べ替える。
+function sortNewEntriesByDistanceToPlayer(arr, fromIdx, getXZ) {
+  if (fromIdx >= arr.length) return;
+  const px = player.position.x, pz = player.position.z;
+  const tail = arr.splice(fromIdx);
+  tail.sort((a, b) => {
+    const pa = getXZ(a), pb = getXZ(b);
+    const da = (pa.x - px) * (pa.x - px) + (pa.z - pz) * (pa.z - pz);
+    const db = (pb.x - px) * (pb.x - px) + (pb.z - pz) * (pb.z - pz);
+    return da - db;
+  });
+  for (const t of tail) arr.push(t);
+}
+
 // ======= 道路メッシュ生成のフレーム分割 =======
 // 以前は addRoad が呼ばれた瞬間に makeRoadGeo(1mごとの地形サンプリング)+Mesh生成+scene.add
 // を同期実行していた。密集市街地のOSMタイル(6枚バッチ)が届くと数千セグメントを1フレームで

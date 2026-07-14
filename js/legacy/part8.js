@@ -95,12 +95,14 @@ function processTileData(data, tileCount) {
   const densityGrid8 = MODE === 'real' ? computeLocalDensityGrid(data.elements) : null;
   // 周囲に田畑があるエリアは被覆率に関わらず高層化しない(part2.js computeFarmlandCells参照)。
   const farmlandCells8 = MODE === 'real' ? computeFarmlandCells(data.elements) : null;
-  // 至近距離に駅が複数あるエリア(ターミナル駅)は強制的に高層ビル区域にする
-  // (part2.js isStationHubNear参照。東京・NY等の対策)。
-  const stationPoints8 = MODE === 'real' ? computeStationPoints(data.elements) : null;
+  // 至近距離に駅が複数あるエリア(ターミナル駅)は強制的に高層ビル区域にする。
+  // 駅ノードはグローバルに(タイル取得バッチをまたいで)蓄積する
+  // (part2.js registerStationPoints参照。東京・NY等の対策)。
+  if (MODE === 'real') registerStationPoints(data.elements);
   // 駅ランドマーク(初期範囲の外にある駅も、タイルが届いた時点でここで拾う)
   processStationNodes(data.elements);
   // Roads
+  const _roadMeshStart8 = pendingRoadMeshes.length; // このバッチで新規投入する分の開始位置(近傍優先ソート用)
   data.elements.forEach(el => {
     if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) return;
     if (seenOSMWays.has(el.id)) return; // 隣接タイル/初期ロードで処理済み
@@ -134,6 +136,9 @@ function processTileData(data, tileCount) {
       }
     }
   });
+  // このバッチで新規に積んだ道路メッシュだけ、プレイヤー位置を中心とした近い順へ並べ替える
+  // (part1.js sortNewEntriesByDistanceToPlayer参照)。
+  sortNewEntriesByDistanceToPlayer(pendingRoadMeshes, _roadMeshStart8, r => ({ x: (r.x1 + r.x2) / 2, z: (r.z1 + r.z2) / 2 }));
   // 公園・水域・田畑・森 + multipolygon水面
   data.elements.forEach(el => {
     if (el.type === 'relation') { processWaterRelation(el); return; } // 重複はrel側のSetで防止
@@ -142,6 +147,7 @@ function processTileData(data, tileCount) {
   });
   // Buildings — 直接生成せずキューに積み、フレーム分割して生成する
   // (以前は1タイル分の建物を1フレームで同期生成し、大きなカクつきの原因だった)
+  const _buildingStart8 = pendingBuildings.length; // このバッチで新規投入する分の開始位置(近傍優先ソート用)
   data.elements.forEach(el => {
     if (el.type !== 'way' || !el.geometry || el.geometry.length < 4) return;
     if (seenOSMWays.has(el.id)) return;
@@ -176,7 +182,7 @@ function processTileData(data, tileCount) {
     // 呼ばれる経路で、part6.js側だけに国プロファイルを配線していたため、ジャンプ直後の
     // 初期範囲を過ぎて歩き回った先の建物には反映されていなかった(香港で歩き続けると
     // 低層タグの建物がまた出る不具合の原因)。
-    const cprofH8 = localDensityProfileAt(cprofH8Base, densityGrid8, cx, cz, farmlandCells8, stationPoints8);
+    const cprofH8 = localDensityProfileAt(cprofH8Base, densityGrid8, cx, cz, farmlandCells8);
     const [lvMin8, lvMax8] = (cprofH8 && cprofH8.levelsRange) || [1, 3];
     const levels = parseInt(tags['building:levels']) || (lvMin8 + Math.floor(Math.random() * (lvMax8 - lvMin8 + 1)));
     let h = resolvedH != null ? resolvedH : Math.max(levels*3,3)+Math.random()*2;
@@ -191,6 +197,9 @@ function processTileData(data, tileCount) {
     if (MODE === 'edo') fh = applyEdoHeightCap(style, fh); // 江戸: 現代建物の実測高さそのままだと高層ビルになるため木造家屋相当に抑える
     pendingBuildings.push({ x: cx, z: cz, w: fw, d: fd, h: fh, style, real: true });
   });
+  // このバッチで新規に積んだ建物だけ、プレイヤー位置を中心とした近い順へ並べ替える
+  // (part1.js sortNewEntriesByDistanceToPlayer参照)。
+  sortNewEntriesByDistanceToPlayer(pendingBuildings, _buildingStart8, b => ({ x: b.x, z: b.z }));
   // Landuse polygons for chunk system
   data.elements.forEach(el => {
     if (el.type !== 'way' || !el.geometry || el.geometry.length < 4) return;

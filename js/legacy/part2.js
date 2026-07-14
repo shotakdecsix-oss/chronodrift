@@ -546,27 +546,34 @@ function hasFarmlandNear(farmlandCells, x, z) {
 // 被覆率よりもずっと当てにできる「ここは正真正銘の都心」シグナルになる。
 // 駅ノード自体はOSM_TILE_CLAUSES/初期クエリで既に取得済み(railway=station/halt,
 // public_transport=station)なので、新たな通信は増やさない。
-const STATION_HUB_RADIUS_M = 400; // 「至近距離」の半径
+const STATION_HUB_RADIUS_M = 1000; // 「至近距離」の半径(ユーザー指定により400→1000mに拡大)
 const STATION_HUB_MIN_COUNT = 2;  // これ以上の駅ノードが半径内にあればターミナル駅とみなす
-// elements内の駅ノード(railway=station/halt, public_transport=station)の座標一覧を作る。
-function computeStationPoints(elements) {
-  const pts = [];
+// 【重要】駅ノードは1回のOverpassバッチ(1タイル、または近い順に最大6タイル分)でしか
+// 見えない。至近距離に複数の駅があっても、それらが別々のタイル取得バッチに分かれて届くと
+// 「このバッチ単体では駅が1つしか映っていない」と誤判定され、実質ターミナル駅判定が
+// 機能しなくなる(実機検証: NYの複数駅至近エリアでも低層住宅のままになる不具合の原因)。
+// バッチをまたいで判定できるよう、駅ノードはページ読み込み中ずっと(ノードIDで重複排除
+// しつつ)蓄積し、判定時は蓄積済みの全駅を対象にする。遠方ジャンプはlocation.reload()を
+// 伴うため(jumpToLatLon参照)、モジュール変数はそのタイミングで自然に空になり、
+// 座標系(浮動原点)の不整合を心配する必要はない。
+const globalStationPoints = new Map(); // ノードID → {x,z}
+// elements内の駅ノード(railway=station/halt, public_transport=station)をグローバルに登録する。
+function registerStationPoints(elements) {
   for (const el of elements) {
-    if (el.type !== 'node' || !el.tags) continue;
+    if (el.type !== 'node' || !el.tags || globalStationPoints.has(el.id)) continue;
     const t = el.tags;
     if (t.railway === 'station' || t.railway === 'halt' || t.public_transport === 'station') {
-      pts.push(latLonToXZ(el.lat, el.lon));
+      globalStationPoints.set(el.id, latLonToXZ(el.lat, el.lon));
     }
   }
-  return pts;
 }
-// 座標(x,z)の半径STATION_HUB_RADIUS_M以内に、駅ノードがSTATION_HUB_MIN_COUNT個以上あるか。
-// (駅の総数は1バッチあたり多くても数十件程度なので、建物ごとの線形走査で十分軽い)
-function isStationHubNear(stations, x, z) {
-  if (!stations || stations.length < STATION_HUB_MIN_COUNT) return false;
+// 座標(x,z)の半径STATION_HUB_RADIUS_M以内に、登録済み駅ノードがSTATION_HUB_MIN_COUNT個以上あるか。
+// (駅の総数はセッション全体でもせいぜい数百件程度なので、建物ごとの線形走査で十分軽い)
+function isStationHubNear(x, z) {
+  if (globalStationPoints.size < STATION_HUB_MIN_COUNT) return false;
   const r2 = STATION_HUB_RADIUS_M * STATION_HUB_RADIUS_M;
   let n = 0;
-  for (const s of stations) {
+  for (const s of globalStationPoints.values()) {
     const dx = s.x - x, dz = s.z - z;
     if (dx * dx + dz * dz <= r2 && ++n >= STATION_HUB_MIN_COUNT) return true;
   }
@@ -577,8 +584,8 @@ function isStationHubNear(stations, x, z) {
 // セル面積は常にDENSITY_CELL_M四方の固定値(セル自体の大きさは地理的に変わらないため)。
 // 判定の優先順位: ①ターミナル駅近接(最有力の都心シグナル。田畑近接より優先)
 // →②田畑近接(高層化を抑制)→③250mセルの被覆率(通常の判定)。
-function localDensityProfileAt(baseProfile, grid, x, z, farmlandCells, stations) {
-  if (isStationHubNear(stations, x, z)) return REGION_PROFILES.denseHighRise;
+function localDensityProfileAt(baseProfile, grid, x, z, farmlandCells) {
+  if (isStationHubNear(x, z)) return REGION_PROFILES.denseHighRise;
   if (hasFarmlandNear(farmlandCells, x, z)) return baseProfile; // 田畑近接 → 高層化しない
   if (!grid) return baseProfile;
   const key = Math.floor(x / DENSITY_CELL_M) + ',' + Math.floor(z / DENSITY_CELL_M);
