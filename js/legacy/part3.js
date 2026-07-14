@@ -801,5 +801,5 @@ function addRoad(x1, z1, x2, z2, width, type='road') {
     }
   }
 
-  decorateRoad(x1, z1, x2, z2, type, w);
+  decorateRoad(x1, z1, x2, z2, type, w, rec);
 }

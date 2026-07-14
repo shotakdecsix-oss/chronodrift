@@ -503,10 +503,45 @@ function computeLocalDensityGrid(elements) {
   }
   return cellFootprint;
 }
+// ======= 農地近接による高層化抑制(2026-07-14) =======
+// 【経緯】250mセル化(上記)だけでは、伊勢原のような「駅前は確かに密集しているが、
+// 徒歩圏内には田畑が広がる」地域まで、局所的な被覆率だけで高層(denseHighRise)化して
+// しまうケースが実機で残った。マンハッタンのような正真正銘の都心には、そもそも周囲数km
+// 以内に田畑は存在しない。「セル単体の被覆率」に加えて「そもそも田園地帯の中の一角に
+// 過ぎないか」を見ることで、都心か町場かをより正しく見分ける。
+// FARMLAND_CELL_Mは密度セル(250m)よりずっと広い格子で「近くに田畑があるか」だけを
+// 大まかに判定する(田畑ポリゴン自体の被覆率は問わない。存在するかどうかの二値判定)。
+const FARMLAND_CELL_M = 1000;
+const FARMLAND_CHECK_RADIUS_CELLS = 2; // 中心±2セル=約5km四方(概ね半径2〜2.5km圏内)を「近く」とみなす
+const FARMLAND_LANDUSE = new Set(['farmland', 'orchard', 'meadow', 'allotments']);
+// elements内のlanduse=farmland/orchard/meadow/allotmentsポリゴンの頂点から、
+// それらが属するFARMLAND_CELL_M格子セルの集合を作る(computeLocalDensityGridと対になる関数)。
+function computeFarmlandCells(elements) {
+  const cells = new Set();
+  for (const el of elements) {
+    if (el.type !== 'way' || !el.tags || !FARMLAND_LANDUSE.has(el.tags.landuse) || !el.geometry || el.geometry.length < 3) continue;
+    for (const g of el.geometry) {
+      const p = latLonToXZ(g.lat, g.lon);
+      cells.add(Math.floor(p.x / FARMLAND_CELL_M) + ',' + Math.floor(p.z / FARMLAND_CELL_M));
+    }
+  }
+  return cells;
+}
+// 座標(x,z)の周囲FARMLAND_CHECK_RADIUS_CELLS圏内に田畑セルが1つでもあればtrue。
+function hasFarmlandNear(farmlandCells, x, z) {
+  if (!farmlandCells || farmlandCells.size === 0) return false;
+  const gx = Math.floor(x / FARMLAND_CELL_M), gz = Math.floor(z / FARMLAND_CELL_M);
+  for (let dx = -FARMLAND_CHECK_RADIUS_CELLS; dx <= FARMLAND_CHECK_RADIUS_CELLS; dx++)
+    for (let dz = -FARMLAND_CHECK_RADIUS_CELLS; dz <= FARMLAND_CHECK_RADIUS_CELLS; dz++)
+      if (farmlandCells.has((gx + dx) + ',' + (gz + dz))) return true;
+  return false;
+}
 // 指定座標(建物の重心x,z)が属するセルの被覆率で、その建物1棟分のプロファイルを決める。
 // gridがnull(現実モード以外、またはOSM要素が無いバッチ)ならbaseProfileをそのまま返す。
 // セル面積は常にDENSITY_CELL_M四方の固定値(セル自体の大きさは地理的に変わらないため)。
-function localDensityProfileAt(baseProfile, grid, x, z) {
+// farmlandCellsを渡すと、周囲に田畑があるエリアは被覆率に関わらず高層化を見送る。
+function localDensityProfileAt(baseProfile, grid, x, z, farmlandCells) {
+  if (hasFarmlandNear(farmlandCells, x, z)) return baseProfile; // 田畑近接 → 高層化しない
   if (!grid) return baseProfile;
   const key = Math.floor(x / DENSITY_CELL_M) + ',' + Math.floor(z / DENSITY_CELL_M);
   const footprint = grid.get(key) || 0;
@@ -664,13 +699,28 @@ const wireMesh = new THREE.LineSegments(wireGeo, new THREE.LineBasicMaterial({ c
 wireMesh.frustumCulled = false;
 scene.add(wireMesh);
 let wireN = 0;
+// 呼び出し元(decorateRoad)が後からY方向だけ更新できるよう、使ったインデックスを返す
+// (地形resnap用。setWireSegY参照)。
 function addWireSeg(x1, y1, z1, x2, y2, z2) {
-  if (wireN >= WIRE_MAX) return;
-  const o = wireN * 6;
+  if (wireN >= WIRE_MAX) return -1;
+  const idx = wireN;
+  const o = idx * 6;
   wirePos[o] = x1; wirePos[o+1] = y1; wirePos[o+2] = z1;
   wirePos[o+3] = x2; wirePos[o+4] = y2; wirePos[o+5] = z2;
   wireN++;
   wireGeo.setDrawRange(0, wireN * 2);
+  wireGeo.attributes.position.needsUpdate = true;
+  return idx;
+}
+// 電線1本のY座標だけ書き換える(X/Zはそのまま。電柱と同じ「形は変えずY方向にだけ追従」方式)。
+// 地形(NEAR)が後から更新されても、電柱・電線は生成時の高さで永久に固定されたままだった
+// (道路面・建物・駅は追従resnapがあったのに、電柱・電線だけ対象外だったため、
+// 実機検証で「電線が空中に浮いている」不具合として顕在化した)。rebuildRoadMesh参照。
+function setWireSegY(idx, y1, y2) {
+  if (idx == null || idx < 0) return;
+  const o = idx * 6;
+  wirePos[o + 1] = y1;
+  wirePos[o + 4] = y2;
   wireGeo.attributes.position.needsUpdate = true;
 }
 

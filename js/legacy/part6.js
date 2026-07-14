@@ -423,11 +423,26 @@ async function loadOSM(preFetchedData) {
     if (typeof resume.yaw === 'number') camYaw = resume.yaw;
     if (typeof resume.rot === 'number') player.rotation.y = resume.rot;
     initialWorldLoaded = true;
+    // 【重要】国別建物スタイル(currentCountryCode)は通常checkAddressDisplayのスロットル
+    // (初期化後10秒/150m)任せだが、遠方ジャンプ後のこの再開パスはinitialWorldLoaded=true
+    // にした直後からcheckOSMTiles(part8.js)がすぐにタイル取得を始めてしまう。Nominatim
+    // 逆ジオコーディングが約10秒後まで一度も試みられないと、着地直後(=プレイヤーに最初に
+    // 見える範囲)の建物がcurrentCountryCode=nullのまま生成されてしまい、国別プロファイル
+    // (denseHighRise等)が一切効かない状態で焼き込まれて二度と直らない不具合につながる
+    // (実機検証: ニューヨークの都心が低層住宅だらけになる原因の一つ)。part7.js
+    // jumpToLatLonの近距離ジャンプと同じくスロットルを待たず即座に取得を開始し、かつ
+    // ここでは最大1.5秒だけ完了を待つ(ブロッキングは短時間に限定し、Nominatim不調時は
+    // 諦めて先に進む。「🗺 目的地の地図を読み込み中...」表示中の待ち時間に紛れる程度)。
     // 【重要】ここを通ると伊勢原の初期ワールド構築(→完了時のshowToast)を丸ごとスキップするため、
     // 起動時の静的プレースホルダ文言(index.html「🗺 伊勢原マップ読み込み中...」)を明示的に
     // 置き換えないと、実際には目的地のOSMタイル取得(part8.js)が進んでいてもずっと表示され続ける。
+    // (下のawaitより先に出す。トースト表示自体は国コード取得を待つ必要が無いため)
     showToast('🗺 目的地の地図を読み込み中...', { sticky: true });
     awaitingDestinationLoad = true;
+    await Promise.race([
+      updateAddressDisplay(),
+      new Promise(res => setTimeout(res, 1500)),
+    ]);
     return;
   }
   const data = preFetchedData !== undefined ? preFetchedData : await fetchOSMData();
@@ -501,6 +516,9 @@ async function loadOSM(preFetchedData) {
   // セルごとの被覆率グリッドを1度だけ作り、建物1棟ごとにその重心が属するセルで判定する。
   const cprofHBase = MODE === 'real' ? getCountryBuildingProfile(currentCountryCode) : null;
   const densityGrid = MODE === 'real' ? computeLocalDensityGrid(data.elements) : null;
+  // 周囲に田畑があるエリアは被覆率に関わらず高層化しない(理由・格子サイズは
+  // part2.js computeFarmlandCells参照。伊勢原の駅前が高層化されすぎる不具合の対策)。
+  const farmlandCells = MODE === 'real' ? computeFarmlandCells(data.elements) : null;
   data.elements.forEach(el => {
     if (el.type !== 'way') return;
     const tags = el.tags || {};
@@ -540,7 +558,7 @@ async function loadOSM(preFetchedData) {
       // building:levelsタグが無い場合の階数フォールバック。国プロファイルのlevelsRangeが
       // あればそれを使う(香港は塔状に高め、アメリカ郊外は低めに寄る)。無ければ従来通り1〜3階。
       // cprofH はこの建物の重心が属するセルの被覆率で1棟ごとに決める(バッチ全体の平均ではない)。
-      const cprofH = localDensityProfileAt(cprofHBase, densityGrid, cx, cz);
+      const cprofH = localDensityProfileAt(cprofHBase, densityGrid, cx, cz, farmlandCells);
       const [lvMin, lvMax] = (cprofH && cprofH.levelsRange) || [1, 3];
       const levels = parseInt(tags['building:levels']) || (lvMin + Math.floor(Math.random() * (lvMax - lvMin + 1)));
       let h = resolvedH != null ? resolvedH : Math.max(levels * 3, 3) + Math.random()*2;
