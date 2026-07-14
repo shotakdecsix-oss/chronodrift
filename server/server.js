@@ -39,9 +39,20 @@ try {
   DEPLOY_COMMIT_TIME = execSync('git log -1 --format=%cI', { cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
 } catch (_) { /* gitが無い/取得失敗時はプロセス起動時刻だけを使う */ }
 
+// Overpassはメインの overpass-api.de が混雑/不調になることがあるため、
+// 独立運営の別ミラーへのフォールバックを用意する(2026-07: 香港・上海等で
+// overpass-api.de がプロキシ経由・ブラウザ直接の両方でタイムアウトする事象を確認)。
+// 東京(伊勢原)がテストで問題なく見えていたのは、直近の試行が既にディスクキャッシュに
+// 乗っていて上流に問い合わせずに済んでいただけの可能性が高く、地形データが国によって
+// 恒久的に取得不可というわけではない。
+const OVERPASS_MIRRORS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+];
+
 const APIS = {
   '/api/elevation': { upstream: 'https://api.opentopodata.org', dir: 'elevation' },
-  '/api/overpass':  { upstream: 'https://overpass-api.de/api/interpreter', dir: 'overpass' },
+  '/api/overpass':  { upstream: OVERPASS_MIRRORS[0], dir: 'overpass', mirrors: OVERPASS_MIRRORS },
   '/api/nominatim': { upstream: 'https://nominatim.openstreetmap.org/reverse', dir: 'nominatim' }, // 現在地の住所表示(逆ジオコーディング)用
 };
 
@@ -150,27 +161,48 @@ function httpsGetOnce(urlStr) {
   });
 }
 
-async function fetchUpstream(upstreamUrl) {
+async function fetchUpstream(upstreamUrl, opts) {
+  const maxAttempts = (opts && opts.maxAttempts) || MAX_ATTEMPTS;
   const host = new URL(upstreamUrl).host;
   let lastErr = null;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const res = await scheduleUpstream(host, () => httpsGetOnce(upstreamUrl));
       if (res.status === 200) return res;
       lastErr = new Error('upstream HTTP ' + res.status);
       if (res.status === 429 || res.status >= 500) {
-        log(`  retry ${attempt}/${MAX_ATTEMPTS} (HTTP ${res.status}) ${host}`);
+        log(`  retry ${attempt}/${maxAttempts} (HTTP ${res.status}) ${host}`);
         await sleep(1500 * attempt);
         continue;
       }
       return res; // 4xx 等はそのまま返す
     } catch (e) {
       lastErr = e;
-      log(`  retry ${attempt}/${MAX_ATTEMPTS} (${e.message}) ${host}`);
+      log(`  retry ${attempt}/${maxAttempts} (${e.message}) ${host}`);
       await sleep(1500 * attempt);
     }
   }
   throw lastErr;
+}
+
+// 複数ミラー対応版: 先頭(本命)ミラーから順に試し、どれかが200を返したら採用。
+// 全滅した場合は最後に得られたレスポンス(あれば)かエラーを返す。
+// 各ミラーは独立ホストなので scheduleUpstream のレート制限キューも別々になり、
+// 一方のホストが混雑/拒否していてももう一方には影響しない。
+async function fetchUpstreamMulti(upstreamUrls) {
+  let lastRes = null, lastErr = null;
+  for (const url of upstreamUrls) {
+    try {
+      const res = await fetchUpstream(url, { maxAttempts: 2 });
+      if (res.status === 200) return res;
+      lastRes = res;
+    } catch (e) {
+      lastErr = e;
+      log(`  mirror failed (${e.message}), trying next if available`);
+    }
+  }
+  if (lastRes) return lastRes;
+  throw lastErr || new Error('all overpass mirrors failed');
 }
 
 /* ---------- プロキシ本体 (キャッシュ + 同時リクエスト合流) ---------- */
@@ -196,7 +228,9 @@ async function handleApi(req, res, apiKey) {
   if (!p) {
     p = (async () => {
       const t0 = Date.now();
-      const up = await fetchUpstream(upstreamUrl);
+      const up = api.mirrors
+        ? await fetchUpstreamMulti(api.mirrors.map((m) => m + rest))
+        : await fetchUpstream(upstreamUrl);
       log(`MISS ${apiKey} -> upstream ${up.status} (${Date.now() - t0}ms)`);
       if (up.status === 200) {
         const bodyStr = up.body.toString('utf8');
