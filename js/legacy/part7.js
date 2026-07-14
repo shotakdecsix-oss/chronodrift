@@ -76,7 +76,14 @@ function wrapLon(lon) { return ((lon + 180) % 360 + 360) % 360 - 180; }
 // 指定の緯度経度へジャンプ(地図タップ・地名検索・現在地ボタンの共通処理)
 function jumpToLatLon(toLat, toLon) {
   toLon = wrapLon(toLon);
-  const pos = latLonToXZ(toLat, toLon);
+  let pos = latLonToXZ(toLat, toLon);
+  // 遠景(FAR)グリッドを作り直すほど遠くへ飛ぶ場合は「別の地域への移動」とみなし、原点そのものを
+  // ジャンプ先へ付け替える(recenterOrigin、part4.js)。これでプレイヤーのローカル座標が原点から
+  // 巨大な数値になることがなくなり、地面・道路・樹木のちらつき(float32精度切れ)を防げる。
+  // 近距離のジャンプ(地図タップで近所へ移動等)では原点を動かさない(既存挙動を維持)。
+  const farJump = !wideElev ||
+    Math.abs(pos.x - wideCX) > WIDE_W * 0.32 || Math.abs(pos.z - wideCZ) > WIDE_D * 0.32;
+  if (farJump) { recenterOrigin(toLat, toLon); pos = latLonToXZ(toLat, toLon); }
   player.position.set(pos.x, 0, pos.z); // yはanimateの床追従が合わせる
   if (playerMarker) { playerMarker.setLatLng([toLat, toLon]); playerMarker.openPopup(); }
   if (leafletMap) leafletMap.setView([toLat, toLon], leafletMap.getZoom());
@@ -86,8 +93,7 @@ function jumpToLatLon(toLat, toLon) {
   // ジャンプは明示的な再挑戦のきっかけとして扱う(標高APIの日次上限等、原因が場所と無関係な
   // 場合は結局また失敗するだけだが、少なくとも別の場所では素直に再試行させる)。
   _wideGiveUp = false; _wideFailCount = 0;
-  if (!wideElev || Math.abs(pos.x - wideCX) > WIDE_W * 0.32 || Math.abs(pos.z - wideCZ) > WIDE_D * 0.32)
-    loadWideTerrain(pos.x, pos.z);
+  if (farJump) loadWideTerrain(pos.x, pos.z);
   // マップジャンプは高確率でNEARグリッドの範囲外になるので、こちらは毎回無条件で取り直す
   // (範囲が狭く数秒〜十秒程度で終わるため、ジャンプ直後に足元の高解像度地形をすぐ用意できる)
   loadNearTerrain(pos.x, pos.z);

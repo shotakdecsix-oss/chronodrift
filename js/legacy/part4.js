@@ -308,9 +308,25 @@ const OSM_BOUNDS = {
   maxLat: SPAWN_LAT + 0.02, maxLon: SPAWN_LON + 0.015
 };
 const SCALE = 111000; // 1 game unit = 1 meter
-const MID_LAT = (OSM_BOUNDS.minLat + OSM_BOUNDS.maxLat) / 2;
-const MID_LON = (OSM_BOUNDS.minLon + OSM_BOUNDS.maxLon) / 2;
-const COS_LAT = Math.cos(OSM_BOUNDS.minLat * Math.PI / 180);
+// 【重要】原点(MID_LAT/MID_LON)は元々「初期スポーン=伊勢原」に固定のconstだった。
+// 海外(米国など)へジャンプするとプレイヤーのワールド座標が原点から数千〜数万km相当の
+// 巨大な数値になり、three.jsがGPUへ座標・行列をfloat32(有効数字約7桁)でアップロードする際に
+// 精度を使い果たして地面・道路・樹木がちらつく(位置ジッター/z-fighting)不具合が起きていた。
+// そこで原点を`let`にして可変にし、遠方へジャンプする時だけジャンプ先へ原点を付け替える
+// (recenterOrigin、part7.jsのjumpToLatLonから呼ぶ)。ローカル座標を常に原点付近の
+// 小さな値に保つ「浮動原点(floating origin)」方式。既存の建物・地形は付け替え前の
+// 原点基準のまま(数値としては正しい)残るが、遠方へ飛ぶ時点でどのみち体感上は
+// 二度と戻らない距離になるため実害はない(既存のチャンク破棄・再生成の仕組みと整合的)。
+let MID_LAT = (OSM_BOUNDS.minLat + OSM_BOUNDS.maxLat) / 2;
+let MID_LON = (OSM_BOUNDS.minLon + OSM_BOUNDS.maxLon) / 2;
+let COS_LAT = Math.cos(OSM_BOUNDS.minLat * Math.PI / 180);
+
+// 原点をlat,lonへ付け替える(浮動原点の再設定)。COS_LATも現在地の緯度に合わせて更新するため、
+// 経度→メートル換算の精度も(伊勢原基準の固定値だった頃に比べ)副次的に改善する。
+function recenterOrigin(lat, lon) {
+  MID_LAT = lat; MID_LON = lon;
+  COS_LAT = Math.cos(lat * Math.PI / 180);
+}
 
 function latLonToXZ(lat, lon) {
   const x = (lon - MID_LON) * SCALE * COS_LAT;
