@@ -389,7 +389,8 @@ const REGION_PROFILES = {
     roofPalette: [0x707880, 0x606870, 0x585f68],
     roofShapeWeights: { flat: 0.85, hip: 0.1, gable: 0.05 },
     roofMaterialBias: null, // コンクリ陸屋根のまま(瓦にしない)
-    levelsRange: [4, 18],
+    levelsRange: [4, 18],   // タグ欠損時のフォールバック階数
+    minLevels: 6,           // 実測タグがあっても最低6階は確保(高密度地区が低層だらけに見えないように)
     flatRoofHeightThreshold: 7,
     lotPaddingRange: [0, 0.3],
     lotSurfaceColor: 0x9098a0, // 舗装(余白自体がほぼ無いので目立たない)

@@ -70,6 +70,10 @@ function jumpToLatLon(toLat, toLon) {
   if (leafletMap) leafletMap.setView([toLat, toLon], leafletMap.getZoom());
   // 遠景(FAR)グリッドの外へ飛んだら、その場を中心に地形を取り直す(富士山などでも地形・標高が出る)。
   // wideElevが未取得(初回ロードが失敗していた等)の場合もここで取得のきっかけになるようにする。
+  // 【重要】以前の場所でcheckWideTerrainが諦めていても(_wideGiveUp)、新しい場所への
+  // ジャンプは明示的な再挑戦のきっかけとして扱う(標高APIの日次上限等、原因が場所と無関係な
+  // 場合は結局また失敗するだけだが、少なくとも別の場所では素直に再試行させる)。
+  _wideGiveUp = false; _wideFailCount = 0;
   if (!wideElev || Math.abs(pos.x - wideCX) > WIDE_W * 0.32 || Math.abs(pos.z - wideCZ) > WIDE_D * 0.32)
     loadWideTerrain(pos.x, pos.z);
   // マップジャンプは高確率でNEARグリッドの範囲外になるので、こちらは毎回無条件で取り直す

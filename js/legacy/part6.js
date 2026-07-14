@@ -115,19 +115,33 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
   }
   wideElev = arr; wideCX = centerX; wideCZ = centerZ; // データと中心を同時に更新
   wideLoading = false;
-  _wideFailCount = 0; // 成功したのでリセット
+  _wideFailCount = 0; _wideGiveUp = false; // 成功したのでリセット
   updateFarMesh(true); // 遠景メッシュを新しい実地形で再構築
   if (reCenter) showToast('🏔 地形反映完了', { duration: 2500 });
 }
 
 // 遠景(FAR)取得に失敗するたびに呼ぶ。checkNearTerrainのonNearTerrainFailと同じ考え方で、
 // 失敗するたび再試行の間隔を伸ばす(上流を叩き続けない)。5回目以降は10秒間隔で回復を待つ。
+// 【重要】以前はここに「諦め」が無く、opentopodataの1日1000コール上限(公開APIの
+// ハード上限。本ファイル冒頭のコメント参照)に達すると、checkWideTerrainが10秒おきに
+// 永久に再試行し続け、そのたびloadWideTerrainが「地形を取得中...」のsticky(自動で
+// 消えない)トーストを出し直すため、実際には失敗を繰り返しているだけなのに画面には
+// ずっと「地形を取得中...」が張り付いて見える(=「読み込みが進まない」ように見える)
+// 不具合になっていた。NEARのonNearTerrainFailと同じく、一定回数失敗したら諦めて
+// 自動再試行を止め、その旨を一度だけ明示するトーストに切り替える(遠景は既にgetWideTerrainYが
+// wideElev未取得時0m扱いにフォールバックするので、諦めても遠景が平坦になるだけで実害はない)。
 let _wideFailCount = 0;
+let _wideGiveUp = false;
 function onWideTerrainFail() {
   _wideFailCount++;
   if (_wideFailCount === 3) { // 数回続けて失敗した時だけ知らせる(単発の通信エラーではうるさくしない)
     console.warn('[遠景地形] 取得に失敗しています(' + _wideFailCount + '回目)。取得できるまで自動で再試行します。');
     showToast('⚠️ 遠景の地形取得に失敗しています(自動で再試行中)', { duration: 3000 });
+  }
+  if (_wideFailCount >= 6 && !_wideGiveUp) {
+    _wideGiveUp = true;
+    console.warn('[遠景地形] 取得を諦めました。平坦な遠景のまま続行します(標高APIの日次上限到達等が原因の可能性)。');
+    showToast('⚠️ 遠景データを取得できません(平坦な遠景のまま続行します)', { duration: 4000 });
   }
 }
 
@@ -140,7 +154,7 @@ function onWideTerrainFail() {
 // それ自体を取得トリガーにする」形にし、失敗しても一定間隔で自動的に再試行し続ける。
 let _wideCheckFrame = 0;
 function checkWideTerrain() {
-  if (wideLoading) return;
+  if (wideLoading || _wideGiveUp) return; // 諦めた後は明示的なジャンプ(jumpToLatLon)だけが再挑戦のきっかけ
   const interval = 120 * Math.min(5, 1 + _wideFailCount); // 失敗するたび間隔を伸ばす(最大10秒)
   if ((++_wideCheckFrame) % interval !== 0) return;
   if (!wideElev ||
@@ -446,6 +460,13 @@ async function loadOSM(preFetchedData) {
       const levels = parseInt(tags['building:levels']) || (lvMin + Math.floor(Math.random() * (lvMax - lvMin + 1)));
       let h = resolvedH != null ? resolvedH : Math.max(levels * 3, 3) + Math.random()*2;
       h = applyLandmarkMinHeight(style, h); // 学校・病院・役場・神社仏閣は最低限の高さを確保
+      // 国プロファイルのminLevels: 実測タグ由来の高さであっても最低限これだけは確保する
+      // (香港のような高密度地区で、たまたま低層タグの建物が混ざって見た目が崩れないように)。
+      // 神社仏閣・教会は専用の低めの様式美があるため対象外にする。
+      const _landmarkType = style && (style.type === 'shrine' || style.type === 'temple' || style.type === 'church');
+      if (cprofH && cprofH.minLevels && !_landmarkType) {
+        h = Math.max(h, cprofH.minLevels * 3);
+      }
       style = classifyResidential(style, w, d, h);
       let fw = w, fd = d, fh = h;
       ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ
