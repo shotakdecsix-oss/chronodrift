@@ -81,8 +81,16 @@ function processStationNodes(elements) {
     }
 })();
 
-function processTileData(data) {
+function processTileData(data, tileCount) {
   if (!data || !data.elements) return;
+  // このバッチ(tileCount枚のタイル分、1枚=OSM_TILE_M四方)の実測建物密度を先に見て、
+  // 国プロファイルより高層寄りに上書きするか一度だけ決める(part6.js PASS-2と同じ考え方。
+  // 「USも高密度地帯は高層ビルにして」への対応 — 国単位の固定ルールだけでは同じ国の中の
+  // 都心部と郊外の違いを表現できないため、実測の建物密度で判定する)。
+  const cprofH8Base = MODE === 'real' ? getCountryBuildingProfile(currentCountryCode) : null;
+  const cprofH8Batch = MODE === 'real'
+    ? applyLocalDensityOverride(cprofH8Base, estimateFootprintAreaM2(data.elements), (tileCount || 1) * OSM_TILE_M * OSM_TILE_M)
+    : null;
   // 駅ランドマーク(初期範囲の外にある駅も、タイルが届いた時点でここで拾う)
   processStationNodes(data.elements);
   // Roads
@@ -161,7 +169,7 @@ function processTileData(data) {
     // 呼ばれる経路で、part6.js側だけに国プロファイルを配線していたため、ジャンプ直後の
     // 初期範囲を過ぎて歩き回った先の建物には反映されていなかった(香港で歩き続けると
     // 低層タグの建物がまた出る不具合の原因)。
-    const cprofH8 = MODE === 'real' ? getCountryBuildingProfile(currentCountryCode) : null;
+    const cprofH8 = cprofH8Batch;
     const [lvMin8, lvMax8] = (cprofH8 && cprofH8.levelsRange) || [1, 3];
     const levels = parseInt(tags['building:levels']) || (lvMin8 + Math.floor(Math.random() * (lvMax8 - lvMin8 + 1)));
     let h = resolvedH != null ? resolvedH : Math.max(levels*3,3)+Math.random()*2;
@@ -271,8 +279,8 @@ async function fetchOSMTileBatch() {
     const data = await res.json();
     if (!data || !data.elements) throw new Error('no elements');
     // 複数タイル分の要素が1つの配列で混ざって届くが、seenOSMWaysでway ID重複排除される
-    // ので、1タイルの時と同じ processTileData にそのまま渡してよい。
-    processTileData(data);
+    // ので、1タイルの時と同じ processTileData にそのまま渡してよい。密度計算用にタイル枚数も渡す。
+    processTileData(data, batch.length);
     keys.forEach(k => {
       osmTileFailCount.delete(k);
       loadedOSMTiles.add(k); // このタイルの道路が確定 → 建物生成待ちのチャンクを解放してよい

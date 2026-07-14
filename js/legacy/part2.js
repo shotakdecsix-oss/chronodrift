@@ -455,6 +455,38 @@ function getCountryBuildingProfile(cc) {
   if (!cc) return null;
   return COUNTRY_BUILDING_PROFILES[cc] || REGION_PROFILES[REGION_FALLBACK_BY_COUNTRY[cc]] || null;
 }
+// 実測density(このバッチの建物フットプリント被覆率)が高いエリアは、国プロファイルに
+// 関わらずdenseHighRise相当の高層扱いに上書きする。国単位の固定ルールだけだと、同じ国の
+// 中でも都心部(例: マンハッタン)と郊外の違いを表現できない(「USも高密度地帯は高層ビルにして」)。
+// 棟数(buildings/km²)ではなく敷地被覆率(建物面積の合計/エリア面積)を見るのは、
+// マンハッタンのように「棟数は多くないが1棟が巨大」な高層街区でも正しく検出するため
+// (棟数基準だと、狭い区画がぎっしり並ぶ香港型の密集地しか拾えない)。
+// 閾値0.22は、郊外の戸建て(被覆率5〜10%程度)と都心の高層街区(20〜40%超)の中間より
+// 都心寄りに設定し、普通の住宅密集地までは高層化しないようにしている。
+const DENSE_URBAN_COVERAGE_RATIO = 0.22;
+function applyLocalDensityOverride(baseProfile, footprintAreaM2, areaM2) {
+  if (areaM2 > 0 && (footprintAreaM2 / areaM2) >= DENSE_URBAN_COVERAGE_RATIO) {
+    return REGION_PROFILES.denseHighRise;
+  }
+  return baseProfile;
+}
+// data.elements内のbuilding要素について、各棟のバウンディングボックス面積(w×d近似、
+// PASS-2/part8.js本体の建物サイズ計算と同じ近似)を合計する。applyLocalDensityOverride
+// の被覆率計算用の軽量フットプリント推定(実際の生成より前に、密度判定のためだけに使う)。
+function estimateFootprintAreaM2(elements) {
+  let total = 0;
+  for (const el of elements) {
+    if (el.type !== 'way' || !el.tags || !el.tags.building || !el.geometry || el.geometry.length < 4) continue;
+    const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
+    let cx = 0, cz = 0;
+    pts.forEach(p => { cx += p.x; cz += p.z; });
+    cx /= pts.length; cz /= pts.length;
+    let maxDx = 0, maxDz = 0;
+    pts.forEach(p => { maxDx = Math.max(maxDx, Math.abs(p.x - cx)); maxDz = Math.max(maxDz, Math.abs(p.z - cz)); });
+    total += Math.max(maxDx * 2, 2) * Math.max(maxDz * 2, 2);
+  }
+  return total;
+}
 // roofShapeWeights({flat,gable,hip,shed}の一部だけでも可)から1つ重み付き抽選する。
 // タグ('roof:shape')がある建物には使わない — あくまでタグ欠損時のフォールバック専用。
 function pickWeighted(weights) {

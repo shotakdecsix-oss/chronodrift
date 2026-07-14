@@ -454,6 +454,13 @@ async function loadOSM(preFetchedData) {
   });
 
   // === PASS 2: Buildings — skip any that overlap a road ===
+  // このバッチ(=OSM_BOUNDS全体、初期ロードは常に伊勢原)の実測建物密度を先に見て、
+  // 国プロファイルより高層寄りに上書きするか一度だけ決める(1棟ごとに判定すると
+  // 同じエリア内で階数がバラバラになってしまうため)。
+  const cprofHBase = MODE === 'real' ? getCountryBuildingProfile(currentCountryCode) : null;
+  const cprofHBatch = MODE === 'real'
+    ? applyLocalDensityOverride(cprofHBase, estimateFootprintAreaM2(data.elements), WORLD_W * WORLD_D)
+    : null;
   data.elements.forEach(el => {
     if (el.type !== 'way') return;
     const tags = el.tags || {};
@@ -492,7 +499,8 @@ async function loadOSM(preFetchedData) {
       const resolvedH = resolveBuildingHeight(tags);
       // building:levelsタグが無い場合の階数フォールバック。国プロファイルのlevelsRangeが
       // あればそれを使う(香港は塔状に高め、アメリカ郊外は低めに寄る)。無ければ従来通り1〜3階。
-      const cprofH = MODE === 'real' ? getCountryBuildingProfile(currentCountryCode) : null;
+      // cprofHBatch はこのバッチ全体で1度だけ決めた値(国プロファイル or 実測密度による上書き)。
+      const cprofH = cprofHBatch;
       const [lvMin, lvMax] = (cprofH && cprofH.levelsRange) || [1, 3];
       const levels = parseInt(tags['building:levels']) || (lvMin + Math.floor(Math.random() * (lvMax - lvMin + 1)));
       let h = resolvedH != null ? resolvedH : Math.max(levels * 3, 3) + Math.random()*2;
