@@ -370,6 +370,36 @@ function detailMesh(geo, mat, x, y, z, sx, sy, sz, ry) {
 const detailOK = () => minimapBuildings.length < 850;
 const ROOF_COLS = [0x555a66, 0x7a4a3a, 0x4a5a3a, 0x69463c, 0x3f4c59, 0x8a4038]; // 住宅屋根の色バリエーション
 
+// ======= building=タグを持つrelation(マルチポリゴン)の取り込み(2026-07-15) =======
+// 【経緯】これまでOverpassクエリは一貫して way["building"] しか要求しておらず、
+// relation["building"](マルチポリゴン。複合施設や、輪郭が複雑/中庭を持つビル等でよく
+// 使われる書き方で、大きめのマンション・商業ビルほどこの形式で描かれていることが珍しくない)
+// は取得すらしていなかった。つまり地図上には確かに大きな建物の枠が見えているのに、
+// 生成システムにはそのデータが一切渡っていなかった(「ジャンプ用マップには大きな
+// マンションの枠があるのに、生成では戸建て住宅の集まりになっている」不具合の実体)。
+// その空白地に、周辺の道路密度から「住宅街だろう」と推測する手続き生成の戸建て充填
+// (generateChunk)が代わりに埋めてしまい、あたかも「マンションのはずが戸建ての集合」に
+// 見えていた。relation自体を新たに描画対象にするのではなく、outerメンバー(通常1つ)の
+// 座標列を、既存のway処理と同じ形(type:'way', tags, geometry)に変換してdata.elementsへ
+// 合成することで、既存のbuilding処理ループにそのまま乗せる(新しい描画パスを増やさない)。
+// innerメンバー(中庭等の穴)は現状のバウンディングボックス近似ではどのみち反映できないため無視する。
+function synthesizeBuildingRelationWays(elements, seenRelations) {
+  const synth = [];
+  for (const el of elements) {
+    if (el.type !== 'relation' || !el.tags || !el.tags.building || !el.members) continue;
+    if (seenRelations) {
+      if (seenRelations.has(el.id)) continue;
+      seenRelations.add(el.id);
+    }
+    for (const m of el.members) {
+      if (m.role === 'outer' && m.geometry && m.geometry.length >= 4) {
+        synth.push({ type: 'way', id: 'rel' + el.id + '_' + synth.length, tags: el.tags, geometry: m.geometry });
+      }
+    }
+  }
+  return synth;
+}
+
 // ======= 国別の建物フォールバック・プロファイル(現実モード限定) =======
 // OSMの実測タグ(building:colour/roof:colour/roof:shape/roof:material/building:levels等)は
 // 常に最優先。ここは「タグが無い場所だけ」効く既定値を国/様式ごとに分布(範囲・重み)で

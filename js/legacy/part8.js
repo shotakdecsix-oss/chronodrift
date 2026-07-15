@@ -39,6 +39,7 @@ const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで
 // (ミニマップには道路が残るのに3Dでは見えない、という報告と厳密に一致する)
 let initialWorldLoaded = false;
 const seenOSMWays = new Set();      // 処理済みway ID(タイル境界をまたぐ要素の二重生成防止)
+const seenOSMRelations = new Set(); // 処理済みbuilding relation ID(下記synthesizeBuildingRelationWays参照)
 const pendingBuildings = [];        // タイル取得分の建物はフレーム分割して生成
 let pendingBuildingIdx = 0;
 
@@ -60,26 +61,10 @@ function processStationNodes(elements) {
   });
 }
 
-// Mark tiles that the initial loadOSM already covered (OSM_BOUNDS rectangle)
-// タイルが初期範囲に「完全に」含まれる場合のみ取得済み扱いにする。
-// 以前は境界に部分的にかかるタイルも取得済み扱いになり、範囲外部分が
-// 永久に歯抜けになっていた(境界沿いで道路・建物が途切れる主因)。
-// 重複ロードは seenOSMWays のway ID重複排除で防ぐ。
-(function markInitialTiles() {
-  const pt1 = latLonToXZ(OSM_BOUNDS.minLat, OSM_BOUNDS.minLon);
-  const pt2 = latLonToXZ(OSM_BOUNDS.maxLat, OSM_BOUNDS.maxLon);
-  const x0 = Math.min(pt1.x, pt2.x), x1 = Math.max(pt1.x, pt2.x);
-  const z0 = Math.min(pt1.z, pt2.z), z1 = Math.max(pt1.z, pt2.z);
-  for (let tx = Math.floor(x0/OSM_TILE_M); tx <= Math.floor(x1/OSM_TILE_M); tx++)
-    for (let tz = Math.floor(z0/OSM_TILE_M); tz <= Math.floor(z1/OSM_TILE_M); tz++) {
-      if (tx*OSM_TILE_M >= x0 && (tx+1)*OSM_TILE_M <= x1 &&
-          tz*OSM_TILE_M >= z0 && (tz+1)*OSM_TILE_M <= z1) {
-        const k = `${tx},${tz}`;
-        fetchedOSMTiles.add(k);
-        loadedOSMTiles.add(k); // 初期loadOSM()で道路も既に確定済み
-      }
-    }
-})();
+// 【重要】以前はここに markInitialTiles() があり、伊勢原本体(OSM_BOUNDS)のタイルを
+// 起動時点で「取得済み」としてマークしていた(loadOSM()が同期的に道路・建物を組み立てて
+// いたため)。loadOSM()をタイル取得への一本化に伴い削除 — 伊勢原も他地域と全く同じく、
+// checkOSMTiles()がプレイヤー周辺のタイルを未取得として検出し、通常のフローで取得する。
 
 function processTileData(data, tileCount) {
   if (!data || !data.elements) return;
@@ -91,8 +76,12 @@ function processTileData(data, tileCount) {
   // 含む6タイル分の平均で薄まり、実際は密集した街区(マンハッタンの一角等)でも高層化が
   // 発動しない不具合があった。DENSITY_CELL_M格子で建物1棟ごとに判定する
   // (経緯・格子サイズの選定理由はpart2.js computeLocalDensityGrid参照)。
+  // building=タグを持つrelation(マルチポリゴン)をway相当の疑似要素に変換し、既存のbuilding
+  // 処理・密度計算に合流させる(part2.js synthesizeBuildingRelationWays参照。地図上に見える
+  // 大きな建物枠が生成システムに一切渡っていなかった不具合の対策)。
+  const buildingElements8 = data.elements.concat(synthesizeBuildingRelationWays(data.elements, seenOSMRelations));
   const cprofH8Base = MODE === 'real' ? getCountryBuildingProfile(currentCountryCode) : null;
-  const densityGrid8 = MODE === 'real' ? computeLocalDensityGrid(data.elements) : null;
+  const densityGrid8 = MODE === 'real' ? computeLocalDensityGrid(buildingElements8) : null;
   // 周囲に田畑があるエリアは被覆率に関わらず高層化しない(part2.js computeFarmlandCells参照)。
   const farmlandCells8 = MODE === 'real' ? computeFarmlandCells(data.elements) : null;
   // 至近距離に駅が複数あるエリア(ターミナル駅)は強制的に高層ビル区域にする。
@@ -148,7 +137,7 @@ function processTileData(data, tileCount) {
   // Buildings — 直接生成せずキューに積み、フレーム分割して生成する
   // (以前は1タイル分の建物を1フレームで同期生成し、大きなカクつきの原因だった)
   const _buildingStart8 = pendingBuildings.length; // このバッチで新規投入する分の開始位置(近傍優先ソート用)
-  data.elements.forEach(el => {
+  buildingElements8.forEach(el => {
     if (el.type !== 'way' || !el.geometry || el.geometry.length < 4) return;
     if (seenOSMWays.has(el.id)) return;
     const tags = el.tags || {};
@@ -233,6 +222,10 @@ function processOSMTileQueue() {
 const OSM_TILE_CLAUSES = [
   'way["highway"]',
   'way["building"]',
+  // マルチポリゴンで描かれた建物(building=タグがrelation側に付く。複合施設や輪郭の
+  // 複雑な大型ビルでよく使われる)。以前はここが無く、地図上に見える大きな建物枠が
+  // 生成システムに一切渡っていなかった(part2.js synthesizeBuildingRelationWays参照)。
+  'relation["building"]',
   'way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"]',
   'way["leisure"~"park|garden|playground"]',
   'way["natural"~"water|wood"]',
@@ -301,12 +294,12 @@ async function fetchOSMTileBatch() {
       osmTileFailCount.delete(k);
       loadedOSMTiles.add(k); // このタイルの道路が確定 → 建物生成待ちのチャンクを解放してよい
     });
-    // 遠方ジャンプ後、伊勢原の初期ワールド構築をスキップした再開(part6.js loadOSM参照)では
-    // 「目的地の地図を読み込み中...」のstickyトーストを出したまま。プレイヤーの現在地タイルが
-    // 届いた時点で、これを完了メッセージに差し替える(でなければ静的プレースホルダのまま残る)。
+    // loadOSM()(part6.js)は起動直後に「🗺 マップを読み込み中...」のstickyトーストを
+    // 出したまま抜ける(道路・建物の実際の生成はここが担当するため)。プレイヤーの現在地
+    // タイルが届いた時点で、これを完了メッセージに差し替える。
     if (awaitingDestinationLoad && keys.includes(ptKey)) {
       awaitingDestinationLoad = false;
-      showToast('✨ 目的地の地図を表示しました', { duration: 3000 });
+      showToast('✨ マップを表示しました', { duration: 3000 });
     }
   } catch(e) {
     // 以前は3回失敗すると完全に諦めて二度と再試行しなかったため、Overpassが一時的に
@@ -321,10 +314,10 @@ async function fetchOSMTileBatch() {
       fetchedOSMTiles.delete(k); // 常に再試行対象に戻す(checkOSMTiles が再度キューに積む)
     });
     // 現在地タイルが4回失敗して「諦めて先に進む」扱いになった場合も、sticky状態のトーストを
-    // 出しっぱなしにしない(Overpass不調が長引くと「目的地の地図を読み込み中...」が永久に残るため)。
+    // 出しっぱなしにしない(Overpass不調が長引くと「🗺 マップを読み込み中...」が永久に残るため)。
     if (awaitingDestinationLoad && loadedOSMTiles.has(ptKey)) {
       awaitingDestinationLoad = false;
-      showToast('⚠️ 目的地の地図取得が一部失敗しました(背景で再試行を続けます)', { duration: 4000 });
+      showToast('⚠️ 地図取得が一部失敗しました(背景で再試行を続けます)', { duration: 4000 });
     }
   }
   // 失敗するたびに待ち時間を延ばす(最大30秒)。連続失敗中の無駄な連打を防ぎつつ、

@@ -343,59 +343,21 @@ function setupSeaSlider() {
     box.addEventListener(ev, e => e.stopPropagation(), { passive: false }));
 }
 
-// OSM(Overpass)データの取得だけを行う。地形(標高)データへの依存が無いので、
-// loadNearTerrain() と並行に開始できる(以前は地形取得の後に
-// 直列で呼んでおり、地形取得+OSM取得の待ち時間がそのまま合算されていた)。
-async function fetchOSMData() {
-  // 伊勢原本体エリア(OSM_BOUNDS)は起動のたびに全く同じ範囲・同じクエリになるため、
-  // 一度取得した結果を静的JSONとして同梱してある(data/isehara-osm-seed.json)。
-  // まずこれを同一オリジンから取りに行く — Overpass本体の混雑やRender等の共有IP制限の
-  // 影響を受けず、静的ファイル配信なので通常数百ms〜1秒程度で完了する。これが
-  // 「起動時に道路・建物の読み込みが遅い」の主因(Overpassへの40〜45秒クエリ)を消す。
-  // ファイルが無い/壊れている場合のみ、従来どおりOverpassへ直接問い合わせる。
-  try {
-    const seedRes = await fetch('/data/isehara-osm-seed.json');
-    if (seedRes.ok) {
-      const seedJson = await seedRes.json();
-      if (seedJson && Array.isArray(seedJson.elements) && seedJson.elements.length > 0) return seedJson;
-    }
-  } catch (e) { /* 静的ファイル取得失敗時は下のOverpass直接取得にフォールバック */ }
-
-  const bb = `${OSM_BOUNDS.minLat},${OSM_BOUNDS.minLon},${OSM_BOUNDS.maxLat},${OSM_BOUNDS.maxLon}`;
-  const query = `[out:json][timeout:40];(way["highway"](${bb});way["building"](${bb});way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"](${bb});way["leisure"~"park|garden|playground"](${bb});way["natural"~"water|wood"](${bb});way["waterway"~"river|stream|canal|riverbank"](${bb});relation["natural"="water"](${bb});relation["waterway"="riverbank"](${bb});way["railway"="rail"](${bb});node["railway"="station"](${bb});node["railway"="halt"](${bb});node["public_transport"="station"](${bb}););out geom;`;
-  const url = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
-  // 一度の失敗(429やタイムアウト)ですぐ単純格子状のフォールバックマップに落とすと、Overpassが
-  // 一時的に混雑していただけでも見た目が大きく崩れてしまう。最大3回、間隔を空けて再試行する。
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      showToast(attempt === 1
-        ? '🗺 伊勢原マップ取得中... (最大45秒)'
-        : `🗺 伊勢原マップ取得再試行中... (${attempt}/3)`, { sticky: true });
-      // クエリ自体のOverpass側タイムアウトが40秒なのに、以前クライアント側は32秒で見切っていたため、
-      // サーバーがまだ処理中でも早期に諦めてフォールバックになることがあった。サーバー側より余裕を持たせる。
-      const res = await Promise.race([
-        fetch(url),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 45000))
-      ]);
-      if (!res.ok) throw new Error('HTTP ' + res.status); // 429/5xx等
-      const json = await res.json();
-      if (!json || !json.elements) throw new Error('no elements');
-      return json;
-    } catch (e) {
-      if (attempt < 3) await new Promise(r => setTimeout(r, 4000 * attempt)); // 4s, 8s と間隔を空けて再試行
-    }
-  }
-  return null; // 3回とも失敗した場合のみフォールバックマップを使う
-}
+// OSM(Overpass)データの取得は、常にpart8.jsのタイル取得システム(checkOSMTiles/
+// fetchOSMTileBatch/processTileData)が担当する。以前は伊勢原本体エリア(OSM_BOUNDS)だけ
+// 特別扱いで、静的JSON(data/isehara-osm-seed.json)またはOverpassへの一括クエリにより
+// 起動時に同期的に道路・建物を組み立てていた(こちらは速い代わりに、実際の生成ロジックが
+// タイル取得側と二重管理になり、地域によって挙動が食い違う不具合の温床になっていた)。
+// 全地域共通のタイル取得に一本化し、伊勢原も他の場所と同じ経路で埋まっていくようにする
+// (代わりに、伊勢原の起動直後はOverpassからタイルが届くまで建物が疎な状態になる)。
 
 // モード切替リロード(VISUAL_MODES切替ボタン、part1.js)での再開先が原点から遠い場合、
 // jumpToLatLon(part7.js)の遠距離ジャンプと同じ理由(float32精度によるちらつき対策)で
 // 原点を付け替える。ここはページの再読み込み直後(フレッシュな実行環境)なので、
 // jumpToLatLonのように「保存してリロード」する必要はなく、その場で付け替えるだけでよい。
-// ただし markInitialTiles()(part8.js、このスクリプト読み込み時点で「原点=伊勢原」前提で
-// fetchedOSMTiles/loadedOSMTilesに伊勢原分のタイルを登録済み)は原点付け替え前の登録なので、
-// 付け替えたらその登録もclearしないと、新しい地域なのに「タイル取得済み」と誤判定されて
-// 何も新しく読み込まれない(jumpToLatLonの遠距離ジャンプで実機確認済みの不具合と同じ原因)。
+// fetchedOSMTiles/loadedOSMTilesは旧原点基準のタイル座標系で登録されているため、
+// 付け替えたら必ずclearする(でなければ新しい地域なのに「タイル取得済み」と誤判定されて
+// 何も新しく読み込まれない。jumpToLatLonの遠距離ジャンプで実機確認済みの不具合と同じ原因)。
 function recenterForResumeIfFar(lat, lon) {
   const dist = Math.hypot((lon - MID_LON) * SCALE * COS_LAT, (lat - MID_LAT) * SCALE);
   if (dist > RECENTER_DIST_M) {
@@ -407,279 +369,39 @@ function recenterForResumeIfFar(lat, lon) {
   return false;
 }
 
-// data を省略した場合は自分で fetchOSMData() する(従来どおりの単体呼び出しにも対応)
-async function loadOSM(preFetchedData) {
-  // 【重要】resumeを先に読んでおき、原点を付け替えるほど遠い再開先なら、伊勢原の同梱データ/
-  // Overpassクエリによる初期ワールド構築(道路・水域等は同期でscene追加、建物はキュー投入)を
-  // 丸ごとスキップする。以前はここを必ず一度フルに実行してから原点を付け替えていたため、
-  // 伊勢原の道路・建物が新しい原点(0,0=ジャンプ先)にそのまま重なって表示され続ける不具合が
-  // 実機で確認された(道路は同期追加なので、後から取り除くよりここで作らない方が確実)。
-  // 新しい地域のOSMデータは、この後part8.jsのタイル取得システムが実際の周辺タイルとして
-  // 取得する(伊勢原以外の場所はもともとそちらが担当している)。
+// プレイヤーの初期位置決定(モード切替/遠方ジャンプからの再開 or 通常起動のスポーン地点)と、
+// 国コード(currentCountryCode)の早期取得だけを行う。道路・建物・landuse等の実際の生成は
+// 一切ここでは行わず、initialWorldLoaded=trueにした直後からpart8.jsのタイル取得システムが
+// プレイヤー周辺タイルを取りに行く(伊勢原・東京・NY等、全地域で同じ経路)。
+async function loadOSM() {
   const resume = consumeResumePos();
-  if (resume && recenterForResumeIfFar(resume.lat, resume.lon)) {
-    const rp = latLonToXZ(resume.lat, resume.lon);
-    player.position.set(rp.x, 0, rp.z);
-    if (typeof resume.yaw === 'number') camYaw = resume.yaw;
-    if (typeof resume.rot === 'number') player.rotation.y = resume.rot;
-    initialWorldLoaded = true;
-    // 【重要】国別建物スタイル(currentCountryCode)は通常checkAddressDisplayのスロットル
-    // (初期化後10秒/150m)任せだが、遠方ジャンプ後のこの再開パスはinitialWorldLoaded=true
-    // にした直後からcheckOSMTiles(part8.js)がすぐにタイル取得を始めてしまう。Nominatim
-    // 逆ジオコーディングが約10秒後まで一度も試みられないと、着地直後(=プレイヤーに最初に
-    // 見える範囲)の建物がcurrentCountryCode=nullのまま生成されてしまい、国別プロファイル
-    // (denseHighRise等)が一切効かない状態で焼き込まれて二度と直らない不具合につながる
-    // (実機検証: ニューヨークの都心が低層住宅だらけになる原因の一つ)。part7.js
-    // jumpToLatLonの近距離ジャンプと同じくスロットルを待たず即座に取得を開始し、かつ
-    // ここでは最大1.5秒だけ完了を待つ(ブロッキングは短時間に限定し、Nominatim不調時は
-    // 諦めて先に進む。「🗺 目的地の地図を読み込み中...」表示中の待ち時間に紛れる程度)。
-    // 【重要】ここを通ると伊勢原の初期ワールド構築(→完了時のshowToast)を丸ごとスキップするため、
-    // 起動時の静的プレースホルダ文言(index.html「🗺 伊勢原マップ読み込み中...」)を明示的に
-    // 置き換えないと、実際には目的地のOSMタイル取得(part8.js)が進んでいてもずっと表示され続ける。
-    // (下のawaitより先に出す。トースト表示自体は国コード取得を待つ必要が無いため)
-    showToast('🗺 目的地の地図を読み込み中...', { sticky: true });
-    awaitingDestinationLoad = true;
-    await Promise.race([
-      updateAddressDisplay(),
-      new Promise(res => setTimeout(res, 1500)),
-    ]);
-    return;
-  }
-  const data = preFetchedData !== undefined ? preFetchedData : await fetchOSMData();
-
-  if (!data || !data.elements) {
-    showToast('⚠️ OSM取得失敗 - フォールバックマップ使用');
-    // 【重要】resumeは関数冒頭で既にconsumeResumePos()済み(1回しか読めない)なので、
-    // buildFallbackMap内で再度読もうとしてもnullになってしまう。ここで渡す。
-    buildFallbackMap(resume);
-    return;
-  }
-  showToast(`✅ OSMデータ取得完了 (${data.elements.length} 要素)`);
-
-  const nodeMap = {};
-  data.elements.forEach(el => {
-    if (el.type === 'node') nodeMap[el.id] = { lat: el.lat, lon: el.lon };
-  });
-
-  let buildingCount = 0;
-  let roadCount = 0;
-
-  // === PASS 1: Roads & railways first ===
-  const _roadMeshStart = pendingRoadMeshes.length; // このバッチで新規投入する分の開始位置(近傍優先ソート用)
-  data.elements.forEach(el => {
-    if (el.type !== 'way') return;
-    const tags = el.tags || {};
-
-    if (tags.highway && el.geometry && el.geometry.length >= 2) {
-      const hw = tags.highway;
-      const isImportant = hw==='trunk' || hw==='primary' || hw==='secondary' || hw==='motorway';
-      // 2500だと伊勢原駅周辺など密な市街地で細街路が途中打ち切りになり、その空白地に
-      // (別キャップの)建物だけは生成されてしまうため「建物が道路をふさぐ」ように見えていた。
-      if (!isImportant && roadCount >= 6000) return;
-      const width = hw==='trunk'||hw==='primary' ? 8 : hw==='secondary' ? 6 : hw==='tertiary'||hw==='residential' ? 4 : 2.5;
-      const type = hw==='motorway' ? 'motorway' : hw==='motorway_link' ? 'trunk'
-                 : (hw==='trunk'||hw==='primary'||hw==='secondary'||hw==='tertiary') ? hw : 'road';
-      if (USES_MEIJI_LANDUSE && (type === 'road' || type === 'motorway')) return; // 明治・江戸: 細街路も高速道路もない
-      if (MODE === 'space' && (type === 'road' || type === 'tertiary' || type === 'secondary')) return; // 宇宙: 鉄道・高速道路・国道(幹線)以外の小さな道路は出さない
-      for (let i = 0; i < el.geometry.length-1; i++) {
-        const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
-        const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
-        addRoad(a.x, a.z, b.x, b.z, width, type);
-      }
-      roadCount++;
-    }
-
-    // 明治(1880年代): 伊勢原周辺に鉄道はまだない
-    if (!USES_MEIJI_LANDUSE && tags.railway === 'rail' && el.geometry && el.geometry.length >= 2) {
-      for (let i = 0; i < el.geometry.length-1; i++) {
-        const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
-        const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
-        addRoad(a.x, a.z, b.x, b.z, 4, 'railway');
-      }
-    }
-
-    // 川・水路(青いリボン。isOnRoad判定で川の上への建物生成も防げる)
-    // riverbank は線ではなく面(handleAreaFeature)で処理するため除外
-    if (tags.waterway && tags.waterway !== 'riverbank' && el.geometry && el.geometry.length >= 2) {
-      const ww = waterwayWidth(tags);
-      for (let i = 0; i < el.geometry.length-1; i++) {
-        const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
-        const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
-        addRoad(a.x, a.z, b.x, b.z, ww, 'water');
-      }
-    }
-  });
-  // このバッチで新規に積んだ道路メッシュだけ、プレイヤー位置を中心とした近い順へ並べ替える
-  // (part1.js sortNewEntriesByDistanceToPlayer参照。密集地で足元の道路生成が後回しになり
-  // 「道路の端」に行き当たる不具合の対策)。
-  sortNewEntriesByDistanceToPlayer(pendingRoadMeshes, _roadMeshStart, r => ({ x: (r.x1 + r.x2) / 2, z: (r.z1 + r.z2) / 2 }));
-
-  // === PASS 2: Buildings — skip any that overlap a road ===
-  // このバッチ(=OSM_BOUNDS全体、初期ロードは常に伊勢原)は約12km²ある。以前はこの全体で
-  // 1つの被覆率しか見ておらず、駅前の密集地が平均を押し上げて田畑の建物まで高層化される
-  // 不具合があった(DENSITY_CELL_M格子化の経緯はpart2.js computeLocalDensityGrid参照)。
-  // セルごとの被覆率グリッドを1度だけ作り、建物1棟ごとにその重心が属するセルで判定する。
-  const cprofHBase = MODE === 'real' ? getCountryBuildingProfile(currentCountryCode) : null;
-  const densityGrid = MODE === 'real' ? computeLocalDensityGrid(data.elements) : null;
-  // 周囲に田畑があるエリアは被覆率に関わらず高層化しない(理由・格子サイズは
-  // part2.js computeFarmlandCells参照。伊勢原の駅前が高層化されすぎる不具合の対策)。
-  const farmlandCells = MODE === 'real' ? computeFarmlandCells(data.elements) : null;
-  // 至近距離に駅が複数あるエリア(ターミナル駅)は強制的に高層ビル区域にする。
-  // 駅ノードはグローバルに(バッチをまたいで)蓄積する(part2.js registerStationPoints参照。
-  // 東京・NY等で「至近距離の複数駅」が別々のタイル取得バッチに分かれて判定されない
-  // 不具合への対策)。
-  if (MODE === 'real') registerStationPoints(data.elements);
-  const _buildingStart = pendingBuildings.length; // このバッチで新規投入する分の開始位置(近傍優先ソート用)
-  data.elements.forEach(el => {
-    if (el.type !== 'way') return;
-    const tags = el.tags || {};
-
-    if (USES_MEIJI_LANDUSE && tags.building && el.geometry && el.geometry.length >= 1) {
-      // 実際には描画しないが、密度ヒントとして棟数だけ数えておく(フィルタで捨てる前に)
-      const p0 = latLonToXZ(el.geometry[0].lat, el.geometry[0].lon);
-      noteModernBuilding(p0.x, p0.z);
-    }
-    if (USES_MEIJI_LANDUSE && tags.building) { // 明治・江戸: OSM建物(=現代の実測)は神社仏閣のみ残し、他は迅速測図ベースの手続き生成に任せる
-      const st = getBuildingStyle(tags);
-      if (!st || (st.type !== 'shrine' && st.type !== 'temple')) return;
-    }
-    // 学校・大学・病院は、校舎そのものにbuildingタグが無く敷地全体(amenity)しか
-    // マッピングされていないケースが多い。その場合も敷地の中心に代表的な校舎を1棟
-    // 建てる(敷地いっぱいの巨大建物にならないよう、サイズは後段でキャップする)。
-    const isCampusOnly = !USES_MEIJI_LANDUSE && !tags.building &&
-      ['school','university','college','hospital'].includes(tags.amenity || '');
-    if ((tags.building || isCampusOnly) && buildingCount < 3000 && el.geometry && el.geometry.length >= 4) { // 700/1200では初期エリア内でも歯抜けが出ていた
-      const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
-      let cx = 0, cz = 0;
-      pts.forEach(p => { cx += p.x; cz += p.z; });
-      cx /= pts.length; cz /= pts.length;
-
-      let maxDx = 0, maxDz = 0;
-      pts.forEach(p => {
-        maxDx = Math.max(maxDx, Math.abs(p.x - cx));
-        maxDz = Math.max(maxDz, Math.abs(p.z - cz));
-      });
-      let w = Math.max(maxDx * 2, 2);
-      let d = Math.max(maxDz * 2, 2);
-      if (isCampusOnly) { w = Math.min(w, 34); d = Math.min(d, 22); } // 敷地全体でなく校舎サイズに収める
-
-      let style = getBuildingStyle(tags);
-      if (MODE === 'edo' && shouldSkipEdoBuilding(style)) return; // 江戸: 現代の建物密度をそのまま使わず間引く
-      const resolvedH = resolveBuildingHeight(tags);
-      // building:levelsタグが無い場合の階数フォールバック。国プロファイルのlevelsRangeが
-      // あればそれを使う(香港は塔状に高め、アメリカ郊外は低めに寄る)。無ければ従来通り1〜3階。
-      // cprofH はこの建物の重心が属するセルの被覆率で1棟ごとに決める(バッチ全体の平均ではない)。
-      const cprofH = localDensityProfileAt(cprofHBase, densityGrid, cx, cz, farmlandCells);
-      const [lvMin, lvMax] = (cprofH && cprofH.levelsRange) || [1, 3];
-      const levels = parseInt(tags['building:levels']) || (lvMin + Math.floor(Math.random() * (lvMax - lvMin + 1)));
-      let h = resolvedH != null ? resolvedH : Math.max(levels * 3, 3) + Math.random()*2;
-      h = applyLandmarkMinHeight(style, h); // 学校・病院・役場・神社仏閣は最低限の高さを確保
-      // 国プロファイルのminLevels: 実測タグ由来の高さであっても最低限これだけは確保する
-      // (香港のような高密度地区で、たまたま低層タグの建物が混ざって見た目が崩れないように)。
-      // 神社仏閣・教会は専用の低めの様式美があるため対象外にする。
-      const _landmarkType = style && (style.type === 'shrine' || style.type === 'temple' || style.type === 'church');
-      if (cprofH && cprofH.minLevels && !_landmarkType) {
-        h = Math.max(h, cprofH.minLevels * 3);
-      }
-      style = classifyResidential(style, w, d, h, cx, cz);
-      let fw = w, fd = d, fh = h;
-      ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ
-      if (MODE === 'edo') fh = applyEdoHeightCap(style, fh); // 江戸: 現代建物の実測高さそのままだと高層ビルになるため木造家屋相当に抑える
-      // 直接生成せず、タイル取得分と同じキューに積んでフレーム分割で生成する。
-      // 【重要】以前はここで直接addBuildingしており、NEAR高解像度地形がまだ届く前に
-      // 高さが焼き込まれてしまい、初期スポーン周辺の建物が浮く/埋まる主な原因になっていた。
-      // isOnRoad判定はキュー投入時ではなく、他の建物と同じくフレーム分割の生成時に行う。
-      pendingBuildings.push({ x: cx, z: cz, w: fw, d: fd, h: fh, style, real: true });
-      buildingCount++;
-    }
-  });
-  // このバッチで新規に積んだ建物だけ、プレイヤー位置を中心とした近い順へ並べ替える
-  // (part1.js sortNewEntriesByDistanceToPlayer参照)。
-  sortNewEntriesByDistanceToPlayer(pendingBuildings, _buildingStart, b => ({ x: b.x, z: b.z }));
-
-  // === PASS 3: Collect landuse polygons for dynamic chunk generation ===
-  data.elements.forEach(el => {
-    if (el.type !== 'way') return;
-    const tags = el.tags || {};
-    const lu = tags.landuse;
-    if (!lu || !['residential','commercial','industrial','retail','mixed_use'].includes(lu)) return;
-    if (!el.geometry || el.geometry.length < 4) return;
-    const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
-    let minX=Infinity, maxX=-Infinity, minZ=Infinity, maxZ=-Infinity;
-    pts.forEach(p => { minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minZ=Math.min(minZ,p.z); maxZ=Math.max(maxZ,p.z); });
-    const _luEntry = { pts, lu, minX, maxX, minZ, maxZ };
-    landusePolygons.push(_luEntry);
-    polyGridAdd(landuseGrid, _luEntry);
-  });
-
-  // Station landmarks(明治: 鉄道開通前なので駅なし)
-  processStationNodes(data.elements);
-
-  // === PASS 4: 公園・水域・田畑・森 + multipolygon水面 ===
-  data.elements.forEach(el => {
-    handleAreaFeature(el);
-    if (el.type === 'relation') processWaterRelation(el);
-  });
-
-  // 初期ロードで処理したway IDを記録(境界タイルの再取得時に二重生成しないため)
-  data.elements.forEach(el => { if (el.type === 'way') seenOSMWays.add(el.id); });
-
-  showToast(`✨ ChronoDriftの世界へようこそ！ (建物:${buildingCount} 道路:${roadCount})`, { duration: 4000 });
-
-  // モード切替リロードなら切替前の位置・向きから再開、通常起動は東成瀬2-2-11にスポーン
-  // 【重要】resumeは関数冒頭で既に読み込み・consume済み(上の早期returnの判定に使った)なので、
-  // ここで再度 consumeResumePos() は呼ばない(2回目は必ずnullを返し、消費済みのデータが失われる)。
+  if (resume) recenterForResumeIfFar(resume.lat, resume.lon);
+  const lat = resume ? resume.lat : SPAWN_LAT;
+  const lon = resume ? resume.lon : SPAWN_LON;
+  const rp = latLonToXZ(lat, lon);
+  // 通常起動時のみ findSpawnNear で建物内スポーンを避ける(この時点ではタイルが
+  // 何も届いていないため実質ノーオペだが、フォールバック生成等が先に走っていた場合の保険)。
+  // resume(モード切替/遠方ジャンプ)は元の座標そのものへ戻す。
+  const sp = resume ? rp : findSpawnNear(rp.x, rp.z);
+  player.position.set(sp.x, 0, sp.z);
   if (resume) {
-    const rp = latLonToXZ(resume.lat, resume.lon);
-    player.position.set(rp.x, 0, rp.z); // yはanimateの床追従が地形/屋根に合わせる
     if (typeof resume.yaw === 'number') camYaw = resume.yaw;
     if (typeof resume.rot === 'number') player.rotation.y = resume.rot;
-  } else {
-    const spw = latLonToXZ(SPAWN_LAT, SPAWN_LON);
-    const sp = findSpawnNear(spw.x, spw.z); // 建物内なら最寄りの空き地点へ
-    player.position.set(sp.x, 0, sp.z);
   }
+  // 【重要】国別建物スタイル(currentCountryCode)は通常checkAddressDisplayのスロットル
+  // (初期化後10秒/150m)任せだが、initialWorldLoaded=trueにした直後からcheckOSMTiles
+  // (part8.js)がすぐにタイル取得を始めてしまう。Nominatim逆ジオコーディングが完了する前に
+  // 最初に見える範囲の建物が生成されると、currentCountryCode=nullのまま焼き込まれて
+  // 国別プロファイル(denseHighRise等)が二度と効かなくなる(実機検証: ニューヨークの都心が
+  // 低層住宅だらけになる原因の一つ)。スロットルを待たず即座に取得を開始し、最大1.5秒だけ
+  // 完了を待つ(ブロッキングは短時間に限定し、Nominatim不調時は諦めて先に進む)。
+  showToast('🗺 マップを読み込み中...', { sticky: true });
+  awaitingDestinationLoad = true;
+  await Promise.race([
+    updateAddressDisplay(),
+    new Promise(res => setTimeout(res, 1500)),
+  ]);
   initialWorldLoaded = true; // ここからタイル取得を許可(標高は既に反映済み)。森は updateForest が周囲に描く
-}
-
-function buildFallbackMap(preConsumedResume) {
-  // OSM取得が完全に失敗した時だけのプレースホルダー生成。位置は元々全部架空なので、
-  // わかっていれば国プロファイルのグリッド間隔・充填率を使う(わからなければ従来通り40m/0.6)。
-  const cprofFb = getCountryBuildingProfile(currentCountryCode);
-  const gridSpacing = (cprofFb && cprofFb.fallbackGridSpacing) || 40;
-  const fillProb = (cprofFb && cprofFb.fallbackFillProbability != null) ? cprofFb.fallbackFillProbability : 0.6;
-  // Grid of buildings (meter scale)
-  for (let x = -1000; x <= 1000; x += gridSpacing) {
-    for (let z = -1000; z <= 1000; z += gridSpacing) {
-      if (Math.random() < fillProb) {
-        const w = 8 + Math.random()*20;
-        const d = 8 + Math.random()*20;
-        const h = 4 + Math.random()*20;
-        addBuilding(x + (Math.random()-0.5)*15, z + (Math.random()-0.5)*15, w, d, h);
-      }
-    }
-  }
-  // Roads (6m wide)
-  for (let i = -1000; i <= 1000; i += 40) {
-    addRoad(-1200, i, 1200, i, 6);
-    addRoad(i, -1200, i, 1200, 6);
-  }
-  showToast('✨ ChronoDriftの世界（フォールバック）へようこそ！', { duration: 3000 });
-  // 【重要】loadOSM側で既にconsumeResumePos()済みの値を引数で受け取る(呼び出し元経由でない
-  // 単体呼び出し向けに、渡されなかった場合だけ自前で読む=従来の挙動を維持)。
-  const resume2 = preConsumedResume !== undefined ? preConsumedResume : consumeResumePos();
-  if (resume2) {
-    recenterForResumeIfFar(resume2.lat, resume2.lon);
-    const rp2 = latLonToXZ(resume2.lat, resume2.lon);
-    player.position.set(rp2.x, 0, rp2.z);
-    if (typeof resume2.yaw === 'number') camYaw = resume2.yaw;
-    if (typeof resume2.rot === 'number') player.rotation.y = resume2.rot;
-  } else {
-    const spw2 = latLonToXZ(SPAWN_LAT, SPAWN_LON);
-    const sp2 = findSpawnNear(spw2.x, spw2.z);
-    player.position.set(sp2.x, 0, sp2.z);
-  }
-  initialWorldLoaded = true;
 }
 
 // 起動時の初期位置: スマホ等の位置情報から取得。取得不可(非対応/拒否/タイムアウト)は東京駅。

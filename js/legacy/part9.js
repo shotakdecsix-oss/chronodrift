@@ -343,22 +343,19 @@ window.addEventListener('resize', () => {
   // その時は現在地ジャンプしないし、これから行う伊勢原の初期地形取得も無駄になる(後述)。
   let isModeSwitch = false;
   try { isModeSwitch = !!localStorage.getItem('iseharaResumePos'); } catch (e) {}
-  // OSM取得は地形データにもmeiji土地利用データにも依存しないので、それらの取得と
-  // 並行して先に投げておく(以前は地形→OSMの完全直列で、両方の待ち時間がそのまま合算されていた)
-  const osmDataP = fetchOSMData();
-  // 伊勢原本体(原点)のNEAR地形を先に取得しておく。loadOSM()が組み立てる伊勢原の初期
-  // ワールド(道路・建物)はgetGroundYで接地するため、その前に地形データ(とそれが確定する
-  // elevBase等)が必要。【重要】isModeSwitchがtrueでも省略できない —
+  // 【重要】OSMデータの実際の取得・生成はもうここでは行わない — loadOSM()(part6.js)は
+  // プレイヤーの初期位置決定と国コードの早期取得だけを行い、道路・建物はpart8.jsの
+  // タイル取得システム(checkOSMTiles)がinitialWorldLoaded=true後に周辺タイルとして
+  // 取りに行く(伊勢原も他地域と同じ経路)。そのため地形取得と並行するfetchOSMData()の
+  // 事前投げは不要になった。
+  // 伊勢原本体(原点)のNEAR地形を先に取得しておく。isModeSwitchがtrueでも省略できない —
   // 「モード切替(江戸↔現実など)による再開」と「遠方ジャンプによる再開」はどちらも同じ
   // iseharaResumePosを使うため、この時点(loadOSM呼び出し前)ではまだ区別できない。
-  // 前者は伊勢原本体をこの後も通常どおり構築するので地形データが必要、後者は
-  // loadOSM内部で伊勢原の構築ごとスキップする(その場合ここは無駄なfetchになるが、
-  // 実害はない小さな待ち時間で済む)。
   await loadNearTerrain(0, 0);
   if (USES_MEIJI_LANDUSE) await loadMeijiLanduse();
   // モード切替/遠方ジャンプの再開時は、loadOSM()内部で再開先へ原点を付け替え(recenterOrigin)、
   // regionBaseReadyがfalseに戻るため、下のloadNearTerrainで新しい地域の高度基準が確定し直される。
-  await loadOSM(await osmDataP);
+  await loadOSM();
   // 通常起動のみ初期位置へ移動(現在地、取れなければ東京駅)。
   const loc = await startLocP;
   if (!isModeSwitch) jumpToLatLon(loc.lat, loc.lon);
