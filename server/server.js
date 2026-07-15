@@ -140,6 +140,12 @@ function scheduleUpstream(host, task) {
     lastStartAt.set(host, Date.now());
     return task();
   });
+  // 【重要・2026-07-15】ここでchainsに繋ぐpがもし永遠に確定(resolve/reject)しなければ、
+  // 同じhostへの以降の全リクエスト(=全プレイヤー分)がこのpromiseの後ろに並んだまま
+  // 永久に開始すらされなくなる(1件のハングでサーバ全体のOverpass取得が詰まる)。
+  // 「道路・建物の生成が途中で止まる」がサーバー再起動(=デプロイのたび)まで直らず
+  // 再発していたのは、httpsGetOnce側に必ず確定させる保証が無かったことが一因と推測される
+  // (下記httpsGetOnceのハードタイムアウト参照)。
   chains.set(host, p.then(() => {}, () => {})); // 失敗してもキューは継続
   return p;
 }
@@ -147,17 +153,30 @@ function scheduleUpstream(host, task) {
 /* ---------- 上流 GET (標準 https、リトライ付き) ---------- */
 function httpsGetOnce(urlStr) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (fn, arg) => { if (settled) return; settled = true; clearTimeout(hardTimer); fn(arg); };
+    // 【重要】req.setTimeout(下記)はソケットの「無通信」タイムアウトで、上流が細切れにでも
+    // データを送り続ける限りリセットされ続け、実測で全体90秒以上pendingのまま(実質無期限)に
+    // なるケースが確認された。かつ、レスポンスヘッダ受信後(res確定後)にreq側をdestroyしても
+    // resにerrorリスナーが無いとreject/resolveどちらも呼ばれず、このPromiseが永久に解決しない
+    // ことがある(scheduleUpstreamのchainsが永久に詰まる直接原因)。通信の活性・不活性に
+    // 関わらず必ずどこかで確定させる「ハード上限」を別に設ける。
+    const hardTimer = setTimeout(() => {
+      req.destroy();
+      settle(reject, new Error('upstream hard timeout (' + (UPSTREAM_TIMEOUT_MS + 15000) + 'ms)'));
+    }, UPSTREAM_TIMEOUT_MS + 15000);
     const req = https.get(urlStr, { headers: { 'User-Agent': 'chronodrift-proxy/1.0' } }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
-      res.on('end', () => resolve({
+      res.on('end', () => settle(resolve, {
         status: res.statusCode,
         contentType: res.headers['content-type'] || 'application/json',
         body: Buffer.concat(chunks),
       }));
+      res.on('error', (e) => settle(reject, e)); // 【重要】これが無いのが上記の主因だった
     });
     req.setTimeout(UPSTREAM_TIMEOUT_MS, () => req.destroy(new Error('upstream timeout')));
-    req.on('error', reject);
+    req.on('error', (e) => settle(reject, e));
   });
 }
 
