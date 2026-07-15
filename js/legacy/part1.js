@@ -618,10 +618,18 @@ function rebuildBuildingsInBounds(x0, x1, z0, z1) {
 // 探索範囲が広がるほど建物数が際限なく増え、最終的に描画・メモリが持たずに
 // 「移動を続けると徐々に重くなり落ちる」症状になっていた。
 // ここでプレイヤーから一定距離を超えた実建物のTHREE.jsオブジェクトを解放する。
-// ただし完全に忘れるのではなく、軽量な記述(x,z,w,d,h,style)だけpendingBuildingsへ
-// 戻しておき、再訪時にNEAR準備が整えば通常の経路でまた生成されるようにする
-// (手続き生成建物のチャンク・アンロード/再生成と同じ考え方)。
-const BUILDING_UNLOAD_DIST = 2500;
+// ただし完全に忘れるのではなく、軽量な記述(x,z,w,d,h,style)だけdormantBuildingsへ
+// 戻しておき、再接近時にreactivateNearbyDormantBuildingsが検知してpendingBuildingsへ
+// 戻し、通常の経路でまた生成されるようにする(手続き生成建物のチャンク・アンロード/
+// 再生成と同じ考え方)。
+//
+// 遠景最適化(2026-07-15): 「道路・線路・川・地形さえ見えれば遠景としては十分」という
+// 判断で、実建物だけ道路(ROAD_UNLOAD_DIST=2500m)よりずっと近い距離で足切りする。
+// BUILDING_GEN_DIST(生成しはじめる距離)とBUILDING_UNLOAD_DIST(消す距離)を分け、
+// 境界付近を行ったり来たりしても毎フレーム生成/消去を繰り返さないようにする
+// (よくあるヒステリシス方式。差が無いと境界線上でチラつく)。
+const BUILDING_GEN_DIST = 800;
+const BUILDING_UNLOAD_DIST = 1000;
 let _buildingUnloadFrame = 0;
 function unloadFarBuildings() {
   _buildingUnloadFrame++;
@@ -641,8 +649,10 @@ function unloadFarBuildings() {
     }
     removeIds.add(rec.bid);
     buildingRecords.splice(i, 1);
-    // 再訪時に復元できるよう、軽量な記述だけキューへ戻す
-    pendingBuildings.push({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h, style: rec.style, real: rec.real });
+    // 再接近時に復元できるよう、軽量な記述だけdormantBuildingsへ(すでに
+    // BUILDING_UNLOAD_DIST > BUILDING_GEN_DIST の外なので、そのままpendingBuildingsへ
+    // 戻すと次のフレームで即dormantへ送り返されるだけの無駄が発生する)。
+    dormantBuildings.push({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h, style: rec.style, real: rec.real });
   }
   if (removeIds.size === 0) return;
   collisionBoxes = collisionBoxes.filter(b => !removeIds.has(b.buildingId));
@@ -650,6 +660,27 @@ function unloadFarBuildings() {
   placedBuildings = placedBuildings.filter(b => !removeIds.has(b.bid));
   rebuildCollGrid();
   rebuildBuildingGrid();
+}
+
+// dormantBuildings(遠すぎて未生成、または遠方で解放済みの実建物)を低頻度でスキャンし、
+// プレイヤーがBUILDING_GEN_DIST以内に近づいたものだけpendingBuildingsへ戻して
+// 通常の生成キューに合流させる。unloadFarBuildingsと同じ頻度(~1.5秒ごと)で十分
+// (境界を跨いだ直後1.5秒以内に生成されれば体感上ポップインは気にならない)。
+let _dormantCheckFrame = 0;
+function reactivateNearbyDormantBuildings() {
+  _dormantCheckFrame++;
+  if (_dormantCheckFrame % 90 !== 0) return;
+  if (dormantBuildings.length === 0) return;
+  const px = player.position.x, pz = player.position.z;
+  const d2 = BUILDING_GEN_DIST * BUILDING_GEN_DIST;
+  for (let i = dormantBuildings.length - 1; i >= 0; i--) {
+    const b = dormantBuildings[i];
+    const dx = b.x - px, dz = b.z - pz;
+    if (dx * dx + dz * dz <= d2) {
+      dormantBuildings.splice(i, 1);
+      pendingBuildings.push(b);
+    }
+  }
 }
 
 let placedBuildings = [];  // {x,z,r,ck} for landuse de-duplication
