@@ -672,11 +672,18 @@ function pointInPolygon(px, pz, pts) {
   return inside;
 }
 
+// 【重要】以前はminDist(=新しく置こうとしている側の半径+余白)だけを見ており、
+// 既存の建物側の大きさ(b.r。placedBuildingsに元々記録済み)を一切考慮していなかった。
+// そのため、マンションのような大きな実建物のすぐ隣(中心からの距離だけで見れば
+// 十分離れているつもりでも、大きな建物自体の縁からは全く離れていない位置)にまで
+// 手続き生成の小さな戸建てが並んでしまい、実際にはマンション1棟のはずの場所が
+// 「戸建ての集まり」に見える不具合の一因になっていた。既存建物の半径ぶんも
+// 足し合わせて判定する(=「建物の縁から」minDistだけ離れているかを見る)。
 function hasBuildingNearby(cx, cz, minDist) {
-  const d2 = minDist*minDist;
   for (const b of placedBuildings) {
     const dx=cx-b.x, dz=cz-b.z;
-    if (dx*dx+dz*dz < d2) return true;
+    const lim = minDist + (b.r || 0);
+    if (dx*dx+dz*dz < lim*lim) return true;
   }
   return false;
 }
@@ -704,16 +711,23 @@ function hasRealBuildingNearby(cx, cz, dist) {
 // 場所でも、近くの本物のOSM建物が工場(industrial)などの非住宅用途だと分かっていれば、
 // それを一戸建て補完(buildable)の根拠にしない。landuse=industrialのポリゴンが
 // 描かれていない工場・倉庫の構内でも一戸建てが誤って並ぶのを防ぐための追加ガード。
+// 【重要】以前はindustrial/shopしか除外しておらず、apartment/office(マンション・オフィス。
+// classifyResidentialでbuilding=yesの大型建物を正しく格上げできるようになった後に顕在化)
+// が近くにあるだけで「本物の一戸建てが実在するエリア」と誤認され、大きなマンション/オフィス
+// ビル1棟のすぐ周りまで手続き生成の戸建てが取り囲むように並んでしまっていた
+// (実機報告: 「ジャンプ用マップには大きなマンションの枠があるのに、生成では戸建て
+// 住宅の集まりになっている」)。マンション・オフィスも一戸建て補完の根拠から除外する。
 function hasRealHouseNearby(cx, cz, dist) {
   const d2 = dist * dist;
   const gx0 = Math.floor((cx - dist) / BUILDING_CELL), gx1 = Math.floor((cx + dist) / BUILDING_CELL);
   const gz0 = Math.floor((cz - dist) / BUILDING_CELL), gz1 = Math.floor((cz + dist) / BUILDING_CELL);
+  const EXCLUDE_TYPES = new Set(['industrial', 'shop', 'apartment', 'office']);
   for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
     const arr = buildingGrid.get(gx + ',' + gz);
     if (!arr) continue;
     for (const rec of arr) {
       if (!rec.real) continue;
-      if (rec.style && (rec.style.type === 'industrial' || rec.style.type === 'shop')) continue;
+      if (rec.style && EXCLUDE_TYPES.has(rec.style.type)) continue;
       const dx = rec.x - cx, dz = rec.z - cz;
       if (dx*dx + dz*dz < d2) return true;
     }
