@@ -273,7 +273,16 @@ function animate() {
     sortNewEntriesByDistanceToPlayer(pendingBuildings, pendingBuildingIdx, b => ({ x: b.x, z: b.z }));
   }
   const _buildBacklog = pendingBuildings.length - pendingBuildingIdx;
-  const _buildBudget = Math.min(80, 20 + Math.floor(_buildBacklog / 25));
+  let _buildBudget = Math.min(80, 20 + Math.floor(_buildBacklog / 25));
+  // 【重要・2026-07-15】生成順序は地形→道路→建物のはずなのに、道路(pendingRoadMeshes)が
+  // 固定6ms/フレームだった一方こちらはバックログに応じて最大80棟/フレームまで伸びる
+  // 可変制だったため、混雑時は建物の方が道路より速く追いつき、道路だけ取り残されて
+  // 「道路の拡張だけ止まって見える」逆転が起きていた(道路側は上のprocessRoadMeshQueue
+  // で同様にバックログ応じた可変予算にして底上げ済み)。それでも道路が大きく詰まっている
+  // 間は、建物側の予算をさらに絞って道路に追いつく時間を確保する(0にはしない — 道路が
+  // 疎な田舎道沿いの孤立した建物などが永久に生成されなくなるのを避けるため)。
+  const _roadBacklogForGate = pendingRoadMeshes.length;
+  if (_roadBacklogForGate > 80) _buildBudget = Math.min(_buildBudget, 5);
   // 【重要】件数ベースの予算だけだと、1棟あたりのコストが場所によって大きく違う場合に
   // 対応できない(香港・ニューヨークのような超高密度メガシティは1棟の生成コスト自体が
   // 伊勢原基準より重く、実機検証で「1フレームが暴走してタブごと固まって見える」不具合が

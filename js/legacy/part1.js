@@ -447,9 +447,15 @@ function processRoadMeshQueue() {
   const t0 = performance.now();
   const px = player.position.x, pz = player.position.z;
   const lim2 = ROAD_UNLOAD_DIST * ROAD_UNLOAD_DIST;
+  // 【重要・2026-07-15】生成順序は地形→道路→建物のはずが、建物側(part9.js)だけ
+  // バックログに応じて予算を最大80棟/フレームまで伸ばす可変制にしていた一方、道路は
+  // 常に固定6ms/フレームのままだったため、混雑時は建物の方が道路より速く追いつき、
+  // 道路が建物に追い抜かれて「道路だけ拡張が止まって見える」逆転が起きていた。
+  // 道路側もバックログに応じて時間予算を伸ばし、常に建物より優先して追いつけるようにする。
+  const roadBudgetMs = Math.min(24, 6 + Math.floor(pendingRoadMeshes.length / 150));
   let i = 0;
   while (i < pendingRoadMeshes.length) {
-    if ((i & 7) === 0 && performance.now() - t0 > 6) break; // 6ms/フレームまで
+    if ((i & 7) === 0 && performance.now() - t0 > roadBudgetMs) break;
     const r = pendingRoadMeshes[i++];
     r._q = false;
     const mx = (r.x1 + r.x2) / 2 - px, mz = (r.z1 + r.z2) / 2 - pz;
@@ -615,8 +621,10 @@ function rebuildBuildingsInBounds(x0, x1, z0, z1) {
 // BUILDING_GEN_DIST(生成しはじめる距離)とBUILDING_UNLOAD_DIST(消す距離)を分け、
 // 境界付近を行ったり来たりしても毎フレーム生成/消去を繰り返さないようにする
 // (よくあるヒステリシス方式。差が無いと境界線上でチラつく)。
+// UNLOAD側は当初1000mだったが、GEN(800m)との差が小さく、少し斜めに歩いただけでも
+// 頻繁に解放→再生成を繰り返しがちだったため1500mに広げ、ヒステリシス帯を厚くした。
 const BUILDING_GEN_DIST = 800;
-const BUILDING_UNLOAD_DIST = 1000;
+const BUILDING_UNLOAD_DIST = 1500;
 let _buildingUnloadFrame = 0;
 function unloadFarBuildings() {
   _buildingUnloadFrame++;
