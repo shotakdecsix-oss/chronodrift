@@ -772,7 +772,7 @@ function updateAltitudeLOD() {
   _altLodFrame++;
   if (_altLodFrame % 45 !== 0) return; // ~0.75秒ごと
   const alt = player.position.y - getGroundY(player.position.x, player.position.z);
-  const on = alt > 120;
+  const on = alt > 70; // 120では遅すぎて浮上中に落ちるケースがあった(実機)
   if (!on && !_altLodOn) return; // 地上同士の遷移は何もしない
   const px = player.position.x, pz = player.position.z;
   for (const rec of buildingRecords) {
