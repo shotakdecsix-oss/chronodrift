@@ -316,7 +316,17 @@ function animate() {
       // 諦めてFAR基準のまま生成する(無限に足踏みし続けるのを防ぐ)。
       if (b._tries < 200) { pendingBuildings.push(b); continue; }
     }
-    if (!isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style, b.real);
+    // 【重要・2026-07-16】実OSM建物(b.real)はisOnRoadチェックを免除する。isOnRoadは
+    // 建物の外接円半径(halfDiag=対角線の半分)で道路中心線との距離を見るため、
+    // 60m×40mの商業ビルならhalfDiag≈36m — 中心から36m+道路半幅以内に道路が1本でも
+    // あれば「道路上」と判定される。八重洲・京橋のような大型ビルが道路に四方を囲まれた
+    // 街区では大きい実建物がほぼ全て黙って破棄され、しかもknownBuildingGridには
+    // 「ここに実建物がある」と登録済みのため手続き生成の補完もブロックされ、
+    // 「大きいビルだけが消えて空き地になる」「消える場所が毎回同じ(決定論的)」という
+    // 症状になっていた(実機診断: タイルはloaded・count検証済みなのに空き地、で確定)。
+    // 実建物は測量データ由来で現実に道路上には建っていないので、このチェック自体が不要。
+    // (手続き生成の建物・樹木に対するisOnRoadは従来どおり維持)
+    if (b.real || !isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style, b.real);
   }
   if (pendingBuildingIdx > 0 && pendingBuildingIdx === pendingBuildings.length) {
     pendingBuildings.length = 0; pendingBuildingIdx = 0;
