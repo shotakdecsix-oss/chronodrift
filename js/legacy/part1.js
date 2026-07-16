@@ -525,7 +525,9 @@ function processRoadMeshQueue() {
     // 遠方(unloadFarRoadsの解放距離の外)はどうせすぐ解放されるので作らない。
     // プレイヤーが近づけばチャンク再生成(rebuildRoadsNearChunk)やNEAR更新
     // (rebuildRoadsInBounds)が再キューするので、恒久的に欠けることはない。
-    if (mx * mx + mz * mz > lim2) { r._dirty = false; continue; }
+    // 細街路(road/tertiary)はさらに短いMINOR_ROAD_MESH_DISTで切る(メッシュ総数対策)。
+    const _rlim2 = isMinorRoadType(r.type) ? MINOR_ROAD_MESH_DIST * MINOR_ROAD_MESH_DIST : lim2;
+    if (mx * mx + mz * mz > _rlim2) { r._dirty = false; continue; }
     if (r.mesh && !r._dirty) continue; // 既に構築済みで地形も変わっていない
     rebuildRoadMesh(r);
     r._dirty = false;
@@ -562,22 +564,31 @@ const PERF = {
   // クラッシュする問題の最終対策。実測でgeometries 21k(地上・安定)→51k(生成完了後)まで
   // 増え続けてGPUメモリが2GB→6GBに達していた。距離だけでは密集地の総量を制御できないため、
   // 総数で天井を切る(超過分はdormantに退避し、移動で近くの枠が空いたら復帰)。
-  lite: { roadUnload: 1600, bGenReal: 1400, bUnloadReal: 2000, chunkR: 4,  forestR: 360, prefetchR: 2, bMax: 6000 },
-  std:  { roadUnload: 2500, bGenReal: 2200, bUnloadReal: 2900, chunkR: 8,  forestR: 480, prefetchR: 2, bMax: 12000 },
-  high: { roadUnload: 3200, bGenReal: 4200, bUnloadReal: 5200, chunkR: 10, forestR: 600, prefetchR: 3, bMax: 25000 },
+  // minorRoadDist: 細街路(type='road'/'tertiary')のメッシュ化・保持距離。【2026-07-16】実測で
+  // 東京駅・標準の道路メッシュが70,513本(geometries 5万超・GPU数GBの主因)に達していた。
+  // 細街路は遠距離ではフォグでほぼ見えないため、主要道路(secondary以上・線路・川)より
+  // 短い距離で切ってメッシュ総数を数分の一に抑える(レコード自体は残るのでミニマップ・
+  // isOnRoad判定・再接近時の復元は従来どおり機能する)。
+  lite: { roadUnload: 1600, bGenReal: 1400, bUnloadReal: 2000, chunkR: 4,  forestR: 360, prefetchR: 2, bMax: 6000,  minorRoadDist: 700 },
+  std:  { roadUnload: 2500, bGenReal: 2200, bUnloadReal: 2900, chunkR: 8,  forestR: 480, prefetchR: 2, bMax: 12000, minorRoadDist: 1100 },
+  high: { roadUnload: 3200, bGenReal: 4200, bUnloadReal: 5200, chunkR: 10, forestR: 600, prefetchR: 3, bMax: 25000, minorRoadDist: 1600 },
 }[PERF_PRESET];
 const ROAD_UNLOAD_DIST = PERF.roadUnload;
+const MINOR_ROAD_MESH_DIST = PERF.minorRoadDist;
+const isMinorRoadType = (t) => t === 'road' || t === 'tertiary';
 let _roadUnloadFrame = 0;
 function unloadFarRoads() {
   _roadUnloadFrame++;
   if (_roadUnloadFrame % 90 !== 0) return; // 建物と同様、毎フレームやる必要はない(~1.5秒ごと)
   const px = player.position.x, pz = player.position.z;
   const d2 = ROAD_UNLOAD_DIST * ROAD_UNLOAD_DIST;
+  const dMinor2 = MINOR_ROAD_MESH_DIST * MINOR_ROAD_MESH_DIST;
   for (const r of minimapRoads) {
     if (r.type === 'motorway' || !r.mesh) continue; // 高架は対象外/既にアンロード済みはスキップ
     const mx = (r.x1 + r.x2) / 2, mz = (r.z1 + r.z2) / 2;
     const dx = mx - px, dz = mz - pz;
-    if (dx * dx + dz * dz <= d2) continue; // まだ範囲内
+    const dd = dx * dx + dz * dz;
+    if (dd <= (isMinorRoadType(r.type) ? dMinor2 : d2)) continue; // まだ範囲内(細街路は短い距離で切る)
     scene.remove(r.mesh);
     r.mesh.geometry.dispose();
     r.mesh = null;
