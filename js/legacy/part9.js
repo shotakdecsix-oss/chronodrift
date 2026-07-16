@@ -7,7 +7,10 @@
 // 木の位置・見た目は座標から決まる(plantTree)ので、作り直しても同じ木が並び、ちらつかない。
 // 建物・道路のチャンクは半径 CHUNK_RADIUS で生成され CHUNK_RADIUS+2 で消える。
 // 森はその中間(+1)に合わせ、建物と木が同じくらいの距離で現れ・消えるようにする。
-const FOREST_R = (CHUNK_RADIUS + 1) * CHUNK_SIZE;  // 例: (3+1)*120 = 480m
+// 【2026-07-16】CHUNK_RADIUSを8(960m)へ拡大した際、森が連動して1080mまで広がると
+// 樹木の生成負荷が跳ね上がるため、森は従来の480m固定に切り離す(木は遠景での存在感が
+// 建物より小さく、フォグ距離的にも480mで十分)。
+const FOREST_R = 480;
 const FOREST_REBUILD_STEP = CHUNK_SIZE / 2;        // 60mごとに再構築(建物の出現範囲に追従)
 const FOREST_MIN_H = 30;          // 局所比高がこの高さ(≈15m)以上を「山」とみなす(平地の街には生えない)
 const FOREST_SCATTER = 36;        // 散布グリッド間隔(m)。粗くして候補数=負荷を抑える
@@ -309,7 +312,7 @@ function animate() {
     // 逃がし、reactivateNearbyDormantBuildingsが低頻度で接近を検知して戻す。
     if (b.real) {
       const bdx = b.x - player.position.x, bdz = b.z - player.position.z;
-      if (bdx * bdx + bdz * bdz > BUILDING_GEN_DIST * BUILDING_GEN_DIST) {
+      if (bdx * bdx + bdz * bdz > BUILDING_GEN_DIST_REAL * BUILDING_GEN_DIST_REAL) {
         dormantBuildings.push(b);
         continue;
       }

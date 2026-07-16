@@ -635,22 +635,27 @@ function rebuildBuildingsInBounds(x0, x1, z0, z1) {
 // (よくあるヒステリシス方式。差が無いと境界線上でチラつく)。
 // UNLOAD側は当初1000mだったが、GEN(800m)との差が小さく、少し斜めに歩いただけでも
 // 頻繁に解放→再生成を繰り返しがちだったため1500mに広げ、ヒステリシス帯を厚くした。
-// 【2026-07-16】ユーザー要望で生成距離を2倍(800→1600)。UNLOADもヒステリシス帯の
-// 比率(約2倍近く)を保って拡大(1500→2800)。描画負荷が問題になったら戻す候補。
-const BUILDING_GEN_DIST = 1600;
-const BUILDING_UNLOAD_DIST = 2800;
+// 【2026-07-16】種類別の距離に分離(ユーザー要望):
+// ・実OSM建物(real=マップデータ由来) = 3000mで生成 / 3800mで消去
+// ・手続き生成建物(real=false)はチャンクシステム側(CHUNK_RADIUS)が約1000mを管理
+// ヒステリシス帯(GEN<UNLOAD)は従来同様、境界往復でのチラつき防止。
+const BUILDING_GEN_DIST_REAL = 3000;
+const BUILDING_UNLOAD_DIST_REAL = 3800;
+const BUILDING_GEN_DIST_PROC = 1000;
+const BUILDING_UNLOAD_DIST_PROC = 1800;
 let _buildingUnloadFrame = 0;
 function unloadFarBuildings() {
   _buildingUnloadFrame++;
   if (_buildingUnloadFrame % 90 !== 0) return; // 毎フレームやる必要はない(~1.5秒ごと)
   if (buildingRecords.length === 0) return;
   const px = player.position.x, pz = player.position.z;
-  const d2 = BUILDING_UNLOAD_DIST * BUILDING_UNLOAD_DIST;
+  const d2Real = BUILDING_UNLOAD_DIST_REAL * BUILDING_UNLOAD_DIST_REAL;
+  const d2Proc = BUILDING_UNLOAD_DIST_PROC * BUILDING_UNLOAD_DIST_PROC;
   const removeIds = new Set();
   for (let i = buildingRecords.length - 1; i >= 0; i--) {
     const rec = buildingRecords[i];
     const dx = rec.x - px, dz = rec.z - pz;
-    if (dx * dx + dz * dz <= d2) continue; // まだ範囲内
+    if (dx * dx + dz * dz <= (rec.real ? d2Real : d2Proc)) continue; // まだ範囲内
     for (const p of rec.parts) {
       if (!p) continue;
       scene.remove(p);
@@ -681,11 +686,12 @@ function reactivateNearbyDormantBuildings() {
   if (_dormantCheckFrame % 90 !== 0) return;
   if (dormantBuildings.length === 0) return;
   const px = player.position.x, pz = player.position.z;
-  const d2 = BUILDING_GEN_DIST * BUILDING_GEN_DIST;
+  const d2Real = BUILDING_GEN_DIST_REAL * BUILDING_GEN_DIST_REAL;
+  const d2Proc = BUILDING_GEN_DIST_PROC * BUILDING_GEN_DIST_PROC;
   for (let i = dormantBuildings.length - 1; i >= 0; i--) {
     const b = dormantBuildings[i];
     const dx = b.x - px, dz = b.z - pz;
-    if (dx * dx + dz * dz <= d2) {
+    if (dx * dx + dz * dz <= (b.real ? d2Real : d2Proc)) {
       dormantBuildings.splice(i, 1);
       pendingBuildings.push(b);
     }
@@ -701,7 +707,10 @@ const CHUNK_SIZE = 120;  // meters per chunk side
 // 建物密度を大幅に上げた(ぎゅうぎゅうの日本の街並み)ため、生成半径は
 // ±480m→±360mに縮小し、代わりにフォグを濃く(0.0004→0.00056)して
 // ポップインが目立たない距離バランスを維持する。明治は低密度なので従来の±480mのまま
-const CHUNK_RADIUS = USES_MEIJI_LANDUSE ? 4 : 3;
+// 【2026-07-16】ユーザー要望「手続き生成建物=約1000m」に合わせ 3→8(8×120=960m)。
+// チャンク数は49→289に増えるが生成はフレーム分割キューなので徐々に埋まる。
+// 重すぎる場合は6(720m)あたりに戻す候補。
+const CHUNK_RADIUS = USES_MEIJI_LANDUSE ? 4 : 8;
 
 function pointInPolygon(px, pz, pts) {
   let inside = false;
