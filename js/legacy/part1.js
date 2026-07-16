@@ -558,9 +558,13 @@ const PERF = {
   // 【2026-07-16】標準のbGenRealを3000→2200に調整。IndexedDBタイルキャッシュ導入後は
   // 東京駅級の密集地でも本当に全建物が届く(以前は429で実質フル密度に達していなかった)ため、
   // 3000mフル密度はメモリ超過でクラッシュした。広い描写が欲しい場合は高品質を選ぶ。
-  lite: { roadUnload: 1600, bGenReal: 1400, bUnloadReal: 2000, chunkR: 4,  forestR: 360, prefetchR: 2 },
-  std:  { roadUnload: 2500, bGenReal: 2200, bUnloadReal: 2900, chunkR: 8,  forestR: 480, prefetchR: 2 },
-  high: { roadUnload: 3200, bGenReal: 4200, bUnloadReal: 5200, chunkR: 10, forestR: 600, prefetchR: 3 },
+  // bMax: 描画済み建物の総数上限。【2026-07-16】東京駅・標準で「静止→フル密度生成→浮上」で
+  // クラッシュする問題の最終対策。実測でgeometries 21k(地上・安定)→51k(生成完了後)まで
+  // 増え続けてGPUメモリが2GB→6GBに達していた。距離だけでは密集地の総量を制御できないため、
+  // 総数で天井を切る(超過分はdormantに退避し、移動で近くの枠が空いたら復帰)。
+  lite: { roadUnload: 1600, bGenReal: 1400, bUnloadReal: 2000, chunkR: 4,  forestR: 360, prefetchR: 2, bMax: 6000 },
+  std:  { roadUnload: 2500, bGenReal: 2200, bUnloadReal: 2900, chunkR: 8,  forestR: 480, prefetchR: 2, bMax: 12000 },
+  high: { roadUnload: 3200, bGenReal: 4200, bUnloadReal: 5200, chunkR: 10, forestR: 600, prefetchR: 3, bMax: 25000 },
 }[PERF_PRESET];
 const ROAD_UNLOAD_DIST = PERF.roadUnload;
 let _roadUnloadFrame = 0;
@@ -796,6 +800,8 @@ function reactivateNearbyDormantBuildings() {
   _dormantCheckFrame++;
   if (_dormantCheckFrame % 90 !== 0) return;
   if (dormantBuildings.length === 0) return;
+  // 総数上限(PERF.bMax)到達中は復帰させない(復帰→上限で即dormant戻しの空回り防止)
+  if (buildingRecords.length >= PERF.bMax) return;
   const px = player.position.x, pz = player.position.z;
   const d2Real = BUILDING_GEN_DIST_REAL * BUILDING_GEN_DIST_REAL;
   const d2Proc = BUILDING_GEN_DIST_PROC * BUILDING_GEN_DIST_PROC;

@@ -319,6 +319,13 @@ function animate() {
         dormantBuildings.push(b);
         continue;
       }
+      // 【2026-07-16】描画済み建物の総数上限(PERF.bMax)。密集地では距離制限だけだと
+      // 数万棟に達しGPUメモリが際限なく積み上がる(浮上クラッシュの真因)。上限到達分は
+      // dormantへ退避し、移動でunloadFarBuildingsが枠を空けたら近い順に復帰する。
+      if (buildingRecords.length >= PERF.bMax) {
+        dormantBuildings.push(b);
+        continue;
+      }
     }
     const bcx = Math.floor(b.x / CHUNK_SIZE), bcz = Math.floor(b.z / CHUNK_SIZE);
     if (!IS_MEIJI && !chunkNearTerrainReady(bcx, bcz)) {
