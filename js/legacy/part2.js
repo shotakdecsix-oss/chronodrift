@@ -832,6 +832,64 @@ function isOnRoad(cx, cz, bw, bd) {
   return false;
 }
 
+// 【2026-07-16】実OSM建物の寸法を、周囲の道路・線路リボンと重ならないよう中心を保ったまま
+// 縮める。実建物は測量上は道路に重ならないが、ゲーム側の道路リボンは実際より広く描かれる
+// ため、正しい向き・寸法にしてもリボンに数m食い込むことがある(「まだ道路・線路に
+// 覆いかぶさる」の原因)。建物ローカル座標系(rotで逆回転)で各セグメントを評価し、
+// 幅方向に平行なセグメントは奥行きを、奥行き方向に平行なセグメントは幅を、道路リボンの
+// 縁+マージンまで縮める。下限は元の35%(それ以上縮めるくらいならデータ不整合として重なりを
+// 許容)。中心を貫通するセグメント(min|q|=0)も同様に縮めず放置。水面リボン(type:'water')は
+// 幅が推定値で信頼できないため対象外。
+// 窓 |p(t)|<=win (t∈[0,1], p=ap+t*dp) 内での |q(t)| の最小値。窓と交差しなければnull。
+function _minAbsOverWindow(ap, aq, dp, dq, win) {
+  let t0 = 0, t1 = 1;
+  if (Math.abs(dp) > 1e-9) {
+    const ta = (-win - ap) / dp, tb = (win - ap) / dp;
+    t0 = Math.max(0, Math.min(ta, tb)); t1 = Math.min(1, Math.max(ta, tb));
+    if (t0 > t1) return null;
+  } else if (Math.abs(ap) > win) return null;
+  const q0 = aq + t0 * dq, q1 = aq + t1 * dq;
+  if ((q0 <= 0 && q1 >= 0) || (q0 >= 0 && q1 <= 0)) return 0; // 符号反転=貫通
+  return Math.min(Math.abs(q0), Math.abs(q1));
+}
+function fitRealBuildingToRoads(cx, cz, w, d, rot) {
+  let hw = w / 2, hd = d / 2;
+  const hwMin = hw * 0.35, hdMin = hd * 0.35;
+  const margin = 0.5;
+  const c = Math.cos(rot || 0), s = Math.sin(rot || 0);
+  const searchR = Math.sqrt(hw * hw + hd * hd) + MAX_ROAD_HALF_W + 1;
+  const cellR = Math.max(1, Math.ceil(searchR / ROAD_CELL)) + 1;
+  const gx = Math.floor(cx / ROAD_CELL), gz = Math.floor(cz / ROAD_CELL);
+  for (let dxc = -cellR; dxc <= cellR; dxc++) for (let dzc = -cellR; dzc <= cellR; dzc++) {
+    const arr = roadGrid.get((gx + dxc) + ',' + (gz + dzc));
+    if (!arr) continue;
+    for (const r of arr) {
+      if (r.type === 'water') continue;
+      const rhw = (r.rw || 5) / 2 + margin;
+      // 両端点を建物ローカル系へ(collBoxHitsXZと同じ逆変換)
+      const ax = r.x1 - cx, az = r.z1 - cz, bx = r.x2 - cx, bz = r.z2 - cz;
+      const au = ax * c - az * s, av = ax * s + az * c;
+      const bu = bx * c - bz * s, bv = bx * s + bz * c;
+      if (Math.min(au, bu) > hw + rhw || Math.max(au, bu) < -(hw + rhw)) continue;
+      if (Math.min(av, bv) > hd + rhw || Math.max(av, bv) < -(hd + rhw)) continue;
+      const du = bu - au, dv = bv - av;
+      if (Math.abs(du) >= Math.abs(dv)) {
+        // 幅(u)方向にほぼ平行 → 奥行き(hd)を制約
+        const vmin = _minAbsOverWindow(au, av, du, dv, hw);
+        if (vmin === null) continue;
+        const allowed = vmin - rhw;
+        if (allowed > 0 && allowed < hd) hd = Math.max(hdMin, allowed);
+      } else {
+        const umin = _minAbsOverWindow(av, au, dv, du, hd);
+        if (umin === null) continue;
+        const allowed = umin - rhw;
+        if (allowed > 0 && allowed < hw) hw = Math.max(hwMin, allowed);
+      }
+    }
+  }
+  return { w: hw * 2, d: hd * 2 };
+}
+
 // OSMのbuilding:colour/roof:colourタグ(#rrggbb・#rgb・一部の色名)を数値カラーへ変換する。
 // 未対応の表記は静かにnullを返し、既存の既定色にフォールバックする(タグ読み取りのみでコストはほぼゼロ)。
 const OSM_COLOR_NAMES = {

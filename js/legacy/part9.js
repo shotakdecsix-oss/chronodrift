@@ -326,6 +326,13 @@ function animate() {
     // 症状になっていた(実機診断: タイルはloaded・count検証済みなのに空き地、で確定)。
     // 実建物は測量データ由来で現実に道路上には建っていないので、このチェック自体が不要。
     // (手続き生成の建物・樹木に対するisOnRoadは従来どおり維持)
+    // 実建物はゲーム側の広い道路・線路リボンに食い込む分だけ寸法を縮めてから生成する
+    // (part2.js fitRealBuildingToRoads参照。道路レコード登録はデータ到着時に同期で済んで
+    // いるので、描画時点では周囲のリボン幅が判明している)。1回だけ計算して結果を保持。
+    if (b.real && !b._fit) {
+      const _f = fitRealBuildingToRoads(b.x, b.z, b.w, b.d, b.rot);
+      b.w = _f.w; b.d = _f.d; b._fit = 1;
+    }
     if (b.real || !isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style, b.real, b.rot);
   }
   if (pendingBuildingIdx > 0 && pendingBuildingIdx === pendingBuildings.length) {
