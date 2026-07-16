@@ -270,7 +270,14 @@ function buildOSMBatchQuery(bboxes) {
   const parts = [];
   for (const clause of OSM_TILE_CLAUSES) for (const bb of bboxes) parts.push(clause + '(' + bb + ');');
   const timeout = Math.min(60, 20 + bboxes.length * 6); // タイル数に応じて上流タイムアウトも延ばす
-  return `[out:json][timeout:${timeout}];(${parts.join('')});out geom;`;
+  // 【重要・2026-07-16】以前はここでOverpass側のtimeout秒数だけ組み立てて文字列を返し、
+  // 呼び出し側(fetchOSMTileBatch)は全く別の固定値(35秒)でクライアント側abortしていた。
+  // 東京駅八重洲・京橋のような超高密度エリアでは6タイルまとめクエリがOverpass側の
+  // timeout指定(最大56秒)ぎりぎりまでかかることがあり、クライアント側が35秒で
+  // 先にAbortControllerで接続を切ってしまうと、Overpassがまだ計算を続けている
+  // 正常なクエリを「失敗」として扱ってしまう。Overpass側に指定したtimeout秒数を
+  // 呼び出し側にも返し、クライアント側のabort猶予をそれに揃える(+バッファ)。
+  return { query: `[out:json][timeout:${timeout}];(${parts.join('')});out geom;`, timeout };
 }
 
 async function fetchOSMTileBatch() {
@@ -295,7 +302,7 @@ async function fetchOSMTileBatch() {
     const minLon = Math.min(ll00.lon, ll11.lon), maxLon = Math.max(ll00.lon, ll11.lon);
     return `${minLat.toFixed(5)},${minLon.toFixed(5)},${maxLat.toFixed(5)},${maxLon.toFixed(5)}`;
   });
-  const query = buildOSMBatchQuery(bboxes);
+  const { query, timeout: osmTimeoutSec } = buildOSMBatchQuery(bboxes);
   let failed = false;
   // 【重要】以前は Promise.race([fetch(...), timeoutPromise]) で「50秒で見切る」だけだった。
   // これはtimeoutPromise側が先に解決してcatchに落ちるだけで、負けた方のfetch自体は
@@ -312,7 +319,16 @@ async function fetchOSMTileBatch() {
   // を踏まえ、クエリの大きさに応じてタイムアウトを短縮する。1枚クエリ(ジャンプ直後・
   // 現在地未確定時)は20秒、6枚まとめ(通常時)は35秒。正常系の実測上限にわずかな余裕を
   // 残しつつ、無駄な待ちを大きく減らす。
-  const tileTimeoutMs = batch.length <= 1 ? 20000 : 35000;
+  // 【重要・2026-07-16】↑この固定35秒は、buildOSMBatchQueryがOverpassに指定する
+  // [timeout:N](6タイルまとめだと最大56秒)より短い場合があった。東京駅・八重洲/京橋
+  // のような超高密度エリアでは6タイル分の道路+建物+landuse等の集計にOverpass側が
+  // 35秒を超えて正規に処理を続けていることがあり、クライアント側が先にAbortControllerで
+  // 接続を切ってしまうと、正常進行中のクエリを「失敗」として扱って再試行ループに
+  // 入ってしまっていた(実機診断: 京橋・八重洲エリアで道路は届くのに実建物が0件、
+  // かつosmTileFailCountは0=直近の試行では例外が飛んでいない、という状態と整合)。
+  // Overpass側に指定したtimeout秒数(osmTimeoutSec)に十分なバッファ(+8秒)を足した値を
+  // クライアント側のabort猶予にする。
+  const tileTimeoutMs = batch.length <= 1 ? 20000 : (osmTimeoutSec * 1000 + 8000);
   const abortCtl = new AbortController();
   const timeoutId = setTimeout(() => abortCtl.abort(), tileTimeoutMs);
   try {
@@ -333,6 +349,17 @@ async function fetchOSMTileBatch() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     if (!data || !data.elements) throw new Error('no elements');
+    // 【重要・2026-07-16】Overpassは内部のtimeout/メモリ上限に達すると、例外にはならず
+    // HTTP 200 + data.remarkに "runtime error: Query timed out" 等の文言を入れた「途中までの
+    // 部分結果」を返すことがある。以前はdata.elementsさえ存在すれば無条件で成功扱いにして
+    // いたため、超高密度エリア(京橋・八重洲など)で道路は途中まで集計できても建物の集計に
+    // 到達する前にOverpass側がタイムアウトし、その中途半端な結果を「完全に取得できた」
+    // ものとしてタイルを永久にloadedOSMTiles入りさせてしまい、実建物が二度と現れない
+    // 空地が生まれていた(実機診断で確認)。remarkにtimeout/memoryを示す文言があれば
+    // 部分結果とみなし、失敗として扱って再試行キューに戻す。
+    if (data.remark && /timed out|timeout|out of memory/i.test(data.remark)) {
+      throw new Error('partial result: ' + data.remark);
+    }
     // 複数タイル分の要素が1つの配列で混ざって届くが、seenOSMWaysでway ID重複排除される
     // ので、1タイルの時と同じ processTileData にそのまま渡してよい。密度計算用にタイル枚数も渡す。
     processTileData(data, batch.length);
