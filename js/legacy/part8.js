@@ -205,7 +205,7 @@ function processTileData(data, tileCount) {
     // キューに積んだ時点(=OSMデータとして存在が確定した時点)で先にbuildingGridへ軽量登録
     // しておくことで、実際の描画完了を待たずに手続き生成側が正しく「ここは本物の建物がある」
     // と認識できるようにする。
-    buildingGridAdd(realRec);
+    knownBuildingGridAdd(realRec);
   });
   // このバッチで新規に積んだ建物だけ、プレイヤー位置を中心とした近い順へ並べ替える
   // (part1.js sortNewEntriesByDistanceToPlayer参照)。

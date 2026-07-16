@@ -560,17 +560,29 @@ const buildingRecords = []; // {x,z,w,d,h,style,gy,parts:[mesh/light,...],cbox,c
 let _buildingIdSeq = 0; // collisionBoxes/minimapBuildings/placedBuildingsから一括削除するための共通ID
 const BUILDING_CELL = 80;
 let buildingGrid = new Map();
-function buildingGridAdd(rec) {
+// 共通のセル格子への登録処理(buildingGrid/knownBuildingGridで共有)
+function _gridAddTo(grid, rec) {
   const pad = Math.max(rec.w, rec.d) / 2 + 5;
   const gx0 = Math.floor((rec.x - pad) / BUILDING_CELL), gx1 = Math.floor((rec.x + pad) / BUILDING_CELL);
   const gz0 = Math.floor((rec.z - pad) / BUILDING_CELL), gz1 = Math.floor((rec.z + pad) / BUILDING_CELL);
   for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
     const k = gx + ',' + gz;
-    let arr = buildingGrid.get(k);
-    if (!arr) { arr = []; buildingGrid.set(k, arr); }
+    let arr = grid.get(k);
+    if (!arr) { arr = []; grid.set(k, arr); }
     arr.push(rec);
   }
 }
+// 【重要・2026-07-15】buildingGridは「実際にaddBuilding()でメッシュ化済みの建物」専用
+// (rebuildBuildingsInBounds/rebuildBuildingHeightがparts/gyを前提に地形追従の平行移動を行う)。
+// 一方hasRealBuildingNearby/hasRealHouseNearbyは「キューに積んだ時点(まだ未描画)」でも
+// 本物のOSM建物の存在を知りたい([[project_isehara_game_procedural_infill_race]]参照)。
+// 同じbuildingGridに未描画のスタブ(parts/gy無し)を混ぜてしまうと、rebuildBuildingHeightが
+// rec.partsをiterateしようとして "rec.parts is not iterable" で例外になる不具合が起きた
+// (実機で確認)。描画済み専用のbuildingGridとは別に、未描画スタブ専用のknownBuildingGridを
+// 用意し、用途を完全に分離する。
+let knownBuildingGrid = new Map();
+function buildingGridAdd(rec) { _gridAddTo(buildingGrid, rec); }
+function knownBuildingGridAdd(rec) { _gridAddTo(knownBuildingGrid, rec); }
 function rebuildBuildingGrid() {
   buildingGrid = new Map();
   for (const rec of buildingRecords) buildingGridAdd(rec);
@@ -721,8 +733,11 @@ function hasRealBuildingNearby(cx, cz, dist) {
   const d2 = dist * dist;
   const gx0 = Math.floor((cx - dist) / BUILDING_CELL), gx1 = Math.floor((cx + dist) / BUILDING_CELL);
   const gz0 = Math.floor((cz - dist) / BUILDING_CELL), gz1 = Math.floor((cz + dist) / BUILDING_CELL);
+  // knownBuildingGrid: キュー投入時点(未描画でもよい)で「本物のOSM建物」として登録済みの
+  // 軽量インデックス([[project_isehara_game_procedural_infill_race]]参照)。描画済み専用の
+  // buildingGridとは別物なので混同しないこと。
   for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
-    const arr = buildingGrid.get(gx + ',' + gz);
+    const arr = knownBuildingGrid.get(gx + ',' + gz);
     if (!arr) continue;
     for (const rec of arr) {
       if (!rec.real) continue;
@@ -749,7 +764,7 @@ function hasRealHouseNearby(cx, cz, dist) {
   const gz0 = Math.floor((cz - dist) / BUILDING_CELL), gz1 = Math.floor((cz + dist) / BUILDING_CELL);
   const EXCLUDE_TYPES = new Set(['industrial', 'shop', 'apartment', 'office']);
   for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
-    const arr = buildingGrid.get(gx + ',' + gz);
+    const arr = knownBuildingGrid.get(gx + ',' + gz);
     if (!arr) continue;
     for (const rec of arr) {
       if (!rec.real) continue;
