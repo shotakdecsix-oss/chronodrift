@@ -326,7 +326,7 @@ function animate() {
     // 症状になっていた(実機診断: タイルはloaded・count検証済みなのに空き地、で確定)。
     // 実建物は測量データ由来で現実に道路上には建っていないので、このチェック自体が不要。
     // (手続き生成の建物・樹木に対するisOnRoadは従来どおり維持)
-    if (b.real || !isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style, b.real);
+    if (b.real || !isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style, b.real, b.rot);
   }
   if (pendingBuildingIdx > 0 && pendingBuildingIdx === pendingBuildings.length) {
     pendingBuildings.length = 0; pendingBuildingIdx = 0;

@@ -656,19 +656,33 @@ const playerRadius = 0.25; // small radius so player fits on narrow roads
 // 【バグ修正】以前は y=0〜3 固定だったため、標高3m超の場所では建物AABB
 // (地形標高から始まる)と一切交差せず、当たり判定が実質無効だった。
 // 地面が平坦だった頃は偶然動いており、標高反映+ELEV_SCALE増で顕在化した。
+// 【2026-07-16】回転建物対応の水平判定。box.rotが無ければ従来どおりAABB、あれば
+// プレイヤー座標を建物ローカル系へ逆回転して軸平行判定(円vs矩形近似)。
+// これで斜め向きのビルも見た目どおりの壁位置で当たる。
+function collBoxHitsXZ(box, x, z, r) {
+  if (!box.rot) {
+    return x + r > box.min.x && x - r < box.max.x && z + r > box.min.z && z - r < box.max.z;
+  }
+  const dx = x - box.cx, dz = z - box.cz;
+  const c = Math.cos(box.rot), s = Math.sin(box.rot);
+  const lx = dx * c - dz * s; // rotation.y=θの逆変換
+  const lz = dx * s + dz * c;
+  return Math.abs(lx) < box.hw + r && Math.abs(lz) < box.hd + r;
+}
+
 function wouldCollide(nx, nz, yBase) {
   const y0 = (yBase !== undefined) ? yBase : player.position.y;
-  tempBox.set(
-    new THREE.Vector3(nx - playerRadius, y0 + 0.1, nz - playerRadius),
-    new THREE.Vector3(nx + playerRadius, y0 + 2.4, nz + playerRadius)
-  );
-  // 空間グリッドで近傍セルのみ照合(ボックスは重なる全セルに登録済み)
+  // 空間グリッドで近傍セルのみ照合(ボックスは重なる全セルに登録済み。回転建物は
+  // 外接AABBで登録されているのでセル漏れは起きない)
   const x0 = Math.floor((nx - playerRadius) / COLL_CELL), x1 = Math.floor((nx + playerRadius) / COLL_CELL);
   const z0 = Math.floor((nz - playerRadius) / COLL_CELL), z1 = Math.floor((nz + playerRadius) / COLL_CELL);
   for (let gx = x0; gx <= x1; gx++) for (let gz = z0; gz <= z1; gz++) {
     const arr = collGrid.get(gx + ',' + gz);
     if (!arr) continue;
-    for (const box of arr) if (box.intersectsBox(tempBox)) return true;
+    for (const box of arr) {
+      if (box.max.y < y0 + 0.1 || box.min.y > y0 + 2.4) continue; // 従来のY範囲判定
+      if (collBoxHitsXZ(box, nx, nz, playerRadius)) return true;
+    }
   }
   return false;
 }
@@ -678,7 +692,7 @@ function floorHeightAt(x, z, fromY) {
   let fy = getGroundY(x, z) + 0.35;
   const arr = collGrid.get(Math.floor(x / COLL_CELL) + ',' + Math.floor(z / COLL_CELL));
   if (arr) for (const b of arr) {
-    if (x >= b.min.x && x <= b.max.x && z >= b.min.z && z <= b.max.z) {
+    if (collBoxHitsXZ(b, x, z, 0)) { // 回転建物も見た目どおりの屋根範囲で立てる
       const top = b.max.y + 0.35;
       // 現在高さ+0.5以下の屋根だけを床候補に(下から突き上げない)
       if (b.max.y <= fromY + 0.5 && top > fy) fy = top;

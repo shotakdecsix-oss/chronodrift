@@ -659,7 +659,7 @@ function unloadFarBuildings() {
     // 再接近時に復元できるよう、軽量な記述だけdormantBuildingsへ(すでに
     // BUILDING_UNLOAD_DIST > BUILDING_GEN_DIST の外なので、そのままpendingBuildingsへ
     // 戻すと次のフレームで即dormantへ送り返されるだけの無駄が発生する)。
-    dormantBuildings.push({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h, style: rec.style, real: rec.real });
+    dormantBuildings.push({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h, style: rec.style, real: rec.real, rot: rec.rot });
   }
   if (removeIds.size === 0) return;
   collisionBoxes = collisionBoxes.filter(b => !removeIds.has(b.buildingId));

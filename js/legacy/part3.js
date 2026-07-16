@@ -85,7 +85,7 @@ function applySizeFloor(style, w, d, h) {
   return { w: Math.max(w, f.w), d: Math.max(d, f.d), h: Math.max(h, f.h) };
 }
 
-function addBuilding(x, z, w, d, h, style, isReal) {
+function addBuilding(x, z, w, d, h, style, isReal, rot) {
   const _origH = h; // 遠方アンロード時、再生成できるよう元のhを覚えておく(下でhを斜面ぶん延長するため)
   // 4隅+中心の地形高さを見て、最低点を基礎にし最高点まで胴体を延長。
   // (中心1点だけだと斜面で山側が埋まり、谷側が浮いていた)
@@ -358,12 +358,37 @@ function addBuilding(x, z, w, d, h, style, isReal) {
     parts.push(addDecorLight(0x8040ff, 0.8, 15, x, gy + h*0.6, z));
   }
 
+  // 【重要・2026-07-16】実OSM建物の向き(rot)を反映する。各パーツは軸平行前提の絶対座標で
+  // 組み立てられているので、最後に建物中心(x,z)周りでまとめて剛体回転させる
+  // (親Groupにrotation.y=rotを付けたのと同じ変換: 位置の回転+各パーツ自身のyaw加算)。
+  // Y座標・rebuildBuildingHeightのY平行移動とは干渉しない。
+  if (rot) {
+    const rc = Math.cos(rot), rs = Math.sin(rot);
+    for (const p of parts) {
+      const dx0 = p.position.x - x, dz0 = p.position.z - z;
+      p.position.x = x + dx0 * rc + dz0 * rs;
+      p.position.z = z - dx0 * rs + dz0 * rc;
+      p.rotation.y += rot;
+    }
+  }
+
   // Collision AABB — terrain-aware(chunkKey はアンロード時の掃除用)
   // 上端は実際の屋根高さに(+5の余白があるとジャンプでの屋根着地位置がずれる)
+  // 【2026-07-16】回転建物(rot≠0)の場合、Box3自体は回転フットプリントを包む外接AABB
+  // (collGridのセル登録・ブロードフェーズ用)にし、正確な判定用の回転情報
+  // (rot/cx/cz/hw/hd)をボックスに添付する。実判定はcollBoxHitsXZ(part7.js)が
+  // プレイヤー座標を建物ローカル系へ逆回転して行うので、見た目と当たりが一致する。
+  let _bMinX = x - w/2, _bMaxX = x + w/2, _bMinZ = z - d/2, _bMaxZ = z + d/2;
+  if (rot) {
+    const _hx = (Math.abs(w * Math.cos(rot)) + Math.abs(d * Math.sin(rot))) / 2;
+    const _hz = (Math.abs(w * Math.sin(rot)) + Math.abs(d * Math.cos(rot))) / 2;
+    _bMinX = x - _hx; _bMaxX = x + _hx; _bMinZ = z - _hz; _bMaxZ = z + _hz;
+  }
   const cbox = new THREE.Box3(
-    new THREE.Vector3(x-w/2, gy, z-d/2),
-    new THREE.Vector3(x+w/2, gy + h, z+d/2)
+    new THREE.Vector3(_bMinX, gy, _bMinZ),
+    new THREE.Vector3(_bMaxX, gy + h, _bMaxZ)
   );
+  if (rot) { cbox.rot = rot; cbox.cx = x; cbox.cz = z; cbox.hw = w / 2; cbox.hd = d / 2; }
   cbox.chunkKey = currentChunkKey;
   // 実OSM建物を遠方アンロードする際、collisionBoxes/minimapBuildings/placedBuildings
   // からもこのbuilding分だけ一括で取り除けるよう、共通のIDを振っておく。
@@ -381,7 +406,7 @@ function addBuilding(x, z, w, d, h, style, isReal) {
   // h/styleも保持しておき、遠方アンロード時にpendingBuildingsへ戻して再訪時に再生成できるようにする。
   // isReal: 実OSM建物かどうか(手続き生成の密集地判定で「本物の建物が近くにあるか」の
   // 裏付けに使う。農地の農道グリッドを住宅街と誤認する対策)
-  const brec = { x, z, w, d, h: _origH, style, gy, parts, cbox, ck: currentChunkKey, bid, real: !!isReal };
+  const brec = { x, z, w, d, h: _origH, style, gy, parts, cbox, ck: currentChunkKey, bid, real: !!isReal, rot: rot || 0 };
   buildingRecords.push(brec);
   buildingGridAdd(brec);
 }

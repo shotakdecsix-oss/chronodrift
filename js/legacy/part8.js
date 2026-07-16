@@ -164,12 +164,31 @@ function processTileData(data, tileCount) {
       if (!st || (st.type !== 'shrine' && st.type !== 'temple')) return;
     }
     const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
-    let cx=0, cz=0;
-    pts.forEach(p => { cx+=p.x; cz+=p.z; });
-    cx/=pts.length; cz/=pts.length;
-    let maxDx=0, maxDz=0;
-    pts.forEach(p => { maxDx=Math.max(maxDx,Math.abs(p.x-cx)); maxDz=Math.max(maxDz,Math.abs(p.z-cz)); });
-    let w=Math.max(maxDx*2,2), d=Math.max(maxDz*2,2);
+    // 【重要・2026-07-16】以前は「頂点平均の重心+軸平行の外接矩形(maxDx*2×maxDz*2)」で、
+    // 斜め向きの建物が実際より大幅に大きい軸平行の箱になっていた(45°回転した100m×20mの
+    // ビルは約85m×85mの正方形になる)。isOnRoadが実建物を破棄していた間はこの膨張した箱が
+    // 目に触れなかったが、破棄をやめた途端「巨大ビルが道路・線路に覆いかぶさる」
+    // 「全建物が同じ向き(軸平行)」として露見した。フットプリントの最長辺の方位角を
+    // 主方位とし、その回転座標系で外接矩形を取ることで、実際の向き・寸法を復元する。
+    let _ang = 0, _bestL2 = 0;
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const ex = pts[i+1].x - pts[i].x, ez = pts[i+1].z - pts[i].z;
+      const l2 = ex*ex + ez*ez;
+      if (l2 > _bestL2) { _bestL2 = l2; _ang = Math.atan2(ez, ex); }
+    }
+    const _c = Math.cos(_ang), _s = Math.sin(_ang);
+    let _minU = Infinity, _maxU = -Infinity, _minV = Infinity, _maxV = -Infinity;
+    pts.forEach(p => {
+      const u = p.x * _c + p.z * _s, v = -p.x * _s + p.z * _c;
+      if (u < _minU) _minU = u; if (u > _maxU) _maxU = u;
+      if (v < _minV) _minV = v; if (v > _maxV) _maxV = v;
+    });
+    // 中心は回転座標系の外接矩形中心から逆変換(頂点平均だとL字型などで偏るため)
+    const _cu = (_minU + _maxU) / 2, _cv = (_minV + _maxV) / 2;
+    let cx = _cu * _c - _cv * _s, cz = _cu * _s + _cv * _c;
+    let w = Math.max(_maxU - _minU, 2), d = Math.max(_maxV - _minV, 2);
+    // three.jsのrotation.y(+Xから-Z方向が正)に合わせて符号反転して保持
+    const bRot = -_ang;
     if (isCampusOnly) { w = Math.min(w, 34); d = Math.min(d, 22); } // 敷地全体でなく校舎サイズに収める
     let style = getBuildingStyle(tags);
     if (MODE === 'edo' && shouldSkipEdoBuilding(style)) return; // 江戸: 現代の建物密度をそのまま使わず間引く
@@ -192,7 +211,7 @@ function processTileData(data, tileCount) {
     let fw = w, fd = d, fh = h;
     ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ
     if (MODE === 'edo') fh = applyEdoHeightCap(style, fh); // 江戸: 現代建物の実測高さそのままだと高層ビルになるため木造家屋相当に抑える
-    const realRec = { x: cx, z: cz, w: fw, d: fd, h: fh, style, real: true };
+    const realRec = { x: cx, z: cz, w: fw, d: fd, h: fh, style, real: true, rot: bRot };
     pendingBuildings.push(realRec);
     // 【重要・2026-07-15】以前はbuildingGrid(hasRealBuildingNearby/hasRealHouseNearbyが参照する、
     // 「本物のOSM建物がここにある」という手続き生成の裏付け判定用インデックス)への登録が、
@@ -283,10 +302,14 @@ const OSM_TILE_CLAUSES = [
 // を通常の200 OKとして返してくることがあるためで、v4のremark検知やv5/v6のバッチ縮小・
 // 失敗検知では原理的に検出できない(失敗として記録すらされない「無言の部分成功」)。
 // 3タイル・4タイルは検証時にはたまたま完全な応答を得られたが、密集地では毎回安全とは
-// 限らないと判断し、これ以上検知ロジックを積み上げるのではなく、そもそも1タイル単位に
-// 固定して問い合わせ自体を軽くすることでこの種の無言の部分応答が起きる余地自体を無くす。
-// 取得速度は少し犠牲になるが、「二度と埋まらない空き地」という致命的な症状より優先する。
-const OSM_TILE_BATCH = 1;
+// 限らないと判断し、一時的に1タイル固定まで縮小した。
+// 【2026-07-16 3に復帰】その後、(1)out count;による完全性検証を導入し「無言の部分応答」は
+// 検出→再試行できるようになった、(2)「大型ビルが生成されない」真因はネットワークではなく
+// isOnRoadの外接円判定による受信後の破棄(part9.js参照)と判明した、(3)1タイル化は
+// リクエスト数を3〜6倍にし、公開インスタンスのレート制限(429ストーム)の主因になっていた。
+// 以上より、実測で完全応答を確認済みの3に戻す(6は密集地でリバースプロキシ側の硬い504が
+// 出るため不可)。部分応答が来てもcount検証が弾いて再試行される。
+const OSM_TILE_BATCH = 3;
 function buildOSMBatchQuery(bboxes) {
   const parts = [];
   for (const clause of OSM_TILE_CLAUSES) for (const bb of bboxes) parts.push(clause + '(' + bb + ');');
