@@ -369,7 +369,9 @@ function animate() {
   // (長時間プレイでの重量化→クラッシュ)のを防ぐため、遠方の建物を解放する
   unloadFarBuildings();
   reactivateNearbyDormantBuildings(); // 逆に、近づいた遠景建物は生成キューへ復帰させる
-  updateAltitudeLOD(); // 上空では遠くの低層建物を非表示にしてドローコール爆発を防ぐ(part1.js)
+  // (2026-07-16: 高度LOD(updateAltitudeLOD)は撤去 — 40m/300mまで絞ってもクラッシュ防止に
+  //  効かないことが実証され、上空の「スカスカ感」の害だけが残ったため。クラッシュの実対策は
+  //  建物総数キャップ(PERF.bMax)+細街路メッシュ距離制限で達成済み)
   // 道路・線路も同様に、遠方のものはGPUメッシュだけ解放する(記録データは残す)
   unloadFarRoads();
   // Tile-based OSM fetch — loads roads/buildings for newly entered areas
