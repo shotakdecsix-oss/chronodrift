@@ -162,9 +162,9 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
     type === 'industrial' ? 'ind' :
     (floors <= 2 && (type === 'house' || type === 'default' || type === 'shop')) ? 'house' :
     (type === 'house' || type === 'apartment') ? 'apt' : 'office';
-  // バリアント2→4: 窓点灯パターンの種類を増やす(facadeMatキャッシュは色×4で頭打ち)
+  // バリアントは2種(4種に増やしたらテクスチャメモリ超過で東京駅クラッシュ→縮小。part2.js参照)
   const mat = kind
-    ? facadeMat(kind, wallC, (Math.random() * 4) | 0)
+    ? facadeMat(kind, wallC, (Math.random() * 2) | 0)
     : lambertMat(wallC, (style && style.emissive) || (MODE === 'space' ? 0x0a1420 : 0));
 
   const geo = isMushroom
@@ -172,10 +172,10 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
     : new THREE.BoxGeometry(w, h, d);
   if (kind) { // 側面に窓タイルを並べ、天面/底面は無地領域へ
     const tw = kind === 'ind' ? 8 : 3.6; // 1タイルの実幅
-    // ビル系(office/apt、現実モード)はテクスチャが縦4フロア分(part2.js facadeMat参照)なので
-    // 縦の繰り返し数をfloors/4に(端数は窓サイズがわずかに伸縮するだけで見た目は自然)
+    // ビル系(office/apt、現実モード)はテクスチャが縦2フロア分(part2.js facadeMat参照)なので
+    // 縦の繰り返し数をfloors/2に(端数は窓サイズがわずかに伸縮するだけで見た目は自然)
     const _vTile = (kind === 'office' || kind === 'apt') && MODE === 'real'
-      ? Math.max(1, Math.round(floors / 4)) : floors;
+      ? Math.max(1, Math.round(floors / 2)) : floors;
     setBoxFacadeUVs(geo,
       kind === 'house' ? 1 : Math.max(1, Math.round(w / tw)),
       kind === 'house' ? 1 : Math.max(1, Math.round(d / tw)),

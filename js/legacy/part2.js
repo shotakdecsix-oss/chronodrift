@@ -84,13 +84,19 @@ function facadeMat(kind, color, variant) {
   // 窓の点灯を独立に抽選する。従来は1フロア分のタイルを全フロアへUV繰り返ししていたため、
   // タイル内の窓の点灯状態が全フロアに複製され「全点灯 or 全消灯」のビルにしか見えなかった。
   // (part3.js setBoxFacadeUVs側で繰り返し数をfloors/4に合わせる)
+  // 【2026-07-16追記】当初は縦4フロア×4バリアントにしたが、色ティント×バリアントの組合せで
+  // GPUテクスチャ量が従来の約8倍になり、ビル密度最大の東京駅周辺でクラッシュ(メモリ超過)。
+  // 縦2フロア×2バリアント+発光マップ半解像度に抑える(2フロア×2バリアント=4パターンでも
+  // 「全点灯/全消灯」の単調さは十分崩れる)。
   const vFloors = (kind === 'office' || kind === 'apt') &&
-    MODE !== 'space' && MODE !== 'edo' && !IS_MEIJI && MODE !== 'marchen' ? 4 : 1;
+    MODE !== 'space' && MODE !== 'edo' && !IS_MEIJI && MODE !== 'marchen' ? 2 : 1;
   const H = S * vFloors;
   const cv = document.createElement('canvas'); cv.width = S; cv.height = H;
   const g = cv.getContext('2d');
-  const ec = document.createElement('canvas'); ec.width = S; ec.height = H;
+  // 発光マップは窓の矩形しか描かないので半解像度で十分(メモリ1/4)。scaleで論理座標は共通。
+  const ec = document.createElement('canvas'); ec.width = S / 2; ec.height = H / 2;
   const e = ec.getContext('2d');
+  e.scale(0.5, 0.5);
   e.fillStyle = '#000'; e.fillRect(0, 0, S, H);
   // 決定的乱数 — 同じキーは常に同じ絵(チャンク再生成でも見た目が揺れない)
   let sd = 2166136261 ^ (variant * 977);
