@@ -332,8 +332,9 @@ function animate() {
     if (b.real && !b._fit) {
       const _f = fitRealBuildingToRoads(b.x, b.z, b.w, b.d, b.rot);
       b.w = _f.w; b.d = _f.d; b._fit = 1;
+      if (_f.railPass && _f.railPass.length) b.pass = _f.railPass; // 線路またぎ建物の透過コリドー
     }
-    if (b.real || !isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style, b.real, b.rot);
+    if (b.real || !isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style, b.real, b.rot, b.pass);
   }
   if (pendingBuildingIdx > 0 && pendingBuildingIdx === pendingBuildings.length) {
     pendingBuildings.length = 0; pendingBuildingIdx = 0;

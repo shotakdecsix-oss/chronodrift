@@ -85,7 +85,7 @@ function applySizeFloor(style, w, d, h) {
   return { w: Math.max(w, f.w), d: Math.max(d, f.d), h: Math.max(h, f.h) };
 }
 
-function addBuilding(x, z, w, d, h, style, isReal, rot) {
+function addBuilding(x, z, w, d, h, style, isReal, rot, railPass) {
   const _origH = h; // 遠方アンロード時、再生成できるよう元のhを覚えておく(下でhを斜面ぶん延長するため)
   // 4隅+中心の地形高さを見て、最低点を基礎にし最高点まで胴体を延長。
   // (中心1点だけだと斜面で山側が埋まり、谷側が浮いていた)
@@ -388,7 +388,12 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
     new THREE.Vector3(_bMinX, gy, _bMinZ),
     new THREE.Vector3(_bMaxX, gy + h, _bMaxZ)
   );
-  if (rot) { cbox.rot = rot; cbox.cx = x; cbox.cz = z; cbox.hw = w / 2; cbox.hd = d / 2; }
+  if (rot || (railPass && railPass.length)) {
+    cbox.rot = rot || 0; cbox.cx = x; cbox.cz = z; cbox.hw = w / 2; cbox.hd = d / 2;
+    // 線路またぎ建物(駅ビル等): この帯の内側は当たり判定を透過(collBoxHitsXZ参照)。
+    // 屋根判定(floorHeightAt)は帯を無視して全面有効(屋根に見えない穴を作らない)。
+    if (railPass && railPass.length) cbox.pass = railPass;
+  }
   cbox.chunkKey = currentChunkKey;
   // 実OSM建物を遠方アンロードする際、collisionBoxes/minimapBuildings/placedBuildings
   // からもこのbuilding分だけ一括で取り除けるよう、共通のIDを振っておく。

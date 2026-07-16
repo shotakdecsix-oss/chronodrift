@@ -860,6 +860,7 @@ function fitRealBuildingToRoads(cx, cz, w, d, rot) {
   const searchR = Math.sqrt(hw * hw + hd * hd) + MAX_ROAD_HALF_W + 1;
   const cellR = Math.max(1, Math.ceil(searchR / ROAD_CELL)) + 1;
   const gx = Math.floor(cx / ROAD_CELL), gz = Math.floor(cz / ROAD_CELL);
+  const _rails = []; // 建物を貫く線路コリドー(ローカル系の区間)
   for (let dxc = -cellR; dxc <= cellR; dxc++) for (let dzc = -cellR; dzc <= cellR; dzc++) {
     const arr = roadGrid.get((gx + dxc) + ',' + (gz + dzc));
     if (!arr) continue;
@@ -873,6 +874,22 @@ function fitRealBuildingToRoads(cx, cz, w, d, rot) {
       if (Math.min(au, bu) > hw + rhw || Math.max(au, bu) < -(hw + rhw)) continue;
       if (Math.min(av, bv) > hd + rhw || Math.max(av, bv) < -(hd + rhw)) continue;
       const du = bu - au, dv = bv - av;
+      // 【2026-07-16】線路は縮小の対象にしない。駅ビル・跨線建物は実際に線路をまたいで
+      // 建っているため、線路で縮めると「奥行きの薄い高いビル」になり違和感が出る
+      // (実機報告)。代わりに、建物を貫く線路のコリドー(ローカル系の帯)を記録して返し、
+      // 当たり判定側(collBoxHitsXZ)がその帯だけプレイヤーを透過させる。
+      if (r.type === 'railway') {
+        if (Math.abs(du) >= Math.abs(dv)) {
+          const vmin = _minAbsOverWindow(au, av, du, dv, hw);
+          if (vmin === null || vmin - rhw >= hd) continue; // 矩形内部に届いていない
+          _rails.push({ axis: 'v', a: Math.min(av, bv) - rhw, b: Math.max(av, bv) + rhw });
+        } else {
+          const umin = _minAbsOverWindow(av, au, dv, du, hd);
+          if (umin === null || umin - rhw >= hw) continue;
+          _rails.push({ axis: 'u', a: Math.min(au, bu) - rhw, b: Math.max(au, bu) + rhw });
+        }
+        continue;
+      }
       if (Math.abs(du) >= Math.abs(dv)) {
         // 幅(u)方向にほぼ平行 → 奥行き(hd)を制約
         const vmin = _minAbsOverWindow(au, av, du, dv, hw);
@@ -887,7 +904,17 @@ function fitRealBuildingToRoads(cx, cz, w, d, rot) {
       }
     }
   }
-  return { w: hw * 2, d: hd * 2 };
+  // 同一軸のコリドーをマージ(複数並走する線路を1本の帯にまとめる)
+  const railPass = [];
+  for (const axis of ['u', 'v']) {
+    const list = _rails.filter(p => p.axis === axis).sort((p, q) => p.a - q.a);
+    let cur = null;
+    for (const p of list) {
+      if (cur && p.a <= cur.b) { cur.b = Math.max(cur.b, p.b); }
+      else { cur = { axis, a: p.a, b: p.b }; railPass.push(cur); }
+    }
+  }
+  return { w: hw * 2, d: hd * 2, railPass };
 }
 
 // OSMのbuilding:colour/roof:colourタグ(#rrggbb・#rgb・一部の色名)を数値カラーへ変換する。
