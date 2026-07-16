@@ -284,7 +284,10 @@ function animate() {
   // 【2026-07-16】起動・ジャンプ直後(=リロード後)の30秒間は「初期ラッシュ」として
   // 生成予算を大幅に引き上げ、体感の待ち時間を縮める(その間のFPS低下は許容)。
   // 30秒過ぎたら従来予算に戻り、プレイ中のフレームレートは従来どおり守られる。
-  const _rush = performance.now() < 30000;
+  // 起動後30秒の初期ラッシュに加え、現在地タイルの描写が未完了の間もラッシュ扱いにして
+  // 「立っている場所」を常に最優先で仕上げる(part8.js checkCurrentTileRush参照)
+  checkCurrentTileRush();
+  const _rush = performance.now() < 30000 || _curTileRush;
   let _buildBudget = Math.min(_rush ? 400 : 160, 20 + Math.floor(_buildBacklog / 20));
   // 【重要・2026-07-15】生成順序は地形→道路→建物のはずなのに、道路(pendingRoadMeshes)が
   // 固定6ms/フレームだった一方こちらはバックログに応じて最大80棟/フレームまで伸びる

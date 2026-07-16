@@ -560,6 +560,34 @@ async function fetchOSMTileBatch() {
   processOSMTileQueue(); // この枠が空いたので、キューに残りがあれば次を拾う
 }
 
+// 【2026-07-16】現在地タイルの「描写完了」監視。約1.5秒ごとに、(1)現在地タイルの
+// 道路データ確定(loadedOSMTiles)、(2)現在地タイル内の道路メッシュ待ち、(3)現在地タイル内の
+// 建物生成待ち、をチェックし、どれかが残っていれば_curTileRushを立てる。part9の生成ループが
+// これを見て、初期ラッシュと同じ拡大予算(建物400棟/14ms・道路優先の絞り緩和)で最優先処理する。
+// 順序自体は既存のゲート(地形→道路確定→建物のosmTilesReadyAround等)がタイル内でも守る。
+// 取得側の優先は既存の距離ソート(現在地タイル=距離0で常に先頭)+未確定時の1枚クエリで担保済み。
+let _curTileRush = false;
+let _curTileRushFrame = 0;
+function checkCurrentTileRush() {
+  _curTileRushFrame++;
+  if (_curTileRushFrame % 90 !== 0) return;
+  const T = OSM_TILE_M;
+  const tx = Math.floor(player.position.x / T), tz = Math.floor(player.position.z / T);
+  let rush = !loadedOSMTiles.has(tx + ',' + tz);
+  if (!rush) {
+    for (const r of pendingRoadMeshes) {
+      if (Math.floor((r.x1 + r.x2) / 2 / T) === tx && Math.floor((r.z1 + r.z2) / 2 / T) === tz) { rush = true; break; }
+    }
+  }
+  if (!rush) {
+    for (let i = pendingBuildingIdx; i < pendingBuildings.length; i++) {
+      const b = pendingBuildings[i];
+      if (Math.floor(b.x / T) === tx && Math.floor(b.z / T) === tz) { rush = true; break; }
+    }
+  }
+  _curTileRush = rush;
+}
+
 let _osmCheckFrame = 0;
 let _osmLastPx = null, _osmLastPz = null;
 function checkOSMTiles() {

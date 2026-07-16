@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3Dの街ができるまで — isehara-game の仕組み</title>
+<style>
+  :root{
+    --ink:#1a2233; --sub:#5a6577; --line:#dde3ec; --bg:#f4f6fa; --card:#ffffff;
+    --blue:#2b6cb0; --green:#2f855a; --orange:#c05621; --purple:#6b46c1; --red:#c53030;
+    --blue-l:#ebf4ff; --green-l:#ecf8f1; --orange-l:#fdf1e7; --purple-l:#f3eeff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Hiragino Sans","Yu Gothic UI","Meiryo",sans-serif;color:var(--ink);background:var(--bg);line-height:1.8}
+  .wrap{max-width:920px;margin:0 auto;padding:24px 20px 80px}
+  header{background:linear-gradient(135deg,#1a365d,#2b6cb0);color:#fff;border-radius:16px;padding:36px 32px;margin-bottom:28px}
+  header h1{margin:0 0 10px;font-size:26px}
+  header p{margin:0;opacity:.92;font-size:15px}
+  section{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:26px 28px;margin-bottom:24px}
+  h2{font-size:19px;margin:0 0 14px;display:flex;align-items:center;gap:10px}
+  h2 .num{background:var(--blue);color:#fff;border-radius:8px;min-width:30px;height:30px;display:inline-flex;align-items:center;justify-content:center;font-size:15px}
+  p{margin:8px 0}
+  .note{background:var(--blue-l);border-left:4px solid var(--blue);padding:10px 14px;border-radius:0 8px 8px 0;font-size:14px;margin:14px 0}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:16px 0}
+  .card{border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .card h3{margin:0 0 6px;font-size:15px}
+  .card p{font-size:13.5px;color:var(--sub);margin:4px 0}
+  .tag{display:inline-block;font-size:11.5px;padding:2px 10px;border-radius:999px;margin-bottom:6px;font-weight:600}
+  .t-blue{background:var(--blue-l);color:var(--blue)} .t-green{background:var(--green-l);color:var(--green)}
+  .t-orange{background:var(--orange-l);color:var(--orange)} .t-purple{background:var(--purple-l);color:var(--purple)}
+  figure{margin:18px 0;text-align:center}
+  figcaption{font-size:13px;color:var(--sub);margin-top:8px}
+  svg{max-width:100%;height:auto}
+  table{border-collapse:collapse;width:100%;font-size:14px;margin:12px 0}
+  th,td{border:1px solid var(--line);padding:8px 12px;text-align:left}
+  th{background:var(--bg)}
+  footer{text-align:center;color:var(--sub);font-size:12.5px;margin-top:30px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>3Dの街ができるまで</h1>
+  <p>このゲームは、街のデータをあらかじめ全部持っているわけではありません。<br>
+  プレイヤーが歩くその瞬間に、本物の地図データを取り寄せて、その場で街を「組み立て」ています。</p>
+</header>
+
+<!-- 1. 全体の流れ -->
+<section>
+  <h2><span class="num">1</span>全体の流れ:注文 → 配達 → 組み立て</h2>
+  <p>仕組みはレストランに似ています。プレイヤーの現在地が「注文」、地図データが「食材」、スマホの中の3Dエンジンが「調理場」です。</p>
+  <figure>
+    <svg viewBox="0 0 860 240" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+      <defs>
+        <marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8" fill="none" stroke="#5a6577" stroke-width="1.6"/>
+        </marker>
+      </defs>
+      <!-- player -->
+      <rect x="10" y="80" width="160" height="80" rx="12" fill="#ebf4ff" stroke="#2b6cb0"/>
+      <text x="90" y="112" text-anchor="middle" font-size="14" font-weight="bold" fill="#1a365d">プレイヤー</text>
+      <text x="90" y="134" text-anchor="middle" font-size="12" fill="#5a6577">「今ここにいます」</text>
+      <!-- server -->
+      <rect x="250" y="80" width="180" height="80" rx="12" fill="#f3eeff" stroke="#6b46c1"/>
+      <text x="340" y="106" text-anchor="middle" font-size="14" font-weight="bold" fill="#44337a">中継サーバー</text>
+      <text x="340" y="126" text-anchor="middle" font-size="11.5" fill="#5a6577">注文の取り次ぎ役</text>
+      <text x="340" y="144" text-anchor="middle" font-size="11.5" fill="#5a6577">一度取った物は保管(キャッシュ)</text>
+      <!-- sources -->
+      <rect x="510" y="10" width="330" height="62" rx="10" fill="#ecf8f1" stroke="#2f855a"/>
+      <text x="675" y="34" text-anchor="middle" font-size="13" font-weight="bold" fill="#22543d">OpenStreetMap(世界の地図データ)</text>
+      <text x="675" y="54" text-anchor="middle" font-size="11.5" fill="#5a6577">建物の形・道路・川・線路など</text>
+      <rect x="510" y="90" width="330" height="62" rx="10" fill="#ecf8f1" stroke="#2f855a"/>
+      <text x="675" y="114" text-anchor="middle" font-size="13" font-weight="bold" fill="#22543d">標高データ(国土地理院ほか)</text>
+      <text x="675" y="134" text-anchor="middle" font-size="11.5" fill="#5a6577">土地の高さ・山や谷の起伏</text>
+      <rect x="510" y="170" width="330" height="60" rx="10" fill="#fdf1e7" stroke="#c05621"/>
+      <text x="675" y="193" text-anchor="middle" font-size="13" font-weight="bold" fill="#7b341e">国別スタイル(ゲーム内蔵)</text>
+      <text x="675" y="212" text-anchor="middle" font-size="11.5" fill="#5a6577">国ごとの壁の色・屋根・装飾のレシピ</text>
+      <!-- arrows -->
+      <line x1="170" y1="110" x2="245" y2="110" stroke="#5a6577" stroke-width="1.6" marker-end="url(#ar)"/>
+      <text x="207" y="100" text-anchor="middle" font-size="11" fill="#5a6577">現在地</text>
+      <line x1="430" y1="100" x2="505" y2="48" stroke="#5a6577" stroke-width="1.6" marker-end="url(#ar)"/>
+      <line x1="430" y1="120" x2="505" y2="120" stroke="#5a6577" stroke-width="1.6" marker-end="url(#ar)"/>
+      <line x1="245" y1="140" x2="170" y2="140" stroke="#2b6cb0" stroke-width="2" marker-end="url(#ar)"/>
+      <text x="207" y="158" text-anchor="middle" font-size="11" fill="#2b6cb0">地図データ</text>
+      <line x1="505" y1="200" x2="120" y2="168" stroke="#c05621" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+    </svg>
+    <figcaption>図1: プレイヤーの現在地をもとに、必要な範囲の地図データだけを取り寄せる</figcaption>
+  </figure>
+  <div class="note">中継サーバーを挟む理由: ①同じ場所のデータを2回取りに行かない(保管庫=キャッシュ)、②地図データの提供元が混雑・故障しても、予備の提供先(3系統)に自動で切り替えられる。</div>
+</section>
+
+<!-- 2. データソース -->
+<section>
+  <h2><span class="num">2</span>使っているデータ:3種類の「材料」</h2>
+  <div class="cards">
+    <div class="card">
+      <span class="tag t-green">材料① 街の形</span>
+      <h3>OpenStreetMap(OSM)</h3>
+      <p>世界中のボランティアが作る無料の地図。建物の輪郭(上から見た形)、道路の線、川・線路・公園の位置が入っている。</p>
+      <p>約1.6km四方の「タイル(区画)」単位で、周辺をまとめて先読みする。</p>
+    </div>
+    <div class="card">
+      <span class="tag t-green">材料② 土地の高さ</span>
+      <h3>標高データ</h3>
+      <p>日本国内は国土地理院の標高タイルを優先。海外や取得失敗時は別サービス(OpenTopoData)に自動で切り替え。</p>
+      <p>これがないと坂の街でも真っ平らになってしまう。</p>
+    </div>
+    <div class="card">
+      <span class="tag t-orange">材料③ 見た目のレシピ</span>
+      <h3>国別スタイルプロファイル</h3>
+      <p>ゲーム内蔵のデータ。「この国なら壁はこの色、屋根はこの形、看板や装飾はこう」という国・地域ごとのレシピ集。</p>
+      <p>同じ箱型のビルでも、日本と香港でご当地らしい見た目になる。</p>
+    </div>
+  </div>
+</section>
+
+<!-- 3. 平面→立体 -->
+<section>
+  <h2><span class="num">3</span>平面の地図を、立体に起こす</h2>
+  <p>届く地図データは「建物を真上から見た輪郭」だけの平面情報です。ゲームはこの輪郭を<strong>型抜きクッキーのように上へ引き伸ばして</strong>ビルにします。高さの情報が地図にあればそれを使い、なければ建物の種類や大きさから推測します。</p>
+  <figure>
+    <svg viewBox="0 0 860 230" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+      <defs>
+        <marker id="ar2" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8" fill="none" stroke="#5a6577" stroke-width="1.8"/>
+        </marker>
+      </defs>
+      <!-- step1: footprint -->
+      <rect x="20" y="30" width="230" height="170" rx="10" fill="#f4f6fa" stroke="#dde3ec"/>
+      <text x="135" y="55" text-anchor="middle" font-size="13" font-weight="bold" fill="#1a2233">① 地図データ(平面)</text>
+      <polygon points="70,90 200,90 200,140 160,140 160,170 70,170" fill="#ebf4ff" stroke="#2b6cb0" stroke-width="2"/>
+      <text x="135" y="192" text-anchor="middle" font-size="11.5" fill="#5a6577">建物の輪郭(上から見た形)</text>
+      <!-- step2: extrude -->
+      <rect x="315" y="30" width="230" height="170" rx="10" fill="#f4f6fa" stroke="#dde3ec"/>
+      <text x="430" y="55" text-anchor="middle" font-size="13" font-weight="bold" fill="#1a2233">② 上に引き伸ばす</text>
+      <polygon points="370,160 470,160 470,100 370,100" fill="#bee3f8" stroke="#2b6cb0"/>
+      <polygon points="370,100 400,80 500,80 470,100" fill="#90cdf4" stroke="#2b6cb0"/>
+      <polygon points="470,160 500,140 500,80 470,100" fill="#63b3ed" stroke="#2b6cb0"/>
+      <line x1="352" y1="160" x2="352" y2="80" stroke="#c05621" stroke-width="1.6" marker-end="url(#ar2)"/>
+      <text x="345" y="125" text-anchor="end" font-size="11" fill="#c05621">高さ</text>
+      <text x="430" y="192" text-anchor="middle" font-size="11.5" fill="#5a6577">高さ情報が無ければ種類・広さから推測</text>
+      <!-- step3: style -->
+      <rect x="610" y="30" width="230" height="170" rx="10" fill="#f4f6fa" stroke="#dde3ec"/>
+      <text x="725" y="55" text-anchor="middle" font-size="13" font-weight="bold" fill="#1a2233">③ ご当地の見た目に</text>
+      <polygon points="665,160 765,160 765,100 665,100" fill="#fbd38d" stroke="#7b341e"/>
+      <polygon points="665,100 695,80 795,80 765,100" fill="#f6ad55" stroke="#7b341e"/>
+      <polygon points="765,160 795,140 795,80 765,100" fill="#ed8936" stroke="#7b341e"/>
+      <rect x="678" y="112" width="14" height="14" fill="#fff" stroke="#7b341e"/>
+      <rect x="704" y="112" width="14" height="14" fill="#fff" stroke="#7b341e"/>
+      <rect x="730" y="112" width="14" height="14" fill="#fff" stroke="#7b341e"/>
+      <rect x="678" y="136" width="14" height="14" fill="#fff" stroke="#7b341e"/>
+      <rect x="704" y="136" width="14" height="14" fill="#fff" stroke="#7b341e"/>
+      <rect x="730" y="136" width="14" height="14" fill="#fff" stroke="#7b341e"/>
+      <text x="725" y="192" text-anchor="middle" font-size="11.5" fill="#5a6577">壁の色・窓・装飾を国別レシピで追加</text>
+      <!-- arrows -->
+      <line x1="252" y1="115" x2="310" y2="115" stroke="#5a6577" stroke-width="2" marker-end="url(#ar2)"/>
+      <line x1="547" y1="115" x2="605" y2="115" stroke="#5a6577" stroke-width="2" marker-end="url(#ar2)"/>
+    </svg>
+    <figcaption>図2: 輪郭 → 立体化(押し出し) → 見た目づけ、の3ステップ</figcaption>
+  </figure>
+  <p>道路は「線」のデータをリボン状の面に広げ、1mごとに土地の高さに沿わせて敷きます。地図データにない空き地には、道路の密度に合わせて<strong>架空の家を自動生成</strong>して埋め、街らしい密度を保ちます(本物の建物や道路とは重ならないよう、先に場所を予約してから建てます)。</p>
+</section>
+
+<!-- 4. 距離リング -->
+<section>
+  <h2><span class="num">4</span>近くだけ作り込む:舞台セット方式</h2>
+  <p>周囲の街を全部一度に作るとスマホが固まります。そこで劇の舞台セットのように、<strong>プレイヤーから見える範囲だけを、距離に応じて作り分け</strong>ています。</p>
+  <figure>
+    <svg viewBox="0 0 860 420" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+      <!-- rings (radius scale: 6000m -> 195px) -->
+      <circle cx="330" cy="210" r="195" fill="#f4f6fa" stroke="#dde3ec"/>
+      <circle cx="330" cy="210" r="130" fill="#ecf8f1" stroke="#2f855a" stroke-dasharray="6 4"/>
+      <circle cx="330" cy="210" r="98"  fill="#ebf4ff" stroke="#2b6cb0"/>
+      <circle cx="330" cy="210" r="32"  fill="#fdf1e7" stroke="#c05621"/>
+      <circle cx="330" cy="210" r="5" fill="#c53030"/>
+      <text x="330" y="196" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#c53030">プレイヤー</text>
+      <!-- labels -->
+      <g font-size="12.5">
+        <line x1="356" y1="192" x2="560" y2="82" stroke="#c05621" stroke-width="1.2"/>
+        <text x="568" y="78" fill="#7b341e" font-weight="bold">〜約1km:自動生成の家</text>
+        <text x="568" y="96" fill="#5a6577" font-size="11.5">空き地を埋める架空の建物はこの範囲だけ</text>
+        <line x1="416" y1="163" x2="560" y2="152" stroke="#2b6cb0" stroke-width="1.2"/>
+        <text x="568" y="148" fill="#1a365d" font-weight="bold">〜3km:実在の建物</text>
+        <text x="568" y="166" fill="#5a6577" font-size="11.5">地図データの本物の建物を立体化する範囲</text>
+        <line x1="436" y1="290" x2="560" y2="272" stroke="#2f855a" stroke-width="1.2"/>
+        <text x="568" y="262" fill="#22543d" font-weight="bold">〜2.5km:道路の見た目</text>
+        <text x="568" y="280" fill="#5a6577" font-size="11.5">離れると道路の3D表示だけ休ませる</text>
+        <text x="568" y="296" fill="#5a6577" font-size="11.5">(地図上の記録は残る=すぐ復元できる)</text>
+        <line x1="470" y1="345" x2="560" y2="352" stroke="#5a6577" stroke-width="1.2"/>
+        <text x="568" y="348" fill="#1a2233" font-weight="bold">〜6km:地形(山・谷)</text>
+        <text x="568" y="366" fill="#5a6577" font-size="11.5">遠くの山並みは1枚の起伏メッシュで表現</text>
+      </g>
+    </svg>
+    <figcaption>図3: 距離に応じた作り分け(プレイヤーが動くと、この円ごと一緒に動く)</figcaption>
+  </figure>
+  <table>
+    <tr><th>距離</th><th>やること</th><th>たとえ</th></tr>
+    <tr><td>〜約1km</td><td>空き地に架空の家を自動生成</td><td>舞台の最前列:小道具まで作り込む</td></tr>
+    <tr><td>〜3km</td><td>実在の建物を立体化(3.8kmまで離れたら片付け)</td><td>舞台中央:主要なセット</td></tr>
+    <tr><td>〜6km</td><td>地形の起伏だけ表現</td><td>背景の描き割り</td></tr>
+  </table>
+  <div class="note">「作る距離(3km)」と「片付ける距離(3.8km)」をわざとズラしているのがポイント。境界線上をうろうろしても、作っては壊すの無駄な繰り返しが起きません。遠ざかった建物は捨てずに「休眠リスト」に控えさせ、近づいたら再登板させます。</div>
+</section>
+
+<!-- 5. 組み立ての順序 -->
+<section>
+  <h2><span class="num">5</span>組み立ての順序:土台から順番に</h2>
+  <p>実際の工事と同じで、順番を間違えると事故が起きます(例:地面より先に道路を作ると、後から地面が持ち上がって道路が埋まる)。そこで組み立ては必ずこの順序です。</p>
+  <figure>
+    <svg viewBox="0 0 860 130" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif">
+      <defs>
+        <marker id="ar3" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8" fill="none" stroke="#5a6577" stroke-width="1.8"/>
+        </marker>
+      </defs>
+      <g font-size="13" font-weight="bold" text-anchor="middle">
+        <rect x="20"  y="30" width="180" height="70" rx="12" fill="#ecf8f1" stroke="#2f855a"/>
+        <text x="110" y="60" fill="#22543d">① 地形</text>
+        <text x="110" y="82" font-size="11.5" font-weight="normal" fill="#5a6577">土地の高さを先に確定</text>
+        <rect x="240" y="30" width="180" height="70" rx="12" fill="#ebf4ff" stroke="#2b6cb0"/>
+        <text x="330" y="60" fill="#1a365d">② 道路・川</text>
+        <text x="330" y="82" font-size="11.5" font-weight="normal" fill="#5a6577">地形に沿わせて敷く</text>
+        <rect x="460" y="30" width="180" height="70" rx="12" fill="#fdf1e7" stroke="#c05621"/>
+        <text x="550" y="60" fill="#7b341e">③ 建物</text>
+        <text x="550" y="82" font-size="11.5" font-weight="normal" fill="#5a6577">道路・川を避けて建てる</text>
+        <rect x="680" y="30" width="160" height="70" rx="12" fill="#f3eeff" stroke="#6b46c1"/>
+        <text x="760" y="60" fill="#44337a">④ 森・緑</text>
+        <text x="760" y="82" font-size="11.5" font-weight="normal" fill="#5a6577">残った隙間に植える</text>
+      </g>
+      <line x1="200" y1="65" x2="235" y2="65" stroke="#5a6577" stroke-width="2" marker-end="url(#ar3)"/>
+      <line x1="420" y1="65" x2="455" y2="65" stroke="#5a6577" stroke-width="2" marker-end="url(#ar3)"/>
+      <line x1="640" y1="65" x2="675" y2="65" stroke="#5a6577" stroke-width="2" marker-end="url(#ar3)"/>
+    </svg>
+    <figcaption>図4: 組み立ての優先順位。前の工程が終わるまで次は待つ</figcaption>
+  </figure>
+  <p>もうひとつの工夫が<strong>「1コマあたりの工事予算」</strong>です。画面は1秒間に約60回描き直されますが、その1コマの中で街づくりに使ってよい時間をあらかじめ数ミリ秒に制限しています。作る物はすべて「順番待ちの列」に並び、<strong>プレイヤーに近いものから</strong>毎コマ少しずつ処理されます。だから大都市のど真ん中でも、画面がカクつかずに街が「じわじわ生えてくる」ように見えるのです。</p>
+</section>
+
+<!-- 6. まとめ -->
+<section>
+  <h2><span class="num">6</span>まとめ:安定して動かすための工夫</h2>
+  <div class="cards">
+    <div class="card">
+      <span class="tag t-purple">工夫①</span>
+      <h3>保管庫(キャッシュ)と予備回線</h3>
+      <p>一度取ったデータはサーバーに保管して再利用。地図の提供元は3系統用意し、不調なら自動で切り替え。</p>
+    </div>
+    <div class="card">
+      <span class="tag t-purple">工夫②</span>
+      <h3>見える範囲だけ作る</h3>
+      <p>距離に応じて作り込み度を変え、遠ざかった物は「片付けて控えに回す」。スマホでも動く軽さの秘訣。</p>
+    </div>
+    <div class="card">
+      <span class="tag t-purple">工夫③</span>
+      <h3>土台から順に、少しずつ</h3>
+      <p>地形→道路→建物→森の順を厳守し、1コマ数ミリ秒の予算内で近い順に組み立てる。カクつき防止。</p>
+    </div>
+  </div>
+  <p style="margin-top:16px"><strong>ひとことで言うと</strong> — 「世界中の本物の地図を材料に、プレイヤーの足元から数キロだけを、その場でリアルタイムに組み立て続けるゲーム」です。</p>
+</section>
+
+<footer>isehara-game / 3D街並み生成の仕組み(2026年7月時点)</footer>
+</div>
+</body>
+</html>

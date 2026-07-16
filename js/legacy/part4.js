@@ -323,7 +323,10 @@ function latLonToXZ(lat, lon) {
 // ======= 面フィーチャ(公園・水域・田畑・森) =======
 const avoidPolygons = []; // 手続き生成の建物を建ててはいけない領域
 const avoidGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
-const areaPolyBudget = { park: 80, water: 80, farm: 250, campus: 60 }; // 面メッシュのドローコール予算
+// 【2026-07-16】water 80→400。水の多いエリア(東京湾岸・大河川流域)ではセッション累計80枚が
+// すぐ尽き、以降の川・池の実形状ポリゴンが全てスキップされて細い推定幅リボンだけが残っていた
+// (「川幅が実際より細い」の主因)。水面ポリゴンは単純な面メッシュなので400でも負荷は軽い。
+const areaPolyBudget = { park: 80, water: 400, farm: 250, campus: 60 }; // 面メッシュのドローコール予算
 const lawnMat  = new THREE.MeshLambertMaterial({ color: MODE_CONF.lawn, side: THREE.DoubleSide });
 // リボン(ROAD_MAT.water)と同じMeshBasicにして、重なっても境目が見えないようにする
 const waterAreaMat = new THREE.MeshBasicMaterial({ color: MODE_CONF.water, side: THREE.DoubleSide });
@@ -699,8 +702,10 @@ function handleAreaFeature(el) {
       poolAdd(lampP, cx, gy + 4.1, cz, 0, 1, 1, 1, 0xffcc77);
     }
   } else if (isWater) {
-    if (span < 3000 && areaPolyBudget.water-- > 0) {
-      const tp = thinPts(pts, span > 400 ? 10 : 0);
+    // 【2026-07-16】span上限3000→8000。大河川の岸ポリゴンがスキップされて細いリボンだけに
+    // なっていた。大きいものは間引きを強めて頂点数を抑える。
+    if (span < 8000 && areaPolyBudget.water-- > 0) {
+      const tp = thinPts(pts, span > 3000 ? 30 : span > 400 ? 10 : 0);
       buildAreaPoly(tp, waterAreaMat, 0.15);
       const _wpEntry = { pts: tp, minX, maxX, minZ, maxZ };
       minimapWaterPolys.push(_wpEntry);
