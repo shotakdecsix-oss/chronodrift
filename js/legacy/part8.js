@@ -333,6 +333,48 @@ function buildOSMBatchQuery(bboxes) {
   return { query: `[out:json][timeout:${timeout}];(${parts.join('')});out count;out geom;`, timeout };
 }
 
+// ---- 【2026-07-16】OSMタイルのIndexedDBキャッシュ ----
+// 道路生成遅延の根本原因は「遠距離ジャンプ=location.reload()のたびに、同じタイルを
+// 毎回Overpassから取り直している」こと。検証済み(out count照合済み)の1タイル応答を
+// ブラウザのIndexedDBに保存し、再訪・リロード時はネットワークを介さず即時復元する。
+// Overpassへのリクエスト数自体が減るので、未キャッシュタイルの取得も速くなる好循環。
+// クエリ内容(OSM_TILE_CLAUSES)を変えた時はVERをバンプして旧キャッシュを無効化すること。
+const OSM_TILE_CACHE_VER = 'v1';
+const OSM_TILE_CACHE_TTL = 30 * 86400e3; // 30日(OSM編集の反映が最大30日遅れるのは許容)
+let _osmDBPromise = null;
+function osmCacheDB() {
+  if (_osmDBPromise) return _osmDBPromise;
+  _osmDBPromise = new Promise((resolve) => {
+    try {
+      const req = indexedDB.open('osmTileCache', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('tiles');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null); // プライベートモード等で使えなくても本体は動かす
+    } catch (e) { resolve(null); }
+  });
+  return _osmDBPromise;
+}
+async function osmCacheGet(key) {
+  const db = await osmCacheDB();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    try {
+      const rq = db.transaction('tiles', 'readonly').objectStore('tiles').get(OSM_TILE_CACHE_VER + ':' + key);
+      rq.onsuccess = () => {
+        const v = rq.result;
+        resolve(v && (Date.now() - v.ts) < OSM_TILE_CACHE_TTL ? v.data : null);
+      };
+      rq.onerror = () => resolve(null);
+    } catch (e) { resolve(null); }
+  });
+}
+function osmCachePut(key, data) { // fire-and-forget
+  osmCacheDB().then((db) => {
+    if (!db) return;
+    try { db.transaction('tiles', 'readwrite').objectStore('tiles').put({ ts: Date.now(), data }, OSM_TILE_CACHE_VER + ':' + key); } catch (e) {}
+  });
+}
+
 async function fetchOSMTileBatch() {
   // プレイヤーに近いタイルを優先(以前はキュー投入順で、進行方向の
   // タイルが後回しになり目の前で道路が途切れたまま待たされていた)
@@ -371,7 +413,12 @@ async function fetchOSMTileBatch() {
   // 再試行させ、リクエスト数の急増を防ぐ。
   const nextTile = osmTileQueue[0];
   const nextFailCount = nextTile ? (osmTileFailCount.get(nextTile.tx + ',' + nextTile.tz) || 0) : 0;
-  const batchSize = (!loadedOSMTiles.has(ptKey) || nextFailCount >= 2) ? 1 : OSM_TILE_BATCH;
+  // 【2026-07-16】プレイヤー近傍(3×3圏)のタイルは常に1枚クエリ。実測で1枚=1〜1.5秒、
+  // 3枚まとめ=10〜30秒(密集地)なので、体感を決める近傍タイルだけ小さく速く取る。
+  // 1枚クエリはIndexedDBキャッシュの対象にもなる(キャッシュはタイル単位のため)。
+  // 外周のタイルは従来どおり3枚まとめでリクエスト数を抑える。
+  const nearSolo = nextTile && Math.max(Math.abs(nextTile.tx + 0.5 - ptx), Math.abs(nextTile.tz + 0.5 - ptz)) <= 1.6;
+  const batchSize = (!loadedOSMTiles.has(ptKey) || nextFailCount >= 2 || nearSolo) ? 1 : OSM_TILE_BATCH;
   const batch = osmTileQueue.splice(0, batchSize); // 近い順
   const keys = batch.map(({tx, tz}) => `${tx},${tz}`);
   const bboxes = batch.map(({tx, tz}) => {
@@ -412,6 +459,23 @@ async function fetchOSMTileBatch() {
   const abortCtl = new AbortController();
   const timeoutId = setTimeout(() => abortCtl.abort(), tileTimeoutMs);
   try {
+    // 1枚クエリはまずIndexedDBキャッシュを照会(ヒットなら即時復元・ネットワーク不要)
+    if (batch.length === 1) {
+      const cached = await osmCacheGet(keys[0]);
+      if (cached) {
+        processTileData(cached, 1);
+        osmTileFailCount.delete(keys[0]);
+        loadedOSMTiles.add(keys[0]);
+        if (awaitingDestinationLoad && keys.includes(ptKey)) {
+          awaitingDestinationLoad = false;
+          showToast('✨ マップを表示しました', { duration: 3000 });
+        }
+        clearTimeout(timeoutId);
+        osmTileActiveCount--;
+        processOSMTileQueue(); // キャッシュヒットは待ち時間なしで即次のタイルへ
+        return;
+      }
+    }
     // 【重要・2026-07-15】以前はGETで ?data=<クエリ> をURLに埋め込んでいたが、6タイル
     // まとめ+多数のfeature種別(道路/建物/relation building/landuse/leisure/natural/
     // waterway/relation water/riverbank/railway/駅/amenity...)を含むクエリはURL長が
@@ -449,6 +513,8 @@ async function fetchOSMTileBatch() {
     const declared = countEl ? parseInt(countEl.tags && countEl.tags.total, 10) : NaN;
     if (!Number.isFinite(declared)) throw new Error('incomplete: count element missing');
     if (received < declared) throw new Error(`incomplete: ${received}/${declared} elements`);
+    // count検証を通過した完全な1タイル応答だけをIndexedDBへ保存(部分応答の汚染を防ぐ)
+    if (batch.length === 1) osmCachePut(keys[0], data);
     // 複数タイル分の要素が1つの配列で混ざって届くが、seenOSMWaysでway ID重複排除される
     // ので、1タイルの時と同じ processTileData にそのまま渡してよい。密度計算用にタイル枚数も渡す。
     processTileData(data, batch.length);
