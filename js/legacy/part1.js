@@ -635,8 +635,10 @@ function rebuildBuildingsInBounds(x0, x1, z0, z1) {
 // (よくあるヒステリシス方式。差が無いと境界線上でチラつく)。
 // UNLOAD側は当初1000mだったが、GEN(800m)との差が小さく、少し斜めに歩いただけでも
 // 頻繁に解放→再生成を繰り返しがちだったため1500mに広げ、ヒステリシス帯を厚くした。
-const BUILDING_GEN_DIST = 800;
-const BUILDING_UNLOAD_DIST = 1500;
+// 【2026-07-16】ユーザー要望で生成距離を2倍(800→1600)。UNLOADもヒステリシス帯の
+// 比率(約2倍近く)を保って拡大(1500→2800)。描画負荷が問題になったら戻す候補。
+const BUILDING_GEN_DIST = 1600;
+const BUILDING_UNLOAD_DIST = 2800;
 let _buildingUnloadFrame = 0;
 function unloadFarBuildings() {
   _buildingUnloadFrame++;

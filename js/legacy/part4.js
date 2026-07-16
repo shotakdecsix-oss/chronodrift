@@ -634,7 +634,11 @@ function processWaterRelation(el) {
         .map(r => thinPts(r.map(g => latLonToXZ(g.lat, g.lon)), tol))
         .filter(hp => hp.length >= 4 &&
                 hp[0].x >= minX && hp[0].x <= maxX && hp[0].z >= minZ && hp[0].z <= maxZ);
-      buildAreaPoly(pts, waterAreaMat, 0.15, holes);
+      // 【2026-07-16】水面は+0.15→-0.85(1m下降)。水面ポリゴンは岸の頂点間を平面補間する
+      // 粗い三角形なので、岸より低い場所を通る道路(+0.35)が水面下に埋まることがあった。
+      // 水面を一律1m下げ、道路・線路が常に水面より上になるようにする(岸際で水面が地形に
+      // 隠れてわずかに痩せて見えるのは許容)。
+      buildAreaPoly(pts, waterAreaMat, -0.85, holes);
       minimapWaterPolys.push(poly);
       polyGridAdd(minimapWaterGrid, poly);
     }
@@ -694,7 +698,7 @@ function handleAreaFeature(el) {
   } else if (isWater) {
     if (span < 3000 && areaPolyBudget.water-- > 0) {
       const tp = thinPts(pts, span > 400 ? 10 : 0);
-      buildAreaPoly(tp, waterAreaMat, 0.15);
+      buildAreaPoly(tp, waterAreaMat, -0.85); // 水面1m下降補正(上のholes付き水面と同じ理由)
       const _wpEntry = { pts: tp, minX, maxX, minZ, maxZ };
       minimapWaterPolys.push(_wpEntry);
       polyGridAdd(minimapWaterGrid, _wpEntry);
