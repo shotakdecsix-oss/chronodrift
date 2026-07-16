@@ -404,7 +404,9 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
     parts.push(addDecorLight(0xff4400, 1.5, 30, x, gy+h*0.8, z));
   } else if (type === 'temple') {
     parts.push(addDecorLight(0xffaa00, 1.2, 25, x, gy+h*0.8, z));
-  } else if (Math.random() < 0.06) {
+  } else if (MODE !== 'real' && Math.random() < 0.06) {
+    // 「魔法のオーラ」演出(半透明の紫球体+紫ライト)。ファンタジー系モード専用。
+    // 【2026-07-16】現実モードでは「建物を包む謎の紫球体」として違和感が強いため無効化。
     dm(UNIT_SPH, glowMat, x, gy + h * 0.6, z, maxWD * 1.6, maxWD * 1.6, maxWD * 1.6);
     parts.push(addDecorLight(0x8040ff, 0.8, 15, x, gy + h*0.6, z));
   }
