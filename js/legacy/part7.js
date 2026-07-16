@@ -107,7 +107,7 @@ function jumpToLatLon(toLat, toLon) {
   const farJump = !wideElev ||
     Math.abs(pos.x - wideCX) > WIDE_W * 0.32 || Math.abs(pos.z - wideCZ) > WIDE_D * 0.32;
   player.position.set(pos.x, 0, pos.z); // yはanimateの床追従が合わせる
-  if (playerMarker) { playerMarker.setLatLng([toLat, toLon]); playerMarker.openPopup(); }
+  if (playerMarker) playerMarker.setLatLng([toLat, toLon]); // 吹き出し廃止に伴いopenPopup()も削除
   if (leafletMap) leafletMap.setView([toLat, toLon], leafletMap.getZoom());
   // 遠景(FAR)グリッドの外へ飛んだら、その場を中心に地形を取り直す(富士山などでも地形・標高が出る)。
   // wideElevが未取得(初回ロードが失敗していた等)の場合もここで取得のきっかけになるようにする。
@@ -142,8 +142,7 @@ function openMapJump() {
 
     // Player marker
     const wizIcon = L.divIcon({ html: '🧙', className: '', iconSize: [28,28], iconAnchor:[14,14] });
-    playerMarker = L.marker([lat, lon], { icon: wizIcon }).addTo(leafletMap)
-      .bindPopup('現在地').openPopup();
+    playerMarker = L.marker([lat, lon], { icon: wizIcon }).addTo(leafletMap); // 「現在地」吹き出しは邪魔なので廃止(🧙マーカーだけで十分)
 
     // Tap to jump
     leafletMap.on('click', e => jumpToLatLon(e.latlng.lat, e.latlng.lng));

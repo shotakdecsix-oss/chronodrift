@@ -29,7 +29,10 @@ const osmTileQueue = [];
 // 2026年時点でもgall/lambertの2台がそれぞれ独立してrate limit=2を課している)に直接ぶつかる。
 // 3のままだと3本目が恒常的に429になり、バックオフ待ち(最大30秒)が積み重なって
 // 「道路が読み込まれない/ものすごく時間がかかる」の主因になっていた。実際の上限に合わせて2に戻す。
-const OSM_TILE_CONCURRENCY = 2;
+// 【2026-07-16】2→3。直接モードはミラー輪番(3ホスト)になったため、ホストあたりの
+// 同時実行は従来以下のまま全体スループットを上げられる。プロキシ経由でもサーバ側の
+// per-hostペース配分(1.1s)が守られるので上流には安全。429が増えるようなら2に戻す。
+const OSM_TILE_CONCURRENCY = 3;
 let osmTileActiveCount = 0;
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
 // 【重要】標高データ+初期OSMのロード完了までタイル取得を止めるゲート。
@@ -507,10 +510,13 @@ function checkOSMTiles() {
     const key = `${tx},${tz}`;
     if (!fetchedOSMTiles.has(key)) { fetchedOSMTiles.add(key); osmTileQueue.push({ tx, tz }); }
   };
-  // 周囲7x7(±約4.8km。OSM_TILE_M拡大に伴い先読み範囲も自動的に広がる)を先読み。
-  // 道路・建物データは建物生成(±360m)より広い範囲で先に用意する
-  for (let dx = -3; dx <= 3; dx++)
-    for (let dz = -3; dz <= 3; dz++)
+  // 【2026-07-16】7x7(49タイル)→5x5(25タイル)に縮小。ジャンプ直後の初期バックログが
+  // 半減し、近傍タイルの取得完了(=プレイ可能になるまでの体感待ち)が大幅に早くなる。
+  // 5x5でも最低±3200mをカバーし、道路のアンロード距離(ROAD_UNLOAD_DIST=2500m)・
+  // 建物生成距離(BUILDING_GEN_DIST=1600m)より広いので描写の穴は生じない。
+  // 進行方向の追加先読み(下)は従来どおり効くため、移動中の端到達も従来と変わらない。
+  for (let dx = -2; dx <= 2; dx++)
+    for (let dz = -2; dz <= 2; dz++)
       queueTile(px + dx * OSM_TILE_M, pz + dz * OSM_TILE_M);
   // 進行方向にさらに先まで先読み(移動中に描写の端へぶつからないように)
   const flen = Math.hypot(fdx, fdz);

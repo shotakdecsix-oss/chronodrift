@@ -278,7 +278,11 @@ function animate() {
   // 頭打ちになり、生成が体感で非常に遅くなっていた。件数上限自体を引き上げても、
   // 8msの実測時間打ち切りが依然として最終的な安全弁(香港・NY等の重いメガシティで
   // 1フレームが暴走するのを防ぐ)として効くため、上限を160に緩めてスループットを上げる。
-  let _buildBudget = Math.min(160, 20 + Math.floor(_buildBacklog / 20));
+  // 【2026-07-16】起動・ジャンプ直後(=リロード後)の30秒間は「初期ラッシュ」として
+  // 生成予算を大幅に引き上げ、体感の待ち時間を縮める(その間のFPS低下は許容)。
+  // 30秒過ぎたら従来予算に戻り、プレイ中のフレームレートは従来どおり守られる。
+  const _rush = performance.now() < 30000;
+  let _buildBudget = Math.min(_rush ? 400 : 160, 20 + Math.floor(_buildBacklog / 20));
   // 【重要・2026-07-15】生成順序は地形→道路→建物のはずなのに、道路(pendingRoadMeshes)が
   // 固定6ms/フレームだった一方こちらはバックログに応じて最大80棟/フレームまで伸びる
   // 可変制だったため、混雑時は建物の方が道路より速く追いつき、道路だけ取り残されて
@@ -287,13 +291,14 @@ function animate() {
   // 間は、建物側の予算をさらに絞って道路に追いつく時間を確保する(0にはしない — 道路が
   // 疎な田舎道沿いの孤立した建物などが永久に生成されなくなるのを避けるため)。
   const _roadBacklogForGate = pendingRoadMeshes.length;
-  if (_roadBacklogForGate > 80) _buildBudget = Math.min(_buildBudget, 5);
+  // 初期ラッシュ中は道路優先の絞りも緩める(5だと数万件の建物バックログが捌けない)
+  if (_roadBacklogForGate > 80) _buildBudget = Math.min(_buildBudget, _rush ? 40 : 5);
   // 【重要】件数ベースの予算だけだと、1棟あたりのコストが場所によって大きく違う場合に
   // 対応できない(香港・ニューヨークのような超高密度メガシティは1棟の生成コスト自体が
   // 伊勢原基準より重く、実機検証で「1フレームが暴走してタブごと固まって見える」不具合が
   // 確認された)。件数の上限に加えて実測時間(8ms)でも早期に打ち切り、残りは次フレームへ
   // 回すことで、どんなに1棟が重くても1フレームの処理時間には必ず天井を設ける。
-  const _buildFrameDeadline = performance.now() + 8;
+  const _buildFrameDeadline = performance.now() + (_rush ? 14 : 8); // 初期ラッシュ中は時間予算も拡大
   for (let n = 0; n < _buildBudget && pendingBuildingIdx < pendingBuildings.length; n++) {
     if (n > 0 && performance.now() > _buildFrameDeadline) break; // 時間切れ: 残りは次フレームへ
     const b = pendingBuildings[pendingBuildingIdx++];
