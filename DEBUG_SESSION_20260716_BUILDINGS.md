@@ -52,3 +52,29 @@ part1.js(dormantへのrot引き継ぎ) / part2.js(fitRealBuildingToRoads・_minA
 part3.js(addBuilding rot対応・tintWall・cbox回転情報) / part7.js(collBoxHitsXZ・ミニマップ回転) /
 part8.js(回転外接矩形・out count・OSM_TILE_BATCH=3) / part9.js(isOnRoad免除・fit/drop) /
 server/server.js(SKIP-CACHE・直接モードミラー輪番)
+
+---
+
+# 後続対応 (同日・高層ビル一区切り後)
+
+## 水面1m下降補正 → リバート(教訓)
+「道路が川・海に埋まる」対策として水面ポリゴン+0.15→-0.85、リボン+0.05→-0.95を試したが、
+見た目が崩れて即リバート。**水面のyOffは +0.15(ポリゴン)/+0.05(リボン) が正**。
+道路水没問題は未解決のまま保留(再挑戦時は一律下降ではなく、道路との重なり箇所だけの局所処理を検討)。
+
+## ジャンプ後ロード時間の改善
+- 遠距離ジャンプは location.reload() 経由のフル再起動(jumpToLatLon、part7.js)なので、
+  改善対象は「リロード後の初期ロード全体」。
+- OSMタイル初期先読み 7×7(49枚)→5×5(25枚)。5×5でも最低±3200mで
+  ROAD_UNLOAD_DIST(2500m)・実建物生成(3000m)をカバー。
+- OSM_TILE_CONCURRENCY 2→3(直接モードはミラー輪番3ホストなので安全)。
+- 初期ラッシュ: 起動後30秒は建物生成予算を400棟/フレーム・14ms上限に拡大
+  (通常時160棟・8ms。道路混雑時の絞りも5→40)。30秒後は自動で通常に戻る。
+- ジャンプ用マップの「現在地」吹き出し(bindPopup)を削除(🧙マーカーのみに)。
+
+## 建物の生成・消去距離を種類別に分離
+- 実OSM建物: BUILDING_GEN_DIST_REAL=3000m / BUILDING_UNLOAD_DIST_REAL=3800m
+  (unloadFarBuildings・reactivateNearbyDormantBuildings・part9生成ゲートをreal別分岐に)。
+- 手続き生成: CHUNK_RADIUS 3→8(960m≒1000m、消去は+2=1200m)。
+- 森(FOREST_R)はCHUNK_RADIUS連動をやめて480m固定(樹木負荷の暴騰防止)。
+- FPSが厳しい場合の調整候補: 実建物2000〜2500m、CHUNK_RADIUS 6(720m)。
