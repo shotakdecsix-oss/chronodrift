@@ -317,11 +317,35 @@ async function handleApi(req, res, apiKey) {
       log(`MISS ${apiKey} -> upstream ${up.status} (${Date.now() - t0}ms)`);
       if (up.status === 200) {
         const bodyStr = up.body.toString('utf8');
-        try { JSON.parse(bodyStr); } catch (e) { throw new Error('upstream returned non-JSON'); }
-        await fsp.mkdir(path.dirname(file), { recursive: true });
-        const tmp = file + '.tmp';
-        await fsp.writeFile(tmp, JSON.stringify({ url: upstreamUrl, cachedAt: new Date().toISOString(), contentType: up.contentType, body: bodyStr }));
-        await fsp.rename(tmp, file);
+        let parsed;
+        try { parsed = JSON.parse(bodyStr); } catch (e) { throw new Error('upstream returned non-JSON'); }
+        // 【重要・2026-07-16】Overpassはエラーもremarkも出さずに部分応答を200で返すことが
+        // ある(無言の部分応答)。従来は200+有効JSONなら無条件で永久キャッシュしていたため、
+        // 一度部分応答を掴むと以降の再試行が全てHITで同じ欠損データを返し続けていた
+        // (「リロードしても二度と埋まらない空き地」の一因)。クライアント(part8.js)が
+        // クエリに入れるout count;の宣言総数と実受信数を照合し、不完全な応答は
+        // キャッシュせずそのまま返す(クライアント側の同じ検証が失敗→再試行し、
+        // 次回はキャッシュ未汚染のまま上流に再問い合わせできる)。
+        let cacheable = true;
+        if (api.dir === 'overpass' && parsed && Array.isArray(parsed.elements)) {
+          if (parsed.remark && /timed out|timeout|out of memory/i.test(parsed.remark)) cacheable = false;
+          const countEl = parsed.elements.find((el) => el.type === 'count');
+          if (countEl) {
+            const declared = parseInt(countEl.tags && countEl.tags.total, 10);
+            const received = parsed.elements.filter((el) => el.type !== 'count').length;
+            if (!Number.isFinite(declared) || received < declared) cacheable = false;
+          } else if (/out[+%20]{1,3}count/i.test(reqBody)) {
+            cacheable = false; // count要素を要求したのに無い=出力先頭から切り捨てられている
+          }
+        }
+        if (cacheable) {
+          await fsp.mkdir(path.dirname(file), { recursive: true });
+          const tmp = file + '.tmp';
+          await fsp.writeFile(tmp, JSON.stringify({ url: upstreamUrl, cachedAt: new Date().toISOString(), contentType: up.contentType, body: bodyStr }));
+          await fsp.rename(tmp, file);
+        } else {
+          log(`SKIP-CACHE ${apiKey} incomplete overpass response`);
+        }
         return { status: 200, contentType: up.contentType, body: bodyStr };
       }
       return { status: up.status, contentType: up.contentType, body: up.body.toString('utf8') };

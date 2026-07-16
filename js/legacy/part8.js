@@ -298,7 +298,12 @@ function buildOSMBatchQuery(bboxes) {
   // 先にAbortControllerで接続を切ってしまうと、Overpassがまだ計算を続けている
   // 正常なクエリを「失敗」として扱ってしまう。Overpass側に指定したtimeout秒数を
   // 呼び出し側にも返し、クライアント側のabort猶予をそれに揃える(+バッファ)。
-  return { query: `[out:json][timeout:${timeout}];(${parts.join('')});out geom;`, timeout };
+  // 【重要・2026-07-16】out geom;の前にout count;を挟む。Overpassは負荷次第で、エラーも
+  // remarkも一切出さずに「その時応答できた分だけ」を200 OKで返すことがある(無言の部分応答。
+  // 新川・八丁堀で実測: 全タイルloaded扱いなのに実建物712件中631件が欠落)。out count;は
+  // 集合の確定後・要素出力の前に「本来の総数」を宣言する要素(type:"count")を先頭に出力する
+  // ため、宣言総数と実際に届いた要素数を突き合わせれば出力段階での切り捨てを検出できる。
+  return { query: `[out:json][timeout:${timeout}];(${parts.join('')});out count;out geom;`, timeout };
 }
 
 async function fetchOSMTileBatch() {
@@ -402,6 +407,15 @@ async function fetchOSMTileBatch() {
     if (data.remark && /timed out|timeout|out of memory/i.test(data.remark)) {
       throw new Error('partial result: ' + data.remark);
     }
+    // 【重要・2026-07-16】無言の部分応答の検出(buildOSMBatchQueryのout count;参照)。
+    // count要素(必ず要素出力の先頭)の宣言総数 vs 実受信数を照合。count要素自体が無い
+    // 200 OK応答も「出力の先頭から切り捨てられた」とみなし失敗扱い(このクエリは常に
+    // out count;を要求しているため、正常応答なら空集合でもtotal:"0"のcount要素が付く)。
+    const countEl = data.elements.find(el => el.type === 'count');
+    const received = data.elements.filter(el => el.type !== 'count').length;
+    const declared = countEl ? parseInt(countEl.tags && countEl.tags.total, 10) : NaN;
+    if (!Number.isFinite(declared)) throw new Error('incomplete: count element missing');
+    if (received < declared) throw new Error(`incomplete: ${received}/${declared} elements`);
     // 複数タイル分の要素が1つの配列で混ざって届くが、seenOSMWaysでway ID重複排除される
     // ので、1タイルの時と同じ processTileData にそのまま渡してよい。密度計算用にタイル枚数も渡す。
     processTileData(data, batch.length);
