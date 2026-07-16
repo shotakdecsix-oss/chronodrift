@@ -172,14 +172,10 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
     : new THREE.BoxGeometry(w, h, d);
   if (kind) { // 側面に窓タイルを並べ、天面/底面は無地領域へ
     const tw = kind === 'ind' ? 8 : 3.6; // 1タイルの実幅
-    // ビル系(office/apt、現実モード)はテクスチャが縦2フロア分(part2.js facadeMat参照)なので
-    // 縦の繰り返し数をfloors/2に(端数は窓サイズがわずかに伸縮するだけで見た目は自然)
-    const _vTile = (kind === 'office' || kind === 'apt') && MODE === 'real'
-      ? Math.max(1, Math.round(floors / 2)) : floors;
     setBoxFacadeUVs(geo,
       kind === 'house' ? 1 : Math.max(1, Math.round(w / tw)),
       kind === 'house' ? 1 : Math.max(1, Math.round(d / tw)),
-      kind === 'house' ? 1 : _vTile);
+      kind === 'house' ? 1 : floors);
   }
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(x, gy + h/2, z);
@@ -862,15 +858,9 @@ function addRoad(x1, z1, x2, z2, width, type='road') {
   const yOff = type === 'water' ? 0.05 : 0.35;
 
   if (isRailway && IS_REAL) {
-    // レールはテクスチャで表現済み(白帯オーバーレイ廃止)。踏切検出+駅ホーム用に記録
-    const seg = { x1, z1, x2, z2 };
-    railSegs.push(seg);
-    // 既存の道路との交差=踏切(道路側の方向で判定)
-    for (const r of minimapRoads) {
-      if (r.type !== 'road' && r.type !== 'tertiary' && r.type !== 'secondary') continue;
-      const pt = segCross(r, seg);
-      if (pt) addRailXing(pt);
-    }
+    // レールはテクスチャで表現済み(白帯オーバーレイ廃止)。駅ホーム用に記録
+    // 【2026-07-16】踏切の生成は廃止(ユーザー要望・メモリ/負荷削減。交差スキャンもスキップ)
+    railSegs.push({ x1, z1, x2, z2 });
   }
   // 非現実モードの線路(白帯オーバーレイ)はrebuildRoadMeshが本体メッシュと同時に生成する
 
@@ -884,11 +874,7 @@ function addRoad(x1, z1, x2, z2, width, type='road') {
   queueRoadMesh(rec);
 
   if (IS_REAL && !isRailway && type !== 'water') {
-    // 踏切(線路が先に生成済みの場合はこちらで検出)
-    if (railSegs.length && (type === 'road' || type === 'tertiary' || type === 'secondary')) {
-      const me = { x1, z1, x2, z2 };
-      for (const rs of railSegs) { const pt = segCross(me, rs); if (pt) { addRailXing(pt); break; } }
-    }
+    // (2026-07-16: 踏切生成は廃止 — 交差スキャンごと削除)
     // 交差点検出 → 横断歩道。OSMの共有ノード=セグメント端点なので、
     // 同一端点(1m格子)を3本以上が使っていたら交差点とみなしゼブラを敷く
     if (totalLen > 12) {

@@ -158,6 +158,10 @@ function processTileData(data, tileCount) {
     const isCampusOnly = !USES_MEIJI_LANDUSE && !tags.building &&
       ['school','university','college','hospital'].includes(tags.amenity || '');
     if (!tags.building && !isCampusOnly) return;
+    // 【2026-07-16】駅舎は生成しない(ユーザー要望)。線路またぎ建物のdrop(fitRealBuildingToRoads)
+    // だけでは線路脇に建つ駅舎が残るため、タグで明示的に除外する。
+    if (tags.building === 'train_station' || tags.building === 'station' ||
+        tags.railway === 'station' || tags.public_transport === 'station') return;
     if (USES_MEIJI_LANDUSE && tags.building) {
       // 実際には描画しないが、密度ヒントとして棟数だけ数えておく(フィルタで捨てる前に)
       const p0 = latLonToXZ(el.geometry[0].lat, el.geometry[0].lon);
