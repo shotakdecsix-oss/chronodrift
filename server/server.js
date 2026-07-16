@@ -48,6 +48,7 @@ try {
 const OVERPASS_MIRRORS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter', // 2026-07-16追加(クライアント直接モードの輪番と同じ3本構成に)
 ];
 
 const APIS = {
@@ -266,6 +267,15 @@ function httpsRequestOnce(urlStr, opts) {
   });
 }
 
+// 【2026-07-16】ホスト単位のクールダウン。429/5xx/接続エラーを返したホストは一定時間
+// 「不調」として記録し、fetchUpstreamMultiが即スキップして次のミラーへ行けるようにする。
+// 以前は毎リクエスト必ず本家(overpass-api.de)から2回試行+バックオフ(計5秒前後)を
+// 浪費してからミラーに進む構造で、本家がRenderの共有IPを拒否している間は全リクエストが
+// 一律に遅延→クライアント側がプロキシ不調と判断して直接モードへ逃げていた(実機502)。
+const hostCooldownUntil = new Map(); // host -> このtimestampまでスキップ
+const HOST_COOLDOWN_MS = 45000;
+function markHostCooldown(host) { hostCooldownUntil.set(host, Date.now() + HOST_COOLDOWN_MS); }
+
 async function fetchUpstream(upstreamUrl, opts) {
   opts = opts || {};
   const maxAttempts = opts.maxAttempts || MAX_ATTEMPTS;
@@ -277,6 +287,7 @@ async function fetchUpstream(upstreamUrl, opts) {
       if (res.status === 200) return res;
       lastErr = new Error('upstream HTTP ' + res.status);
       if (res.status === 429 || res.status >= 500) {
+        markHostCooldown(host);
         log(`  retry ${attempt}/${maxAttempts} (HTTP ${res.status}) ${host}`);
         await sleep(1500 * attempt);
         continue;
@@ -284,6 +295,7 @@ async function fetchUpstream(upstreamUrl, opts) {
       return res; // 4xx 等はそのまま返す
     } catch (e) {
       lastErr = e;
+      markHostCooldown(host);
       log(`  retry ${attempt}/${maxAttempts} (${e.message}) ${host}`);
       await sleep(1500 * attempt);
     }
@@ -297,6 +309,10 @@ async function fetchUpstream(upstreamUrl, opts) {
 // 一方のホストが混雑/拒否していてももう一方には影響しない。
 async function fetchUpstreamMulti(upstreamUrls, opts) {
   let lastRes = null, lastErr = null;
+  // クールダウン中のホストを外し、健全なミラーから先に試す(全滅時は従来どおり全部試す)
+  const _now = Date.now();
+  const healthy = upstreamUrls.filter((u) => (hostCooldownUntil.get(new URL(u).host) || 0) < _now);
+  if (healthy.length) upstreamUrls = healthy;
   for (const url of upstreamUrls) {
     try {
       const res = await fetchUpstream(url, Object.assign({}, opts, { maxAttempts: 2 }));
