@@ -192,7 +192,20 @@ function processTileData(data, tileCount) {
     let fw = w, fd = d, fh = h;
     ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ
     if (MODE === 'edo') fh = applyEdoHeightCap(style, fh); // 江戸: 現代建物の実測高さそのままだと高層ビルになるため木造家屋相当に抑える
-    pendingBuildings.push({ x: cx, z: cz, w: fw, d: fd, h: fh, style, real: true });
+    const realRec = { x: cx, z: cz, w: fw, d: fd, h: fh, style, real: true };
+    pendingBuildings.push(realRec);
+    // 【重要・2026-07-15】以前はbuildingGrid(hasRealBuildingNearby/hasRealHouseNearbyが参照する、
+    // 「本物のOSM建物がここにある」という手続き生成の裏付け判定用インデックス)への登録が、
+    // addBuilding()で実際にメッシュ化された時にしか行われていなかった。建物のバックログが
+    // 大きい(東京駅周辺のような超高密度エリアでは数万件溜まる)と、実際の描画が追いつくまで
+    // 何分もかかる一方、手続き生成の住宅充填(generateChunk)は道路・地形さえ揃えば
+    // すぐ動くため、「本物の商業ビルがまだ描画待ちで存在を知られていない」場所を
+    // 「実建物なし」と誤判定し、周辺のlanduse=residentialの気配だけで先に小さい戸建てを
+    // 敷き詰めてしまっていた(実機報告: 東京駅周辺で大きい商業ビルの場所に住宅が密集)。
+    // キューに積んだ時点(=OSMデータとして存在が確定した時点)で先にbuildingGridへ軽量登録
+    // しておくことで、実際の描画完了を待たずに手続き生成側が正しく「ここは本物の建物がある」
+    // と認識できるようにする。
+    buildingGridAdd(realRec);
   });
   // このバッチで新規に積んだ建物だけ、プレイヤー位置を中心とした近い順へ並べ替える
   // (part1.js sortNewEntriesByDistanceToPlayer参照)。

@@ -273,7 +273,12 @@ function animate() {
     sortNewEntriesByDistanceToPlayer(pendingBuildings, pendingBuildingIdx, b => ({ x: b.x, z: b.z }));
   }
   const _buildBacklog = pendingBuildings.length - pendingBuildingIdx;
-  let _buildBudget = Math.min(80, 20 + Math.floor(_buildBacklog / 25));
+  // 【重要・2026-07-15】東京駅のような超高密度エリアはバックログが数万件に達し、
+  // 上限80のままだと1棟あたりが軽い場所でも実測時間(下の8ms)に達する前に件数上限で
+  // 頭打ちになり、生成が体感で非常に遅くなっていた。件数上限自体を引き上げても、
+  // 8msの実測時間打ち切りが依然として最終的な安全弁(香港・NY等の重いメガシティで
+  // 1フレームが暴走するのを防ぐ)として効くため、上限を160に緩めてスループットを上げる。
+  let _buildBudget = Math.min(160, 20 + Math.floor(_buildBacklog / 20));
   // 【重要・2026-07-15】生成順序は地形→道路→建物のはずなのに、道路(pendingRoadMeshes)が
   // 固定6ms/フレームだった一方こちらはバックログに応じて最大80棟/フレームまで伸びる
   // 可変制だったため、混雑時は建物の方が道路より速く追いつき、道路だけ取り残されて
