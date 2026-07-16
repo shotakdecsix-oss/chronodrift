@@ -85,6 +85,25 @@ function applySizeFloor(style, w, d, h) {
   return { w: Math.max(w, f.w), d: Math.max(d, f.d), h: Math.max(h, f.h) };
 }
 
+// 【2026-07-16】現実モードの壁色バリエーション。同じ国プロファイル・同じstyle.colorでも
+// 建物ごとに明暗・寒暖の微差をつける。連続乱数ではなく6種の量子化ティントに限定することで、
+// lambertMat/facadeMatの色キーキャッシュが際限なく増殖しない(最大6倍で頭打ち)。
+const WALL_TINTS = [
+  [0.84, 0.86, 0.90], // 暗め・やや寒色
+  [0.93, 0.93, 0.95],
+  [1.00, 1.00, 1.00], // 素の色
+  [1.07, 1.05, 1.02], // 明るめ・やや暖色
+  [0.92, 0.97, 1.06], // 青みがかったガラス風
+  [1.12, 1.12, 1.14], // 白っぽい
+];
+function tintWall(c) {
+  const t = WALL_TINTS[(Math.random() * WALL_TINTS.length) | 0];
+  const r = Math.min(255, Math.round(((c >> 16) & 255) * t[0]));
+  const g = Math.min(255, Math.round(((c >> 8) & 255) * t[1]));
+  const b = Math.min(255, Math.round((c & 255) * t[2]));
+  return (r << 16) | (g << 8) | b;
+}
+
 function addBuilding(x, z, w, d, h, style, isReal, rot, railPass) {
   const _origH = h; // 遠方アンロード時、再生成できるよう元のhを覚えておく(下でhを斜面ぶん延長するため)
   // 4隅+中心の地形高さを見て、最低点を基礎にし最高点まで胴体を延長。
@@ -130,6 +149,11 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, railPass) {
     wallC = wp[(Math.random() * wp.length) | 0];
   } else {
     wallC = DEFAULT_WALLS[(Math.random() * DEFAULT_WALLS.length) | 0];
+  }
+  // 現実モード: 神社仏閣・教会以外は建物ごとに色味をばらす(style.color固定のオフィス街が
+  // 全部同じ色になる違和感への対策。tintWall参照)
+  if (MODE === 'real' && type !== 'shrine' && type !== 'temple' && type !== 'church') {
+    wallC = tintWall(wallC);
   }
 
   // ---- ファサード種別(手続きテクスチャ。神社仏閣・教会・キノコは従来の無地) ----
@@ -358,6 +382,24 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, railPass) {
     parts.push(addDecorLight(0x8040ff, 0.8, 15, x, gy + h*0.6, z));
   }
 
+  // 【2026-07-16】線路またぎ建物(駅ビル等)は通り抜けできることが見て分かるよう半透明にする。
+  // 材質はlambertMat/facadeMatの共有キャッシュ由来なので直接いじらず、この建物内で
+  // 使われている材質ごとに1回だけcloneして差し替える(駅ビルは数が少ないので増殖は軽微)。
+  if (railPass && railPass.length) {
+    const _matClones = new Map();
+    for (const p of parts) {
+      if (!p.material || !p.material.clone) continue;
+      let mc = _matClones.get(p.material);
+      if (!mc) {
+        mc = p.material.clone();
+        mc.transparent = true;
+        mc.opacity = 0.55;
+        _matClones.set(p.material, mc);
+      }
+      p.material = mc;
+    }
+  }
+
   // 【重要・2026-07-16】実OSM建物の向き(rot)を反映する。各パーツは軸平行前提の絶対座標で
   // 組み立てられているので、最後に建物中心(x,z)周りでまとめて剛体回転させる
   // (親Groupにrotation.y=rotを付けたのと同じ変換: 位置の回転+各パーツ自身のyaw加算)。
@@ -403,7 +445,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, railPass) {
   collGridAdd(cbox);
 
   // Minimap record
-  minimapBuildings.push({x, z, w, d, ck: currentChunkKey, bid});
+  minimapBuildings.push({x, z, w, d, rot: rot || 0, ck: currentChunkKey, bid}); // rotはミニマップの回転描画用
   // Spatial index for landuse fill de-duplication
   placedBuildings.push({x, z, r: Math.max(w,d)/2, ck: currentChunkKey, bid});
 

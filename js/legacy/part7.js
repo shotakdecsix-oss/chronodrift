@@ -360,7 +360,18 @@ function drawMinimap() {
     if (Math.abs(b.x - px) > R || Math.abs(b.z - pz) > R) continue;
     const c = toMap(b.x, b.z);
     const bw = b.w * scale, bd = b.d * scale;
-    mctx.fillRect(c.mx - bw/2, c.my - bd/2, bw, bd);
+    if (b.rot) {
+      // 【2026-07-16】3D側は回転外接矩形+メッシュ回転になったため(part8/part3)、
+      // ミニマップも同じ向きで描かないと実際の街並みと食い違う。
+      // world→canvasはtoMapの平行移動+スケールのみ(北固定)なので、canvas回転角は-rot。
+      mctx.save();
+      mctx.translate(c.mx, c.my);
+      mctx.rotate(-b.rot);
+      mctx.fillRect(-bw/2, -bd/2, bw, bd);
+      mctx.restore();
+    } else {
+      mctx.fillRect(c.mx - bw/2, c.my - bd/2, bw, bd);
+    }
   }
 
   // Camera FOV cone (blue) — shows what the player sees on screen
