@@ -555,8 +555,11 @@ const PERF_PRESET = (() => {
 })();
 const PERF = {
   //       道路メッシュ保持 / 実建物 生成・消去 / 手続きチャンク半径(×120m) / 森 / タイル先読み半径(×1600m)
+  // 【2026-07-16】標準のbGenRealを3000→2200に調整。IndexedDBタイルキャッシュ導入後は
+  // 東京駅級の密集地でも本当に全建物が届く(以前は429で実質フル密度に達していなかった)ため、
+  // 3000mフル密度はメモリ超過でクラッシュした。広い描写が欲しい場合は高品質を選ぶ。
   lite: { roadUnload: 1600, bGenReal: 1400, bUnloadReal: 2000, chunkR: 4,  forestR: 360, prefetchR: 2 },
-  std:  { roadUnload: 2500, bGenReal: 3000, bUnloadReal: 3800, chunkR: 8,  forestR: 480, prefetchR: 2 },
+  std:  { roadUnload: 2500, bGenReal: 2200, bUnloadReal: 2900, chunkR: 8,  forestR: 480, prefetchR: 2 },
   high: { roadUnload: 3200, bGenReal: 4200, bUnloadReal: 5200, chunkR: 10, forestR: 600, prefetchR: 3 },
 }[PERF_PRESET];
 const ROAD_UNLOAD_DIST = PERF.roadUnload;
