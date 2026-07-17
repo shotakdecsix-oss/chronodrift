@@ -502,87 +502,16 @@ function getCountryBuildingProfile(cc) {
   if (!cc) return null;
   return COUNTRY_BUILDING_PROFILES[cc] || REGION_PROFILES[REGION_FALLBACK_BY_COUNTRY[cc]] || null;
 }
-// 実測density(このバッチの建物フットプリント被覆率)が高いエリアは、国プロファイルに
-// 関わらずdenseHighRise相当の高層扱いに上書きする。国単位の固定ルールだけだと、同じ国の
-// 中でも都心部(例: マンハッタン)と郊外の違いを表現できない(「USも高密度地帯は高層ビルにして」)。
-// 棟数(buildings/km²)ではなく敷地被覆率(建物面積の合計/エリア面積)を見るのは、
-// マンハッタンのように「棟数は多くないが1棟が巨大」な高層街区でも正しく検出するため
-// (棟数基準だと、狭い区画がぎっしり並ぶ香港型の密集地しか拾えない)。
-// 閾値0.22は、郊外の戸建て(被覆率5〜10%程度)と都心の高層街区(20〜40%超)の中間より
-// 都心寄りに設定し、普通の住宅密集地までは高層化しないようにしている。
-const DENSE_URBAN_COVERAGE_RATIO = 0.22;
-function applyLocalDensityOverride(baseProfile, footprintAreaM2, areaM2) {
-  if (areaM2 > 0 && (footprintAreaM2 / areaM2) >= DENSE_URBAN_COVERAGE_RATIO) {
-    return REGION_PROFILES.denseHighRise;
-  }
-  return baseProfile;
-}
-// ======= 局所密度判定のグリッド化(2026-07-14) =======
-// 【経緯】当初のapplyLocalDensityOverrideは「1バッチ全体で1つの被覆率」しか見ておらず、
-// (旧estimateFootprintAreaM2で建物フットプリント合計を求め、バッチの地理的な広さで割るだけの
-// 単純な比較だった)。バッチ=part6.jsの初期ロードなら伊勢原OSM_BOUNDS全体(約12km²)、
-// part8.jsの歩行時取得なら最大6タイル分(約15km²)と、どちらも「駅前の密集地〜田畑」が
-// 同時に混ざりうる広さがある。その結果、実機検証で以下の二重の誤判定が発生した:
-//   (a) 伊勢原: 駅前が押し上げた平均被覆率が閾値を超え、同じバッチ内の田畑の建物までまとめて
-//       高層(denseHighRise)化されてしまい、田園地帯にペンシルビルが林立する不具合。
-//   (b) ニューヨーク等: 逆に、広い道路・公園・河川を含む同バッチの平均で薄まり、実際は
-//       密集した街区(マンハッタンの一角等)でも閾値を割ってしまい、高層化が発動しない不具合。
-// どちらも「バッチという単位が地理的に広すぎる」ことが原因なので、バッチをDENSITY_CELL_M四方の
-// 格子に分割し、セルごとに被覆率を集計→判定する。セルは「概ね1〜数区画」程度の大きさを狙い、
-// 細かすぎて同じ通り沿いで階数がバラバラになる(既存のバッチ単位設計が避けたかった見た目のブレ)
-// ことも、粗すぎて密集地と農地を混同することも避ける。
-const DENSITY_CELL_M = 250;
-// elements内の建物フットプリントを、ワールド座標のDENSITY_CELL_M格子セルごとに集計する。
-// 戻り値はセルキー("cx,cz")→合計フットプリント面積(m2)のMap。
-function computeLocalDensityGrid(elements) {
-  const cellFootprint = new Map();
-  for (const el of elements) {
-    if (el.type !== 'way' || !el.tags || !el.tags.building || !el.geometry || el.geometry.length < 4) continue;
-    const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
-    let cx = 0, cz = 0;
-    pts.forEach(p => { cx += p.x; cz += p.z; });
-    cx /= pts.length; cz /= pts.length;
-    let maxDx = 0, maxDz = 0;
-    pts.forEach(p => { maxDx = Math.max(maxDx, Math.abs(p.x - cx)); maxDz = Math.max(maxDz, Math.abs(p.z - cz)); });
-    const area = Math.max(maxDx * 2, 2) * Math.max(maxDz * 2, 2);
-    const key = Math.floor(cx / DENSITY_CELL_M) + ',' + Math.floor(cz / DENSITY_CELL_M);
-    cellFootprint.set(key, (cellFootprint.get(key) || 0) + area);
-  }
-  return cellFootprint;
-}
-// ======= 農地近接による高層化抑制(2026-07-14) =======
-// 【経緯】250mセル化(上記)だけでは、伊勢原のような「駅前は確かに密集しているが、
-// 徒歩圏内には田畑が広がる」地域まで、局所的な被覆率だけで高層(denseHighRise)化して
-// しまうケースが実機で残った。マンハッタンのような正真正銘の都心には、そもそも周囲数km
-// 以内に田畑は存在しない。「セル単体の被覆率」に加えて「そもそも田園地帯の中の一角に
-// 過ぎないか」を見ることで、都心か町場かをより正しく見分ける。
-// FARMLAND_CELL_Mは密度セル(250m)よりずっと広い格子で「近くに田畑があるか」だけを
-// 大まかに判定する(田畑ポリゴン自体の被覆率は問わない。存在するかどうかの二値判定)。
-const FARMLAND_CELL_M = 1000;
-const FARMLAND_CHECK_RADIUS_CELLS = 2; // 中心±2セル=約5km四方(概ね半径2〜2.5km圏内)を「近く」とみなす
-const FARMLAND_LANDUSE = new Set(['farmland', 'orchard', 'meadow', 'allotments']);
-// elements内のlanduse=farmland/orchard/meadow/allotmentsポリゴンの頂点から、
-// それらが属するFARMLAND_CELL_M格子セルの集合を作る(computeLocalDensityGridと対になる関数)。
-function computeFarmlandCells(elements) {
-  const cells = new Set();
-  for (const el of elements) {
-    if (el.type !== 'way' || !el.tags || !FARMLAND_LANDUSE.has(el.tags.landuse) || !el.geometry || el.geometry.length < 3) continue;
-    for (const g of el.geometry) {
-      const p = latLonToXZ(g.lat, g.lon);
-      cells.add(Math.floor(p.x / FARMLAND_CELL_M) + ',' + Math.floor(p.z / FARMLAND_CELL_M));
-    }
-  }
-  return cells;
-}
-// 座標(x,z)の周囲FARMLAND_CHECK_RADIUS_CELLS圏内に田畑セルが1つでもあればtrue。
-function hasFarmlandNear(farmlandCells, x, z) {
-  if (!farmlandCells || farmlandCells.size === 0) return false;
-  const gx = Math.floor(x / FARMLAND_CELL_M), gz = Math.floor(z / FARMLAND_CELL_M);
-  for (let dx = -FARMLAND_CHECK_RADIUS_CELLS; dx <= FARMLAND_CHECK_RADIUS_CELLS; dx++)
-    for (let dz = -FARMLAND_CHECK_RADIUS_CELLS; dz <= FARMLAND_CHECK_RADIUS_CELLS; dz++)
-      if (farmlandCells.has((gx + dx) + ',' + (gz + dz))) return true;
-  return false;
-}
+// 【2026-07-17・ユーザー判断で撤去】実測density(建物フットプリント被覆率)が250mセルで
+// 22%を超えたら国・地域を問わずdenseHighRise(最低6階)を強制する仕組みがあったが、
+// 実データ(building:levels等の実測タグ)の忠実度が上がった今では不要と判断し撤去した。
+// 撤去前の経緯: 小さい建物が密集しているだけの地域(例: 茅ヶ崎の海沿い)まで「香港型の
+// 高層密集地」と誤認し、実測タグ由来の低層高さをMath.maxで問答無用に上書きしてしまう
+// バグがあった(唯一の抑制策だった「近くに田畑があるか」判定は、田畑が存在しない海沿いの
+// 町には効かなかった)。関連していたapplyLocalDensityOverride/computeLocalDensityGrid/
+// hasFarmlandNear/computeFarmlandCells(DENSITY_CELL_M・FARMLAND_CELL_M等)も合わせて削除。
+// 国別プロファイル(getCountryBuildingProfile)自体は残る — タグ実測値が無い箇所の
+// フォールバック(壁色・屋根形状等)としては引き続き有効。
 // ======= 駅密集(ターミナル駅)による強制高層化(2026-07-14) =======
 // 【経緯】250mセルの被覆率判定だけだと、東京・NYのような真の都心部でも、広い道路・
 // 広場を含むセルでは被覆率が閾値(0.22)を割り、denseHighRise化が発動しないケースが
@@ -631,18 +560,14 @@ function isStationHubNear(x, z) {
   }
   return false;
 }
-// 指定座標(建物の重心x,z)が属するセルの被覆率で、その建物1棟分のプロファイルを決める。
-// gridがnull(現実モード以外、またはOSM要素が無いバッチ)ならbaseProfileをそのまま返す。
-// セル面積は常にDENSITY_CELL_M四方の固定値(セル自体の大きさは地理的に変わらないため)。
-// 判定の優先順位: ①ターミナル駅近接(最有力の都心シグナル。田畑近接より優先)
-// →②田畑近接(高層化を抑制)→③250mセルの被覆率(通常の判定)。
-function localDensityProfileAt(baseProfile, grid, x, z, farmlandCells) {
+// 指定座標(建物の重心x,z)のプロファイルを決める。ターミナル駅近接(isStationHubNear。
+// 現在はSTATION_HUB_ENABLED=falseで無効)ならdenseHighRise、それ以外はbaseProfile
+// (国別プロファイル、無ければnull=既定値)をそのまま返す。
+// 【2026-07-17】被覆率ベースの局所高層化(local density override)は撤去済み
+// (実測タグの忠実度向上により不要と判断。撤去理由は直前のコメント参照)。
+function localDensityProfileAt(baseProfile, x, z) {
   if (isStationHubNear(x, z)) return REGION_PROFILES.denseHighRise;
-  if (hasFarmlandNear(farmlandCells, x, z)) return baseProfile; // 田畑近接 → 高層化しない
-  if (!grid) return baseProfile;
-  const key = Math.floor(x / DENSITY_CELL_M) + ',' + Math.floor(z / DENSITY_CELL_M);
-  const footprint = grid.get(key) || 0;
-  return applyLocalDensityOverride(baseProfile, footprint, DENSITY_CELL_M * DENSITY_CELL_M);
+  return baseProfile;
 }
 // roofShapeWeights({flat,gable,hip,shed}の一部だけでも可)から1つ重み付き抽選する。
 // タグ('roof:shape')がある建物には使わない — あくまでタグ欠損時のフォールバック専用。

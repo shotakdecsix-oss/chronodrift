@@ -80,22 +80,14 @@ function processStationNodes(elements) {
 
 function processTileData(data, tileCount) {
   if (!data || !data.elements) return;
-  // このバッチ(tileCount枚のタイル分、1枚=OSM_TILE_M四方=最大6枚で約15km²)の実測建物密度を
-  // 先に見て、国プロファイルより高層寄りに上書きするか決める(part6.js PASS-2と同じ考え方。
-  // 「USも高密度地帯は高層ビルにして」への対応 — 国単位の固定ルールだけでは同じ国の中の
-  // 都心部と郊外の違いを表現できないため、実測の建物密度で判定する)。
-  // 【重要】以前はバッチ全体で1つの被覆率しか見ていなかったため、広い道路・公園・河川を
-  // 含む6タイル分の平均で薄まり、実際は密集した街区(マンハッタンの一角等)でも高層化が
-  // 発動しない不具合があった。DENSITY_CELL_M格子で建物1棟ごとに判定する
-  // (経緯・格子サイズの選定理由はpart2.js computeLocalDensityGrid参照)。
   // building=タグを持つrelation(マルチポリゴン)をway相当の疑似要素に変換し、既存のbuilding
-  // 処理・密度計算に合流させる(part2.js synthesizeBuildingRelationWays参照。地図上に見える
+  // 処理に合流させる(part2.js synthesizeBuildingRelationWays参照。地図上に見える
   // 大きな建物枠が生成システムに一切渡っていなかった不具合の対策)。
   const buildingElements8 = data.elements.concat(synthesizeBuildingRelationWays(data.elements, seenOSMRelations));
+  // 国別プロファイル(タグ実測値が無い箇所のフォールバックにのみ使う)。
+  // 【2026-07-17】ここでのbuildingElements8全体の被覆率判定(local density override)は
+  // 撤去済み(part2.js localDensityProfileAt参照。実測タグの忠実度向上により不要と判断)。
   const cprofH8Base = MODE === 'real' ? getCountryBuildingProfile(currentCountryCode) : null;
-  const densityGrid8 = MODE === 'real' ? computeLocalDensityGrid(buildingElements8) : null;
-  // 周囲に田畑があるエリアは被覆率に関わらず高層化しない(part2.js computeFarmlandCells参照)。
-  const farmlandCells8 = MODE === 'real' ? computeFarmlandCells(data.elements) : null;
   // 至近距離に駅が複数あるエリア(ターミナル駅)は強制的に高層ビル区域にする。
   // 駅ノードはグローバルに(タイル取得バッチをまたいで)蓄積する
   // (part2.js registerStationPoints参照。東京・NY等の対策)。
@@ -201,12 +193,8 @@ function processTileData(data, tileCount) {
     let style = getBuildingStyle(tags);
     if (MODE === 'edo' && shouldSkipEdoBuilding(style)) return; // 江戸: 現代の建物密度をそのまま使わず間引く
     const resolvedH = resolveBuildingHeight(tags);
-    // 国プロファイルの階数フォールバック・最低階数floor(part6.js PASS-2と同じロジック)。
-    // 【重要】ここ(part8.js)はプレイヤーが移動して新しいOSMタイルを取得するたびに
-    // 呼ばれる経路で、part6.js側だけに国プロファイルを配線していたため、ジャンプ直後の
-    // 初期範囲を過ぎて歩き回った先の建物には反映されていなかった(香港で歩き続けると
-    // 低層タグの建物がまた出る不具合の原因)。
-    const cprofH8 = localDensityProfileAt(cprofH8Base, densityGrid8, cx, cz, farmlandCells8);
+    // 国プロファイルの階数フォールバック・最低階数floor。
+    const cprofH8 = localDensityProfileAt(cprofH8Base, cx, cz);
     const [lvMin8, lvMax8] = (cprofH8 && cprofH8.levelsRange) || [1, 3];
     const levels = parseInt(tags['building:levels']) || (lvMin8 + Math.floor(Math.random() * (lvMax8 - lvMin8 + 1)));
     let h = resolvedH != null ? resolvedH : Math.max(levels*3,3)+Math.random()*2;
