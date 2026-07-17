@@ -66,13 +66,8 @@ const CANDY_BAND_MATS = [0xffa0c0, 0xa0d8ff, 0xffe090].map(c => new THREE.MeshBa
 //       office=ビル(1マス=1フロア) / ind=工場・倉庫(1マス=約8m)
 // 描画ルール: キャンバス左上12px四方には何も描かない
 // (BoxGeometryの天面/底面UVをこの無地部に向けるため。setBoxFacadeUVs 参照)
+// 【2026-07-17】shadeHexはjs/lib/pure.jsへ移動(CODE_REVIEW_20260717 P13-1)。
 const _hex6 = c => '#' + ('00000' + c.toString(16)).slice(-6);
-function shadeHex(c, f) {
-  const r = Math.min(255, ((c >> 16 & 255) * f) | 0),
-        g = Math.min(255, ((c >> 8 & 255) * f) | 0),
-        b = Math.min(255, ((c & 255) * f) | 0);
-  return r << 16 | g << 8 | b;
-}
 const _shadeCss = (c, f) => _hex6(shadeHex(c, f));
 const facadeCache = new Map();
 function facadeMat(kind, color, variant) {
@@ -651,17 +646,7 @@ function localDensityProfileAt(baseProfile, grid, x, z, farmlandCells) {
 }
 // roofShapeWeights({flat,gable,hip,shed}の一部だけでも可)から1つ重み付き抽選する。
 // タグ('roof:shape')がある建物には使わない — あくまでタグ欠損時のフォールバック専用。
-function pickWeighted(weights) {
-  const keys = Object.keys(weights);
-  const total = keys.reduce((s, k) => s + (weights[k] || 0), 0);
-  if (total <= 0) return null;
-  let r = Math.random() * total;
-  for (const k of keys) {
-    r -= weights[k] || 0;
-    if (r <= 0) return k;
-  }
-  return keys[keys.length - 1];
-}
+// 【2026-07-17】pickWeightedはjs/lib/pure.jsへ移動(CODE_REVIEW_20260717 P13-1)。
 
 const ENTRANCE_MAT = new THREE.MeshBasicMaterial({ color: 0x1a2430 }); // ビル1階の玄関ガラス
 const TANK_MAT = new THREE.MeshLambertMaterial({ color: 0xd8d4c8 });   // 屋上貯水槽
@@ -673,17 +658,29 @@ const CROSS_MAT = new THREE.MeshBasicMaterial({ color: 0xff0000 });    // 病院
 // 上限(max)を超えた分は追加されないため、負荷は上限で頭打ちになる。
 const _dummy = new THREE.Object3D();
 const _tmpColor = new THREE.Color();
-function makePool(geo, mat, max) {
+function makePool(geo, mat, max, name) {
   const m = new THREE.InstancedMesh(geo, mat, max);
   m.count = 0;
   m.frustumCulled = false; // インスタンスが広域に散るため全体カリング無効(1ドローコールなので安い)
   scene.add(m);
-  return { mesh: m, max, n: 0 };
+  return { mesh: m, max, n: 0, name: name || null };
 }
 // 注意: 同じプールでは color を「常に渡す」か「常に渡さない」かを統一する
 // (instanceColor バッファは初期値0=黒のため混在させると未設定分が黒くなる)
+// 【2026-07-17・CODE_REVIEW_20260717 P8-a】インスタンスプールはセッション累計の
+// 使い切りで、遠くへ移動してもリサイクルされない(森=rebuildForestだけは移動のたび
+// 作り直す方式で解決済み)。以前は枯渇しても呼び出し元が-1/早期returnで静かに
+// 「後から訪れた地域だけ小物が無い」状態になっていたため、可視化のため初回だけ警告する。
+function poolFull(pool) {
+  if (pool.n < pool.max) return false;
+  if (!pool._warned) {
+    pool._warned = true;
+    console.warn(`[poolAdd] プール"${pool.name || '(unnamed)'}"が上限(${pool.max})に達しました。以降このプールの小物は生成されません。`);
+  }
+  return true;
+}
 function poolAdd(pool, x, y, z, ry, sx, sy, sz, color) {
-  if (pool.n >= pool.max) return -1;
+  if (poolFull(pool)) return -1;
   const idx = pool.n; // 呼び出し元がインスタンス番号を覚えておけば、後から位置だけ更新できる
   _dummy.position.set(x, y, z);
   _dummy.rotation.set(0, ry || 0, 0);
@@ -716,7 +713,7 @@ const poleP = makePool(new THREE.CylinderGeometry(0.11, 0.16, 8, 6),
   MODE === 'edo'     ? new THREE.MeshLambertMaterial({ color: 0x6a4a2a }) :
   MODE === 'marchen' ? new THREE.MeshLambertMaterial({ color: 0xff9bb8 }) :
   MODE === 'space'   ? new THREE.MeshLambertMaterial({ color: 0x223344, emissive: 0x2266ff, emissiveIntensity: 0.9 }) :
-                       new THREE.MeshLambertMaterial({ color: 0x776a5c }), 3000);
+                       new THREE.MeshLambertMaterial({ color: 0x776a5c }), 3000, 'poleP');
 const TREE_MAX = USES_MEIJI_LANDUSE ? 5000 : 3500; // 明治・江戸は里山・並木で木が主役
 const treeTrunkP = makePool(new THREE.CylinderGeometry(0.14, 0.24, 1.6, 5), new THREE.MeshLambertMaterial({ color: 0x5a4028 }), TREE_MAX);
 // 木の樹冠 treeTopPools は TREE_GREENS 定義後(下方)で作る(instanceColor を使わない単色プール)
@@ -725,22 +722,22 @@ const vendP = makePool(
   MODE === 'edo' ? new THREE.CylinderGeometry(0.55, 0.65, 1.2, 8) : new THREE.BoxGeometry(1.0, 1.8, 0.75),
   MODE === 'edo'   ? new THREE.MeshLambertMaterial({ color: 0xffffff }) :
   MODE === 'space' ? new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x226688 }) :
-                     new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x555544 }), 400);
-const guardP     = makePool(new THREE.BoxGeometry(1, 0.32, 0.12), new THREE.MeshLambertMaterial({ color: 0xffffff }), 2500);
-const benchP     = makePool(new THREE.BoxGeometry(1.7, 0.4, 0.55), new THREE.MeshLambertMaterial({ color: 0x8a6a40 }), 400);
+                     new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x555544 }), 400, 'vendP');
+const guardP     = makePool(new THREE.BoxGeometry(1, 0.32, 0.12), new THREE.MeshLambertMaterial({ color: 0xffffff }), 2500, 'guardP');
+const benchP     = makePool(new THREE.BoxGeometry(1.7, 0.4, 0.55), new THREE.MeshLambertMaterial({ color: 0x8a6a40 }), 400, 'benchP');
 // 標識: 江戸=高札(木板) / 宇宙=ネオンパネル
 const signBoardP = makePool(new THREE.BoxGeometry(1.0, 0.75, 0.06),
   MODE === 'edo'   ? new THREE.MeshLambertMaterial({ color: 0x8a6a4a }) :
   MODE === 'space' ? new THREE.MeshBasicMaterial({ color: 0x22ddff }) :
   MODE === 'marchen' ? new THREE.MeshLambertMaterial({ color: 0xff88bb }) :
-                     new THREE.MeshLambertMaterial({ color: 0x2255cc, emissive: 0x112244 }), 400);
+                     new THREE.MeshLambertMaterial({ color: 0x2255cc, emissive: 0x112244 }), 400, 'signBoardP');
 // 行灯/キャンディ玉を全電柱に付けるモードは上限を拡大
 const POLE_ORB = MODE === 'edo' ? 0xffb050 : MODE === 'marchen' ? 0xffe080 : null;
-const lampP      = makePool(new THREE.BoxGeometry(0.3, 0.3, 0.3), new THREE.MeshBasicMaterial({ color: 0xffffff }), POLE_ORB ? 3500 : 700);
+const lampP      = makePool(new THREE.BoxGeometry(0.3, 0.3, 0.3), new THREE.MeshBasicMaterial({ color: 0xffffff }), POLE_ORB ? 3500 : 700, 'lampP');
 // 明治では signalP を道祖神(石)として使う
 const signalP    = makePool(
   IS_MEIJI ? new THREE.BoxGeometry(0.6, 0.9, 0.45) : new THREE.BoxGeometry(1.1, 0.38, 0.35),
-  IS_MEIJI ? new THREE.MeshLambertMaterial({ color: 0x8a8a82 }) : new THREE.MeshLambertMaterial({ color: 0x333338 }), IS_MEIJI ? 600 : 300);
+  IS_MEIJI ? new THREE.MeshLambertMaterial({ color: 0x8a8a82 }) : new THREE.MeshLambertMaterial({ color: 0x333338 }), IS_MEIJI ? 600 : 300, 'signalP');
 const TREE_GREENS = MODE === 'marchen' ? [0x7be3a0, 0xffb0d0, 0xa0e8ff]
                   : MODE === 'space'   ? [0x66eeff, 0xbb88ff, 0x66ffbb]
                   : [0x2e6b2e, 0x3a7a33, 0x27632f];
@@ -770,7 +767,7 @@ const forestLeafPools = forestLeafColors.map(c => makePool(
   1000)); // 3プール計3000 ≥ 幹2600 なので、樹冠だけ残る(幹上限が先に尽きる)心配なし
 // 木の見た目は「位置から決定」する(乱数を使わない)。こうすると森を再構築しても
 // 同じ場所には同じ木が並び、ちらつき・入れ替わりが起きない。
-function _fhash(a, b) { let h = (a * 374761393 + b * 668265263) | 0; h = (h ^ (h >> 13)) * 1274126177 | 0; return ((h ^ (h >> 16)) >>> 0) / 4294967296; }
+// 【2026-07-17】_fhashはjs/lib/pure.jsへ移動(CODE_REVIEW_20260717 P13-1)。
 function plantTree(x, z) {
   if (MODE === 'space') return; // 宇宙: 大気が無いため植生(三角錐のクリスタル樹)は生やさない
   if (forestTrunkP.n >= forestTrunkP.max) return; // 幹が上限なら木ごと追加しない(浮いた樹冠防止)
@@ -817,9 +814,9 @@ const SCRUB_MAX = 2400;
 const scrubMat = new THREE.MeshLambertMaterial({
   color: MODE === 'space' ? 0x3a5a4a : MODE === 'marchen' ? 0x8fd9a0 : MODE === 'edo' ? 0x5c7a3a : 0x5a6b3a,
 });
-const scrubP = makePool(new THREE.SphereGeometry(0.6, 6, 5), scrubMat, SCRUB_MAX);
+const scrubP = makePool(new THREE.SphereGeometry(0.6, 6, 5), scrubMat, SCRUB_MAX, 'scrubP');
 function plantScrub(x, z) {
-  if (scrubP.n >= scrubP.max) return;
+  if (poolFull(scrubP)) return;
   const gy = getGroundY(x, z);
   const r1 = _fhash(Math.floor(x * 9.1) + 11, Math.floor(z * 9.1) + 5); // 位置から決定的に決める(ちらつき防止)
   const s = 0.5 + r1 * 0.6; // 木よりだいぶ小さい茂み
@@ -860,17 +857,7 @@ function isOnRoad(cx, cz, bw, bd) {
 // 許容)。中心を貫通するセグメント(min|q|=0)も同様に縮めず放置。水面リボン(type:'water')は
 // 幅が推定値で信頼できないため対象外。
 // 窓 |p(t)|<=win (t∈[0,1], p=ap+t*dp) 内での |q(t)| の最小値。窓と交差しなければnull。
-function _minAbsOverWindow(ap, aq, dp, dq, win) {
-  let t0 = 0, t1 = 1;
-  if (Math.abs(dp) > 1e-9) {
-    const ta = (-win - ap) / dp, tb = (win - ap) / dp;
-    t0 = Math.max(0, Math.min(ta, tb)); t1 = Math.min(1, Math.max(ta, tb));
-    if (t0 > t1) return null;
-  } else if (Math.abs(ap) > win) return null;
-  const q0 = aq + t0 * dq, q1 = aq + t1 * dq;
-  if ((q0 <= 0 && q1 >= 0) || (q0 >= 0 && q1 <= 0)) return 0; // 符号反転=貫通
-  return Math.min(Math.abs(q0), Math.abs(q1));
-}
+// 【2026-07-17】_minAbsOverWindowはjs/lib/pure.jsへ移動(CODE_REVIEW_20260717 P13-1)。
 function fitRealBuildingToRoads(cx, cz, w, d, rot) {
   let hw = w / 2, hd = d / 2;
   const hwMin = hw * 0.35, hdMin = hd * 0.35;
@@ -929,27 +916,18 @@ function fitRealBuildingToRoads(cx, cz, w, d, rot) {
   return { w: hw * 2, d: hd * 2 };
 }
 
-// OSMのbuilding:colour/roof:colourタグ(#rrggbb・#rgb・一部の色名)を数値カラーへ変換する。
-// 未対応の表記は静かにnullを返し、既存の既定色にフォールバックする(タグ読み取りのみでコストはほぼゼロ)。
-const OSM_COLOR_NAMES = {
-  white: 0xf0f0ec, black: 0x202020, gray: 0x888888, grey: 0x888888,
-  silver: 0xc0c0c0, red: 0xcc3333, green: 0x3a7a3a, blue: 0x3a5a9a,
-  yellow: 0xe0c040, orange: 0xd88a30, brown: 0x8a6040, beige: 0xd8c8a0,
-  tan: 0xd2b48c, cream: 0xf0e8d0, pink: 0xe8a0b0, purple: 0x7a4a9a,
-  darkgray: 0x555555, darkgrey: 0x555555, lightgray: 0xcccccc, lightgrey: 0xcccccc,
-  darkgreen: 0x2a5a2a, darkblue: 0x2a3a6a, darkred: 0x8a2222,
-  cyan: 0x40b0c0, gold: 0xd4af37, ivory: 0xf0ead6, maroon: 0x7a2a2a,
-  navy: 0x1a2a5a, olive: 0x707a30, bronze: 0x8a6a3a, copper: 0xb0684a,
-};
-function parseOsmColor(v) {
-  if (!v) return null;
-  const s = String(v).trim().toLowerCase();
-  if (/^#[0-9a-f]{6}$/.test(s)) return parseInt(s.slice(1), 16);
-  if (/^#[0-9a-f]{3}$/.test(s)) {
-    const r = s[1], g = s[2], b = s[3];
-    return parseInt(r + r + g + g + b + b, 16);
-  }
-  return OSM_COLOR_NAMES.hasOwnProperty(s) ? OSM_COLOR_NAMES[s] : null;
+// 【2026-07-17】OSM_COLOR_NAMES/parseOsmColorはjs/lib/pure.jsへ移動(CODE_REVIEW_20260717 P13-1)。
+
+// building:colour/roof:colourはOSMの自由入力(24bit任意色)。そのままlambertMat/facadeMatの
+// キャッシュキーに使うと「任意色×6ティント(tintWall)×2バリアント」でキャッシュが際限なく増える
+// (色タグが豊富な欧州都市などで長時間プレイすると顕著になり得る)。RGB各16段階に量子化して
+// からキャッシュキーに載せることで組み合わせ数の頭打ちにする。見た目の劣化はほぼ知覚不能
+// (CODE_REVIEW_20260717 P12)。
+function quantizeColor(c, steps) {
+  steps = steps || 16;
+  const step = 256 / steps;
+  const q = (v) => Math.min(255, Math.round(v / step) * step) | 0;
+  return (q((c >> 16) & 255) << 16) | (q((c >> 8) & 255) << 8) | q(c & 255);
 }
 
 // Determine building visual style from OSM tags
@@ -1000,8 +978,8 @@ function getBuildingStyle(tags) {
   const roofMaterial = tags['roof:material'];
   if (wallTag != null || roofTag != null || roofShape || roofMaterial) {
     style = Object.assign({ type: 'default' }, style || {});
-    if (wallTag != null) style.color = wallTag;
-    if (roofTag != null) style.roofColor = roofTag;
+    if (wallTag != null) style.color = quantizeColor(wallTag);
+    if (roofTag != null) style.roofColor = quantizeColor(roofTag);
     if (roofShape) style.roofShape = roofShape;
     if (roofMaterial) style.roofMaterial = roofMaterial;
   }

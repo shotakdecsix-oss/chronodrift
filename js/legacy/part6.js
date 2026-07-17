@@ -74,22 +74,7 @@ function establishRegionBase(raw) {
   if (seaMesh) setSeaLevel(); else initDistantSea(); // 初回はここでseaMeshを作る。2回目以降(地域移動)は高さだけ更新
 }
 
-// 汎用のバイリニア補間。inRangeOnly=true のときは範囲外で null を返す(NEARの範囲外判定に使う)。
-function sampleGrid(elev, cx, cz, w, d, segs, segs1, x, z, inRangeOnly) {
-  if (!elev) return null;
-  const nx = (x - cx + w / 2) / w * segs;
-  const nz = (z - cz + d / 2) / d * segs;
-  if (inRangeOnly && (nx < 0 || nx > segs || nz < 0 || nz > segs)) return null;
-  const ix = Math.max(0, Math.min(segs - 1, Math.floor(nx)));
-  const iz = Math.max(0, Math.min(segs - 1, Math.floor(nz)));
-  const fx = Math.max(0, Math.min(1, nx - ix));
-  const fz = Math.max(0, Math.min(1, nz - iz));
-  const h00 = elev[ iz    * segs1 + ix    ];
-  const h10 = elev[ iz    * segs1 + ix + 1];
-  const h01 = elev[(iz+1) * segs1 + ix    ];
-  const h11 = elev[(iz+1) * segs1 + ix + 1];
-  return h00*(1-fx)*(1-fz) + h10*fx*(1-fz) + h01*(1-fx)*fz + h11*fx*fz;
-}
+// 【2026-07-17】sampleGridはjs/lib/pure.jsへ移動(CODE_REVIEW_20260717 P13-1)。
 
 function terrainY(x, z) {
   // まずプレイヤー追従の高解像度NEARグリッドの範囲内かを見る(範囲外ならnull)

@@ -634,17 +634,7 @@ function rebuildRoadsNearChunk(chunkX, chunkZ) {
   rebuildAreaPolysInBounds(x0, x1, z0, z1); // 川・公園・田畑ポリゴンも同じタイミングで合わせ直す
   rebuildBuildingsInBounds(x0, x1, z0, z1); // 建物もY方向だけ地形に合わせて追従させる
 }
-// 点(px,pz)から線分(x1,z1)-(x2,z2)までの距離の二乗(clamp-t方式)。
-// 【2026-07-17・CODE_REVIEW_20260717 P9-1】roadNear/isOnRoad(part2.js)/nearMinorRoad(part8.js)/
-// isNearWater(part8.js)の4箇所にほぼ同じ計算が重複していたのを1つの純関数に切り出したもの。
-// 呼び出し側の判定ロジック(しきい値・度外視条件)自体は変えない。
-function distSqPointToSeg(px, pz, x1, z1, x2, z2) {
-  const dx = x2 - x1, dz = z2 - z1, len2 = dx * dx + dz * dz;
-  let t = len2 > 0 ? ((px - x1) * dx + (pz - z1) * dz) / len2 : 0;
-  t = t < 0 ? 0 : t > 1 ? 1 : t;
-  const nx = x1 + dx * t - px, nz = z1 + dz * t - pz;
-  return nx * nx + nz * nz;
-}
+// 【2026-07-17】distSqPointToSegはjs/lib/pure.jsへ移動(CODE_REVIEW_20260717 P13-1)。
 // 点(x,z)が、道路の中心線から (道幅/2 + extra) 以内にあるか(近傍セルだけ調べる)
 function roadNear(x, z, extra) {
   const gx = Math.floor(x / ROAD_CELL), gz = Math.floor(z / ROAD_CELL);
@@ -885,14 +875,7 @@ const CHUNK_SIZE = 120;  // meters per chunk side
 // 重すぎる場合は6(720m)あたりに戻す候補。
 const CHUNK_RADIUS = USES_MEIJI_LANDUSE ? 4 : PERF.chunkR; // パフォーマンス設定に連動
 
-function pointInPolygon(px, pz, pts) {
-  let inside = false;
-  for (let i = 0, j = pts.length-1; i < pts.length; j=i++) {
-    const xi=pts[i].x, zi=pts[i].z, xj=pts[j].x, zj=pts[j].z;
-    if (((zi>pz)!==(zj>pz)) && (px < (xj-xi)*(pz-zi)/(zj-zi)+xi)) inside=!inside;
-  }
-  return inside;
-}
+// 【2026-07-17】pointInPolygonはjs/lib/pure.jsへ移動(CODE_REVIEW_20260717 P13-1)。
 
 // 【重要】以前はminDist(=新しく置こうとしている側の半径+余白)だけを見ており、
 // 既存の建物側の大きさ(b.r。placedBuildingsに元々記録済み)を一切考慮していなかった。

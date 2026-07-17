@@ -71,7 +71,7 @@ const mapHintEl = document.getElementById('mapHint');
 // 「地形が取得できない」「住所不明」といった一見無関係に見える不具合が連鎖して起きる。
 // ジャンプの入口(このファイル内の全ジャンプ経路が集約するjumpToLatLon)で一度だけ
 // 正規化しておけば、以降の計算はすべて正しい範囲の経度を使うようになる。
-function wrapLon(lon) { return ((lon + 180) % 360 + 360) % 360 - 180; }
+// 【2026-07-17】wrapLonはjs/lib/pure.jsへ移動(CODE_REVIEW_20260717 P13-1)。
 
 // 原点(MID_LAT/MID_LON)を付け替えるべきほど遠い移動かどうかの判定に使う距離(メートル)。
 // 【重要】WIDE_W(遠景グリッド再取得の判定、約±11.7km)とは意図的に別の、ずっと大きい閾値にする。
