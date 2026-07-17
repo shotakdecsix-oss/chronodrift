@@ -1078,7 +1078,14 @@ function updateChunks() {
 
   // Unload distant chunks (geometry + lights freed from GPU)
   const unloadR = CHUNK_RADIUS + 2;
-  let removedAny = false;
+  // 【重要】以前はメッシュだけ消して記録が残っていたため、
+  //  - 再訪時に hasBuildingNearby が幽霊建物を検出 → チャンクが空のまま(=途切れ)
+  //  - 幽霊の当たり判定(見えない壁)とミニマップ表示も残留
+  // 【2026-07-17・P3】削除の6点セットをremoveBuildingsByIds(part1.js)に集約したため、
+  // このループはchunkMeshesの解放とbid収集だけを行う(resnap記録=buildingRecordsの除去も
+  // 実OSM建物はck=nullなので手続き生成チャンクのアンロードでは消えない=想定通り)。
+  // 複数チャンクが同時にアンロード対象でも、bidはまとめて1回でremoveBuildingsByIdsに渡す。
+  const removeIds = new Set();
   for (const [key, meshes] of chunkMeshes.entries()) {
     const [kcx, kcz] = key.split(',').map(Number);
     if (Math.abs(kcx - cx) > unloadR || Math.abs(kcz - cz) > unloadR) {
@@ -1089,21 +1096,12 @@ function updateChunks() {
       });
       chunkMeshes.delete(key);
       loadedChunks.delete(key); // allow re-generation if player returns
-      // 【重要】以前はメッシュだけ消して記録が残っていたため、
-      //  - 再訪時に hasBuildingNearby が幽霊建物を検出 → チャンクが空のまま(=途切れ)
-      //  - 幽霊の当たり判定(見えない壁)とミニマップ表示も残留
-      collisionBoxes = collisionBoxes.filter(b => b.chunkKey !== key);
-      minimapBuildings = minimapBuildings.filter(b => b.ck !== key);
-      placedBuildings = placedBuildings.filter(b => b.ck !== key);
-      // resnap記録も一緒に捨てないと、消えたはずの建物パーツをいつまでも参照し続ける
-      // (実OSM建物はck=nullなので手続き生成チャンクのアンロードでは消えない=想定通り)
-      for (let i = buildingRecords.length - 1; i >= 0; i--) {
-        if (buildingRecords[i].ck === key) buildingRecords.splice(i, 1);
+      for (const rec of buildingRecords) {
+        if (rec.ck === key) removeIds.add(rec.bid);
       }
-      removedAny = true;
     }
   }
-  if (removedAny) { rebuildCollGrid(); rebuildBuildingGrid(); rebuildPlacedBuildingsGrid(); }
+  removeBuildingsByIds(removeIds);
 }
 
 // このチャンクの範囲を覆うOSMタイルが全て「道路確定済み」かどうか。

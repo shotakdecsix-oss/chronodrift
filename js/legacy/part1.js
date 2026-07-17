@@ -359,16 +359,7 @@ function removeBuildingsOverlappingRoad(r) {
       }
     }
   }
-  if (removeIds.size === 0) return;
-  for (let i = buildingRecords.length - 1; i >= 0; i--) {
-    if (removeIds.has(buildingRecords[i].bid)) buildingRecords.splice(i, 1);
-  }
-  collisionBoxes = collisionBoxes.filter(b => !removeIds.has(b.buildingId));
-  minimapBuildings = minimapBuildings.filter(b => !removeIds.has(b.bid));
-  placedBuildings = placedBuildings.filter(b => !removeIds.has(b.bid));
-  rebuildCollGrid();
-  rebuildBuildingGrid();
-  rebuildPlacedBuildingsGrid();
+  removeBuildingsByIds(removeIds);
 }
 // roadRecords.push の共通化: 記録と同時に空間グリッドへ登録
 function addRoadRecord(r) { roadRecords.push(r); roadGridAdd(r); removeBuildingsOverlappingRoad(r); }
@@ -783,8 +774,10 @@ function unloadFarBuildings() {
   }
   const d2Proc = BUILDING_UNLOAD_DIST_PROC * BUILDING_UNLOAD_DIST_PROC;
   const removeIds = new Set();
-  for (let i = buildingRecords.length - 1; i >= 0; i--) {
-    const rec = buildingRecords[i];
+  // 【2026-07-17・P3】以前はここでbuildingRecordsを直接spliceしていたが、削除の6点セットを
+  // removeBuildingsByIdsに集約したため、このループはremoveIds収集とTHREE.js解放・dormant退避
+  // だけを行い、buildingRecords本体の除去はremoveBuildingsByIds側にまとめて任せる。
+  for (const rec of buildingRecords) {
     const dx = rec.x - px, dz = rec.z - pz;
     let dd = dx * dx + dz * dz;
     if (rec.real && rec.h > 40) dd /= 2.56; // 高層は1.6倍遠くまで保持(ヒストグラムの換算と一致させる)
@@ -795,19 +788,12 @@ function unloadFarBuildings() {
       if (p.geometry && !p.geometry.userData.shared) p.geometry.dispose();
     }
     removeIds.add(rec.bid);
-    buildingRecords.splice(i, 1);
     // 再接近時に復元できるよう、軽量な記述だけdormantBuildingsへ(すでに
     // BUILDING_UNLOAD_DIST > BUILDING_GEN_DIST の外なので、そのままpendingBuildingsへ
     // 戻すと次のフレームで即dormantへ送り返されるだけの無駄が発生する)。
     dormantBuildings.push({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h, style: rec.style, real: rec.real, rot: rec.rot });
   }
-  if (removeIds.size === 0) return;
-  collisionBoxes = collisionBoxes.filter(b => !removeIds.has(b.buildingId));
-  minimapBuildings = minimapBuildings.filter(b => !removeIds.has(b.bid));
-  placedBuildings = placedBuildings.filter(b => !removeIds.has(b.bid));
-  rebuildCollGrid();
-  rebuildBuildingGrid();
-  rebuildPlacedBuildingsGrid();
+  removeBuildingsByIds(removeIds);
 }
 
 // (2026-07-16: ここにあった高度LOD(updateAltitudeLOD)は撤去。上空で遠くの低層を非表示に
@@ -861,6 +847,28 @@ function placedBuildingsGridAdd(rec) {
 function rebuildPlacedBuildingsGrid() {
   placedBuildingsGrid = new Map();
   for (const rec of placedBuildings) placedBuildingsGridAdd(rec);
+}
+// 建物1棟ぶんの削除で必ず一緒に触る「6点セット」を1関数に集約したもの。
+// 【2026-07-17・CODE_REVIEW_20260717 P3】以前はremoveBuildingsOverlappingRoad(このファイル)・
+// unloadFarBuildings(このファイル)・updateChunks(part8.js)の3箇所にほぼ同一コピペで存在し、
+// 新しい属性・インデックスを足すたびに3箇所の同期漏れリスクがあった(過去の幽霊当たり判定・
+// "rec.parts is not iterable"はこの分散が土壌)。
+// 呼び出し元は先に「削除するbuildingのbid集合」を作り(判定基準は道路重なり/距離/chunkKeyなど
+// 呼び出し元ごとに異なってよい)、THREE.jsオブジェクトの解放や再キュー(pendingBuildings/
+// dormantBuildingsへ戻す等)を済ませてから、このremoveBuildingsByIdsを呼ぶ。
+// collisionBoxes/minimapBuildings/placedBuildingsはいずれもbidを持つため、削除基準が
+// chunkKey等であっても最終的にはbid集合に変換して渡せば同じ経路で削除できる。
+function removeBuildingsByIds(removeIds) {
+  if (!removeIds || removeIds.size === 0) return;
+  for (let i = buildingRecords.length - 1; i >= 0; i--) {
+    if (removeIds.has(buildingRecords[i].bid)) buildingRecords.splice(i, 1);
+  }
+  collisionBoxes = collisionBoxes.filter(b => !removeIds.has(b.buildingId));
+  minimapBuildings = minimapBuildings.filter(b => !removeIds.has(b.bid));
+  placedBuildings = placedBuildings.filter(b => !removeIds.has(b.bid));
+  rebuildCollGrid();
+  rebuildBuildingGrid();
+  rebuildPlacedBuildingsGrid();
 }
 const landusePolygons = []; // {pts, lu, minX, maxX, minZ, maxZ} — stored during loadOSM for dynamic chunk generation
 const landuseGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
