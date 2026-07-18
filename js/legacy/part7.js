@@ -159,7 +159,18 @@ document.getElementById('mapCloseBtn').addEventListener('click', () => {
 });
 
 // ======= 地名・住所・施設名の検索ジャンプ =======
-// 国土地理院ジオコーディングAPI(無料・キー不要・CORS可)→ 失敗時は Nominatim にフォールバック
+// 国土地理院ジオコーディングAPI(無料・キー不要・CORS可)→ 失敗/信頼できない時は Nominatim にフォールバック
+//
+// 【2026-07-18・精度不具合修正】国土地理院AddressSearchは日本国内の住所(町名)データベースへの
+// 「前方一致寄りの緩いマッチ」しか行わず、関連度順ソートもされていない。そのため
+// ・「東京駅」で検索 → js[0]は無関係な「北海道札幌市東区」("東"の字が一致しただけ)が先頭に来る
+//   (実際は配列の後方に正しい「東京駅」のヒットが複数含まれているのに、常にjs[0]だけ見ていたため無視されていた)
+// ・「武漢」で検索 → 日本国内にしか無いAPIなので当然ヒットせず、「横須賀市武」等
+//   ("武"の1文字だけの部分一致)を返してしまう(海外地名はそもそも守備範囲外)
+// という誤ジャンプが起きていた。js[0]を無条件採用するのをやめ、「クエリを含む結果」だけに
+// 絞った上で、完全一致・施設名DB(properties.dataSourceが付くもの)を優先する。
+// 該当が無ければ(=GSIの守備範囲外の海外地名や、緩いマッチしか無い)Nominatim(世界対応の
+// 一般ジオコーダー)にフォールバックする。
 const mapSearchInput = document.getElementById('mapSearchInput');
 async function searchPlaceJump() {
   const q = mapSearchInput.value.trim();
@@ -169,13 +180,25 @@ async function searchPlaceJump() {
   try {
     const res = await fetch('https://msearch.gsi.go.jp/address-search/AddressSearch?q=' + encodeURIComponent(q));
     const js = await res.json();
-    if (Array.isArray(js) && js.length && js[0].geometry && js[0].geometry.coordinates) {
-      lon = js[0].geometry.coordinates[0];
-      lat = js[0].geometry.coordinates[1];
-      name = (js[0].properties && js[0].properties.title) || q;
+    if (Array.isArray(js) && js.length) {
+      const cands = js.filter(f => f.properties && f.properties.title && f.properties.title.includes(q));
+      cands.sort((a, b) => {
+        const at = a.properties.title, bt = b.properties.title;
+        const aExact = at === q ? 0 : 1, bExact = bt === q ? 0 : 1;
+        if (aExact !== bExact) return aExact - bExact; // 完全一致を最優先
+        const aPoi = a.properties.dataSource ? 0 : 1, bPoi = b.properties.dataSource ? 0 : 1;
+        if (aPoi !== bPoi) return aPoi - bPoi; // 施設名DB由来を住所の部分一致より優先
+        return at.length - bt.length; // 短い(=クエリに近い)ものを優先
+      });
+      const best = cands[0];
+      if (best && best.geometry && best.geometry.coordinates) {
+        lon = best.geometry.coordinates[0];
+        lat = best.geometry.coordinates[1];
+        name = best.properties.title;
+      }
     }
   } catch (e) {}
-  if (lat === null) { // フォールバック: Nominatim (OSM)
+  if (lat === null) { // フォールバック: Nominatim (OSM。世界対応・施設名にも強い)
     try {
       const res = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=ja&q=' + encodeURIComponent(q));
       const js = await res.json();

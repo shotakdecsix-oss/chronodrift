@@ -104,6 +104,68 @@ function tintWall(c) {
   return (r << 16) | (g << 8) | b;
 }
 
+// ======= 観光ランドマーク専用外観(2026-07-18) =======
+// 東京タワー/スカイツリー/大阪城/京都タワーは、実測タグを汎用ルールに流すと「巨大な箱ビル」
+// にしかならず似ても似つかない。名前検出(part2.js detectLandmarkTower)された建物だけ、
+// ここで手組みの専用ジオメトリを組み立てる。高さはpart8.jsで実際の高さに上書き済み。
+const LANDMARK_TOWER_HEIGHT = { tokyo_tower: 333, skytree: 634, osaka_castle: 55, kyoto_tower: 131 };
+const LM_ORANGE = 0xE8541E, LM_WHITE = 0xF2F0E8, LM_STEEL = 0xE6E9EA, LM_STEEL_DK = 0xC7CCCE,
+      LM_CASTLE_WALL = 0xF5F0E6, LM_CASTLE_BAND = 0x2A2620, LM_CASTLE_ROOF = 0x2E5D45, LM_GOLD = 0xD4AF37,
+      LM_KYOTO = 0xEDE6D6, LM_RED = 0xCC2211;
+function drawLandmarkTower(dm, x, gy, z, kind) {
+  // 四角い先細り角柱を1段。y0=段の底(地表からの高さ)、ht=段の高さ、rBase=底面の半幅相当。
+  const sq = (mat, y0, ht, rBase) => dm(UNIT_TAPER4, mat, x, gy + y0 + ht / 2, z, rBase * 2, ht, rBase * 2);
+  const rd = (mat, y0, ht, rBase) => dm(UNIT_TAPER_ROUND, mat, x, gy + y0 + ht / 2, z, rBase * 2, ht, rBase * 2);
+  const disc = (mat, y, r, ht) => dm(UNIT_CYL, mat, x, gy + y + ht / 2, z, r * 2, ht, r * 2);
+  const mOrange = lambertMat(LM_ORANGE), mWhite = lambertMat(LM_WHITE),
+        mSteel = lambertMat(LM_STEEL), mSteelDk = lambertMat(LM_STEEL_DK),
+        mRed = lambertMat(LM_RED, 0x330000), mGold = lambertMat(LM_GOLD),
+        mCastleWall = lambertMat(LM_CASTLE_WALL), mCastleBand = lambertMat(LM_CASTLE_BAND),
+        mCastleRoof = lambertMat(LM_CASTLE_ROOF), mKyoto = lambertMat(LM_KYOTO);
+
+  if (kind === 'tokyo_tower') {
+    sq(mOrange, 0, 150, 17);            // 脚〜大展望台
+    disc(mSteelDk, 150, 13, 5);         // 大展望台(150m)
+    sq(mOrange, 155, 95, 9);            // 大展望台〜特別展望台
+    disc(mSteelDk, 250, 7, 4);          // 特別展望台(250m)
+    sq(mOrange, 254, 64, 4);
+    sq(mWhite, 318, 12, 1.2);           // 最上部アンテナ支持部(白)
+    dm(UNIT_SPH, mRed, x, gy + 331, z, 2, 2, 2); // 航空障害灯
+    addDecorLight(0xff2200, 0.8, 20, x, gy + 332, z);
+  } else if (kind === 'skytree') {
+    sq(mSteel, 0, 350, 20);             // 基部〜天望デッキ
+    disc(mSteelDk, 350, 15, 8);         // 天望デッキ(350m)
+    sq(mSteel, 358, 92, 9);             // 〜天望回廊
+    disc(mSteelDk, 450, 10, 5);         // 天望回廊(450m)
+    sq(mSteel, 455, 145, 4);
+    rd(mWhite, 600, 30, 1.2);           // ゲイン塔(先端アンテナ)
+    dm(UNIT_SPH, mRed, x, gy + 631, z, 1.6, 1.6, 1.6);
+    addDecorLight(0x3366ff, 0.7, 25, x, gy + 355, z); // 東京スカイツリーの夜間照明を示唆する淡い青
+  } else if (kind === 'osaka_castle') {
+    // 白漆喰+黒帯+緑の瓦屋根を積んだ層塔型天守
+    const tiers = [[0, 16, 22, 18], [17.5, 12, 16, 13], [31, 10, 11, 9], [41, 8, 7, 6]];
+    tiers.forEach(([y0, ht, tw, td], i) => {
+      dm(UNIT_BOX, mCastleWall, x, gy + y0 + ht / 2, z, tw, ht, td);
+      dm(UNIT_BOX, mCastleBand, x, gy + y0 + ht * 0.18, z, tw + 0.15, ht * 0.22, td + 0.15); // 腰の黒漆喰帯
+      dm(HIP_GEO, mCastleRoof, x, gy + y0 + ht, z, tw * 1.28, Math.max(2.5, tw * 0.28), td * 1.28);
+      if (i === tiers.length - 1) { // 最上段のみ金の鯱
+        dm(UNIT_CONE4, mGold, x - tw * 0.35, gy + y0 + ht + tw * 0.28 + 1.2, z, 0.9, 2.4, 0.9, Math.PI / 4);
+        dm(UNIT_CONE4, mGold, x + tw * 0.35, gy + y0 + ht + tw * 0.28 + 1.2, z, 0.9, 2.4, 0.9, Math.PI / 4);
+      }
+    });
+  } else if (kind === 'kyoto_tower') {
+    dm(UNIT_BOX, lambertMat(0xEDEDED), x, gy + 15.5, z, 32, 31, 20); // 台座ビル(9階建て)
+    dm(PARAPET_GEO, lambertMat(0xC8C8C0), x, gy + 31, z, 32.3, 0.9, 20.3);
+    rd(mKyoto, 31, 45, 8);
+    rd(mKyoto, 76, 22, 5);
+    disc(mSteelDk, 98, 8.5, 7);         // 展望室
+    rd(mKyoto, 105, 18, 3);
+    rd(mWhite, 123, 8, 0.8);            // 尖塔先端
+    dm(UNIT_SPH, mRed, x, gy + 130.5, z, 1.2, 1.2, 1.2);
+    addDecorLight(0xff2200, 0.6, 18, x, gy + 130, z);
+  }
+}
+
 function addBuilding(x, z, w, d, h, style, isReal, rot) {
   const _origH = h; // 遠方アンロード時、再生成できるよう元のhを覚えておく(下でhを斜面ぶん延長するため)
   // 4隅+中心の地形高さを見て、最低点を基礎にし最高点まで胴体を延長。
@@ -132,6 +194,13 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
   // 国別建物プロファイル(現実モード限定。タグ実測値が無い箇所だけのフォールバックに使う)
   const cprof = MODE === 'real' ? getCountryBuildingProfile(currentCountryCode) : null;
 
+  // 【2026-07-18】観光ランドマーク(東京タワー等)は下の汎用な箱+屋根生成を丸ごとスキップし、
+  // drawLandmarkTowerの専用ジオメトリだけを描く。kindはこのelseブロック内でのみ決まるが、
+  // 後段(エントランス演出の判定等)で参照されるためnullで先に確保しておく。
+  let kind = null;
+  if (type === 'landmark') {
+    drawLandmarkTower(dm, x, gy, z, style.landmark);
+  } else {
   // ---- 壁色(モード別パレット。lambertMat/facadeMat キャッシュを通すので増殖しない) ----
   let isMushroom = false;
   let wallC;
@@ -157,7 +226,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
   }
 
   // ---- ファサード種別(手続きテクスチャ。神社仏閣・教会・キノコは従来の無地) ----
-  const kind =
+  kind =
     (isMushroom || type === 'shrine' || type === 'temple' || type === 'church') ? null :
     type === 'industrial' ? 'ind' :
     (floors <= 2 && (type === 'house' || type === 'default' || type === 'shop')) ? 'house' :
@@ -372,6 +441,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
         dm(UNIT_BOX, roofSurfMat(roofC, null), x + w * 0.22, gy + 2.35, z + d / 2 + 0.5, 2.2, 0.16, 1.1);
     }
   }
+  } // end of else(type !== 'landmark') 【2026-07-18】
 
   // エントランス(中高層ビルの1階の玄関ガラス)
   if ((kind === 'office' || kind === 'apt') && h >= 9 && MODE !== 'edo' && !IS_MEIJI &&

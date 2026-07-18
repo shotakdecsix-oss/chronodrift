@@ -207,6 +207,11 @@ function processTileData(data, tileCount) {
     if (cprofH8 && cprofH8.minLevels && !_landmarkType8) {
       h = Math.max(h, cprofH8.minLevels * 3);
     }
+    // 観光ランドマーク(東京タワー等)はOSMタグ由来の階数推定を無視し、実際の高さで確定させる
+    // (フットプリントのタグ欠損/誤差の影響を受けず、常に正しいシルエットになるようにするため)
+    if (style && style.landmark && LANDMARK_TOWER_HEIGHT[style.landmark] != null) {
+      h = LANDMARK_TOWER_HEIGHT[style.landmark];
+    }
     style = classifyResidential(style, w, d, h, cx, cz);
     let fw = w, fd = d, fh = h;
     ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ

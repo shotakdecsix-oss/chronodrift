@@ -371,7 +371,12 @@ const UNIT_CONE8 = new THREE.ConeGeometry(0.5, 1, 8);
 const UNIT_DOME = new THREE.SphereGeometry(0.5, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2);
 const UNIT_SPH = new THREE.SphereGeometry(0.5, 8, 8);
 const UNIT_PLANE = new THREE.PlaneGeometry(1, 1);
-[UNIT_BOX, UNIT_CYL, UNIT_CONE4, UNIT_CONE8, UNIT_DOME, UNIT_SPH, UNIT_PLANE].forEach(gg => gg.userData.shared = true);
+// 【2026-07-18】観光ランドマーク(東京タワー等)の先細りシルエット用。頂部が根元の60%幅になる
+// 先細り角柱/円柱の"1段分"で、複数段を積み上げると複合的な先細りになる(drawLandmarkTower参照)。
+// thetaStart=45°で四角柱の面がX/Z軸に正対するようにしている(通常のBoxGeometryと向きを揃える)。
+const UNIT_TAPER4 = new THREE.CylinderGeometry(0.3, 0.5, 1, 4, 1, false, Math.PI / 4);
+const UNIT_TAPER_ROUND = new THREE.CylinderGeometry(0.3, 0.5, 1, 14);
+[UNIT_BOX, UNIT_CYL, UNIT_CONE4, UNIT_CONE8, UNIT_DOME, UNIT_SPH, UNIT_PLANE, UNIT_TAPER4, UNIT_TAPER_ROUND].forEach(gg => gg.userData.shared = true);
 function detailMesh(geo, mat, x, y, z, sx, sy, sz, ry) {
   const m = new THREE.Mesh(geo, mat);
   m.position.set(x, y, z);
@@ -855,8 +860,31 @@ function quantizeColor(c, steps) {
   return (q((c >> 16) & 255) << 16) | (q((c >> 8) & 255) << 8) | q(c & 255);
 }
 
+// 【2026-07-18】著名な観光ランドマークは実測OSMタグ(building:levels等)を汎用ルールに
+// そのまま流し込んでも「巨大な四角い箱ビル」にしかならず似ても似つかない。専用の外観
+// (drawLandmarkTower/part3.js)を割り当てるため、施設名で個別検出する。
+// 【重要】部分一致(includes)ではなく完全一致にしている。例えば東京タワーの周辺には
+// 「東京タワーフットタウン」のような"名前を含むが別の建物"が実在し、部分一致だと
+// そちらまで巨大な塔として描画してしまう誤爆が起きるため。
+const LANDMARK_TOWER_NAMES = {
+  '東京タワー': 'tokyo_tower', 'Tokyo Tower': 'tokyo_tower', 'TOKYO TOWER': 'tokyo_tower',
+  '東京スカイツリー': 'skytree', 'Tokyo Skytree': 'skytree', 'Tokyo SkyTree': 'skytree', 'TOKYO SKYTREE': 'skytree',
+  '大阪城': 'osaka_castle', '大阪城天守閣': 'osaka_castle', 'Osaka Castle': 'osaka_castle',
+  '京都タワー': 'kyoto_tower', 'Kyoto Tower': 'kyoto_tower',
+};
+function detectLandmarkTower(tags) {
+  if (MODE !== 'real') return null; // 現実モード限定(江戸/明治は別途shrine/temple以外を描画しない既存フィルタで弾かれる)
+  for (const key of ['name', 'name:en', 'name:ja']) {
+    const v = (tags[key] || '').trim();
+    if (v && LANDMARK_TOWER_NAMES[v]) return LANDMARK_TOWER_NAMES[v];
+  }
+  return null;
+}
+
 // Determine building visual style from OSM tags
 function getBuildingStyle(tags) {
+  const landmark = detectLandmarkTower(tags);
+  if (landmark) return { type: 'landmark', landmark };
   const am = tags.amenity || '', rel = tags.religion || '', bt = tags.building || '';
   const name = (tags.name || '') + (tags['name:ja'] || '');
   let style = null;
