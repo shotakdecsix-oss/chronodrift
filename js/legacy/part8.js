@@ -721,9 +721,29 @@ function generateChunk(chunkX, chunkZ) {
   // 【重要】以前はavoidPolygons/landusePolygons(取得済み全件。増え続けて減らない)を
   // 毎回.filter()で全件走査していたため、探索が進むほどチャンク生成コストが際限なく
   // 悪化していた(長時間プレイでの重量化の主因の一つ)。空間ハッシュで近傍だけ拾う。
-  const nearAvoid = queryPolyGrid(avoidGrid, x0, x1, z0, z1);
-  const inAvoid = (x, z) => nearAvoid.some(p =>
-    x >= p.minX && x <= p.maxX && z >= p.minZ && z <= p.maxZ && pointInPolygon(x, z, p.pts));
+  // 【2026-07-18】公園・水域等の回避ポリゴンとの境界ぎりぎりに手続き生成の家が建つ
+  // (=「公園の中に家」に見える)のを防ぐため、境界からAVOID_MARGIN(m)の安全余白を
+  // 設ける。1)・3)を再度有効化する際の前提としてここを先に固める。
+  // クエリ自体もAVOID_MARGIN分広げておかないと、余白判定に使うポリゴンそのものが
+  // nearAvoidに入らない(チャンクぎりぎり外の公園を見落とす)。
+  const AVOID_MARGIN = 6;
+  const nearAvoid = queryPolyGrid(avoidGrid, x0 - AVOID_MARGIN, x1 + AVOID_MARGIN, z0 - AVOID_MARGIN, z1 + AVOID_MARGIN);
+  // 点(x,z)がポリゴンの各辺からmargin以内かどうか(内部判定はpointInPolygon側で別途行う。
+  // ここは「外側だが際どく近い」場合を拾うための境界距離チェック)。
+  const _nearPolyBoundary = (x, z, pts, margin) => {
+    const m2 = margin * margin;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      if (distSqPointToSeg(x, z, pts[j].x, pts[j].z, pts[i].x, pts[i].z) < m2) return true;
+    }
+    return false;
+  };
+  const inAvoid = (x, z) => nearAvoid.some(p => {
+    // バウンディングボックス(+余白)の粗いふるい落としで、ほとんどの候補点は
+    // 高コストな境界距離計算に入らず即falseになる。
+    if (x < p.minX - AVOID_MARGIN || x > p.maxX + AVOID_MARGIN ||
+        z < p.minZ - AVOID_MARGIN || z > p.maxZ + AVOID_MARGIN) return false;
+    return pointInPolygon(x, z, p.pts) || _nearPolyBoundary(x, z, p.pts, AVOID_MARGIN);
+  });
   const nearLanduse = queryPolyGrid(landuseGrid, x0 - 30, x1 + 30, z0 - 30, z1 + 30);
   const inLanduse = (x, z) => nearLanduse.some(p =>
     x >= p.minX && x <= p.maxX && z >= p.minZ && z <= p.maxZ && pointInPolygon(x, z, p.pts));
@@ -835,12 +855,12 @@ function generateChunk(chunkX, chunkZ) {
   };
 
   // --- 1) 道路沿いの住宅補完(日本の住宅街らしく道路に面してぎっしり並べる) ---
-  // 【2026-07-18・ユーザー判断で撤去】landuseタグの裏付けが無く、道路の形状だけを
-  // 根拠に家を並べる方式だったため、公園など回避ポリゴンの境界付近で誤って建って
-  // しまうケースの温床になっていた(buildable()自体はinAvoidを通すが、登録タイミングの
-  // レース等で漏れる余地があった)。2)のlanduse=residential区画充填のみに絞る。
-  // 再度必要になれば true に戻せば復活する。
-  const PROC_ROADSIDE_INFILL_ENABLED = false;
+  // 【2026-07-18】一度撤去したが、landuse=residentialタグは日本のOSMでは未登録の
+  // 郊外が多く、2)だけに絞ると住宅街がスカスカになってしまった(伊勢原郊外は元々
+  // これが理由でこの補完が作られた)。真因は補完ロジック自体ではなく、回避ポリゴン
+  // 境界の余白が無かったこと(inAvoidが境界ぴったりでしか弾いていなかった)と判断し、
+  // 上のinAvoidにAVOID_MARGIN(6m)の安全余白を追加した上で復活させる。
+  const PROC_ROADSIDE_INFILL_ENABLED = true;
   // 敷地幅≈10m間隔で両側に並べ、奥の2列目・3列目にも生成(奥ほど生成率を下げ路地の抜けを残す)
   for (const r of PROC_ROADSIDE_INFILL_ENABLED ? nearMinor : []) {
     const dx = r.x2 - r.x1, dz = r.z2 - r.z1;
@@ -911,11 +931,9 @@ function generateChunk(chunkX, chunkZ) {
   // 生成しており、候補地点そのものが実際に住宅地かどうかは一切見ていなかった。denseAreaが
   // (住宅地の縁の田畑を通る農道などで)誤って立った場合、その空き地全体に一戸建てが
   // 乱立していた。buildable()による地点ごとの実データ裏付け判定を追加して歯止めをかける。
-  // 【2026-07-18・ユーザー判断で撤去】landuseタグが無い土地を「道路が格子状だから
-  // 住宅街だろう」という状況証拠だけで埋める方式だったため、1)と同じ理由(回避
-  // ポリゴン境界付近での誤爆の温床)で無効化する。再度必要になれば true に戻す。
-  const PROC_DENSE_AREA_INFILL_ENABLED = false;
-  if (denseArea && PROC_DENSE_AREA_INFILL_ENABLED) {
+  // 【2026-07-18】1)と同じ理由で復活。inAvoidの安全余白(AVOID_MARGIN)が
+  // 回避ポリゴン境界付近の誤爆を防ぐ側の対策になっている。
+  if (denseArea) {
     for (let bx = worldX; bx < worldX + CHUNK_SIZE; bx += 14) {
       for (let bz = worldZ; bz < worldZ + CHUNK_SIZE; bz += 14) {
         if (Math.random() > 0.45) continue;
