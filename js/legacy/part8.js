@@ -594,7 +594,14 @@ async function fetchOSMTileBatch() {
       queuedTiles.delete(k); // 常に再試行対象に戻す(checkOSMTiles が再度キューに積む)
       // 【2026-07-17・Fable5診断】以前はこの後にワーカー自身がsleepして間隔を作っていたが、
       // 枠を握ったままのsleepを撤去したため、代わりにタイルごとの再試行可能時刻をここへ記録する。
-      osmTileNextRetryAt.set(k, Date.now() + Math.min(30000, 3000 * n));
+      // 【2026-07-18】プレイヤーが今立っているタイル(ptKey)だけは、他の未訪問タイルと
+      // 同じ最大30秒バックオフを課すと「移動中、足元の道路・建物がしばらく生成されない」
+      // 体感の悪化につながっていた(このバックオフはFable5診断の枠占有バグ修正で新設した
+      // ものだが、意図せず現在地タイルの再試行も一律で遅らせてしまっていた)。nearSolo・
+      // _curTileRush・sticky toastなど既存の「現在地タイルだけ特別扱い」方針に合わせ、
+      // 現在地タイルだけ短い上限・緩やかな増分のバックオフにする(他タイルは従来通り)。
+      const _isCurTile = k === ptKey;
+      osmTileNextRetryAt.set(k, Date.now() + (_isCurTile ? Math.min(5000, 1500 * n) : Math.min(30000, 3000 * n)));
     });
     // 現在地タイルが4回失敗して「諦めて先に進む」扱いになった場合も、sticky状態のトーストを
     // 出しっぱなしにしない(Overpass不調が長引くと「🗺 マップを読み込み中...」が永久に残るため)。
