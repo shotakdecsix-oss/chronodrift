@@ -980,7 +980,17 @@ function isInsideKnownRealBuilding(qx, qz, pad) {
     for (const rec of arr) {
       if (!rec.real) continue;
       const hw = (rec.w || 8) / 2 + pad, hd = (rec.d || 8) / 2 + pad;
-      if (qx >= rec.x - hw && qx <= rec.x + hw && qz >= rec.z - hd && qz <= rec.z + hd) return true;
+      // 【2026-07-18】以前は軸平行の箱としてしか判定しておらず、道路にフィットさせて
+      // 回転済みの実建物(rec.rot≠0)では対角線付近で実際のフットプリントより狭く
+      // 判定してしまい、手続き生成の家がその隙間(実際には建物の内側)に重なって
+      // 生成されていた。collBoxHitsXZ(part7.js、当たり判定)と同じ逆回転変換で
+      // 建物のローカル座標系に直してから判定する(軸平行=rot未設定/0の場合は
+      // cos(0)=1,sin(0)=0で従来と同じ結果になるので回転無し建物への影響は無い)。
+      const rot = rec.rot || 0;
+      const dx = qx - rec.x, dz = qz - rec.z;
+      const c = Math.cos(rot), s = Math.sin(rot);
+      const lx = dx * c - dz * s, lz = dx * s + dz * c;
+      if (Math.abs(lx) <= hw && Math.abs(lz) <= hd) return true;
     }
   }
   return false;

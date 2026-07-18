@@ -540,7 +540,10 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
   // Minimap record
   minimapBuildings.push({x, z, w, d, rot: rot || 0, ck: currentChunkKey, bid}); // rotはミニマップの回転描画用
   // Spatial index for landuse fill de-duplication
-  const _pbRec = {x, z, r: Math.max(w,d)/2, ck: currentChunkKey, bid};
+  // 【2026-07-18】r(hasBuildingNearby用の安全半径)は以前max(w,d)/2だった。長方形の対角線
+  // 方向の角は中心からmax(w,d)/2より遠い(真の外接円半径はsqrt((w/2)^2+(d/2)^2))ため、
+  // 特に細長い建物ほど角付近の余白を実際より広く見積もり、隣接建物が角に重なりやすかった。
+  const _pbRec = {x, z, r: Math.hypot(w, d) / 2, ck: currentChunkKey, bid};
   placedBuildings.push(_pbRec);
   placedBuildingsGridAdd(_pbRec); // hasBuildingNearby用の空間ハッシュにも同時登録(P1)
 
