@@ -835,8 +835,14 @@ function generateChunk(chunkX, chunkZ) {
   };
 
   // --- 1) 道路沿いの住宅補完(日本の住宅街らしく道路に面してぎっしり並べる) ---
+  // 【2026-07-18・ユーザー判断で撤去】landuseタグの裏付けが無く、道路の形状だけを
+  // 根拠に家を並べる方式だったため、公園など回避ポリゴンの境界付近で誤って建って
+  // しまうケースの温床になっていた(buildable()自体はinAvoidを通すが、登録タイミングの
+  // レース等で漏れる余地があった)。2)のlanduse=residential区画充填のみに絞る。
+  // 再度必要になれば true に戻せば復活する。
+  const PROC_ROADSIDE_INFILL_ENABLED = false;
   // 敷地幅≈10m間隔で両側に並べ、奥の2列目・3列目にも生成(奥ほど生成率を下げ路地の抜けを残す)
-  for (const r of nearMinor) {
+  for (const r of PROC_ROADSIDE_INFILL_ENABLED ? nearMinor : []) {
     const dx = r.x2 - r.x1, dz = r.z2 - r.z1;
     const len = Math.sqrt(dx * dx + dz * dz);
     if (len < 12) continue;
@@ -905,7 +911,11 @@ function generateChunk(chunkX, chunkZ) {
   // 生成しており、候補地点そのものが実際に住宅地かどうかは一切見ていなかった。denseAreaが
   // (住宅地の縁の田畑を通る農道などで)誤って立った場合、その空き地全体に一戸建てが
   // 乱立していた。buildable()による地点ごとの実データ裏付け判定を追加して歯止めをかける。
-  if (denseArea) {
+  // 【2026-07-18・ユーザー判断で撤去】landuseタグが無い土地を「道路が格子状だから
+  // 住宅街だろう」という状況証拠だけで埋める方式だったため、1)と同じ理由(回避
+  // ポリゴン境界付近での誤爆の温床)で無効化する。再度必要になれば true に戻す。
+  const PROC_DENSE_AREA_INFILL_ENABLED = false;
+  if (denseArea && PROC_DENSE_AREA_INFILL_ENABLED) {
     for (let bx = worldX; bx < worldX + CHUNK_SIZE; bx += 14) {
       for (let bz = worldZ; bz < worldZ + CHUNK_SIZE; bz += 14) {
         if (Math.random() > 0.45) continue;
