@@ -408,7 +408,14 @@ const ROOF_COLS = [0x555a66, 0x7a4a3a, 0x4a5a3a, 0x69463c, 0x3f4c59, 0x8a4038]; 
 function synthesizeBuildingRelationWays(elements, seenRelations) {
   const synth = [];
   for (const el of elements) {
-    if (el.type !== 'relation' || !el.tags || !el.tags.building || !el.members) continue;
+    if (el.type !== 'relation' || !el.tags || !el.members) continue;
+    // 【2026-07-18】野球場・競技場等(国立競技場等)はbuildingタグを持たずleisure=stadium
+    // 単独のマルチポリゴンで表現されることが多い(ドーナツ状の複雑形状はrelation必須)。
+    // 以前はbuildingタグ必須の条件で丸ごと取りこぼしており、「ただの長方形の箱」に
+    // 見えていた不具合の実体だった(取りこぼした場所には代わりに簡易フットプリントの
+    // 別要素が乗っていた)。part8.jsのisStadiumOnlyと対になる条件。
+    const hasFacilityTag = el.tags.leisure === 'stadium' || el.tags.amenity === 'stadium';
+    if (!el.tags.building && !hasFacilityTag) continue;
     if (seenRelations) {
       if (seenRelations.has(el.id)) continue;
       seenRelations.add(el.id);
@@ -901,10 +908,15 @@ function getBuildingStyle(tags) {
     style = { color: 0xf8f8f8, roofColor: 0xdddddd, emissive: 0x111111, type: 'hospital' };
   } else if (am === 'townhall' || am === 'police' || am === 'fire_station' || name.includes('市役所') || name.includes('役場')) {
     style = { color: 0x6070a0, roofColor: 0x405080, emissive: 0x001133, type: 'government' };
-  } else if (tags.leisure === 'stadium' || bt === 'stadium' || bt === 'grandstand') {
+  } else if (tags.leisure === 'stadium' || tags.amenity === 'stadium' || bt === 'stadium' || bt === 'grandstand' ||
+             /競技場|スタジアム|球場|アリーナ/.test(name) || /[Ss]tadium|[Aa]rena/.test((tags['name:en'] || ''))) {
     // 【2026-07-18】野球場・サッカー場・競技場の再現度向上。コンクリート系の落ち着いた色に
     // 統一し(オフィス街のガラス張り色と紛れないよう寒色は避ける)、屋根形状(part3.js)側で
     // ドーム球場か開放型スタジアムかを見た目に反映する。名前かroof:shape=domeでドーム判定。
+    // 【重要】国立競技場のような大型施設はbuildingタグを持たずleisure=stadiumのみの
+    // ことが多いため、タグだけでなく施設名のキーワード(競技場/スタジアム/球場/アリーナ)
+    // でも検出する(東京タワー同様の完全一致ではなく部分一致。誤爆リスクより取りこぼし
+    // 対策を優先する判断)。
     const stadiumDome = tags['roof:shape'] === 'dome' || /ドーム|[Dd]ome/.test(name + (tags['name:en'] || ''));
     style = { color: 0xb0b4bc, roofColor: 0x888ea0, emissive: 0x08080c, type: 'stadium', stadiumDome };
   } else if (tags.shop || am === 'supermarket' || am === 'convenience') {

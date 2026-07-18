@@ -153,7 +153,12 @@ function processTileData(data, tileCount) {
     // マッピングされていないケースが多い。その場合も敷地の中心に代表的な校舎を1棟建てる。
     const isCampusOnly = !USES_MEIJI_LANDUSE && !tags.building &&
       ['school','university','college','hospital'].includes(tags.amenity || '');
-    if (!tags.building && !isCampusOnly) return;
+    // 【2026-07-18】野球場・競技場等(国立競技場等)はbuildingタグを持たずleisure=stadium
+    // 単独で表現されることが多く、campusと同じ理由でbuildingタグ必須のままだと
+    // 丸ごと取りこぼしていた(part2.jsのsynthesizeBuildingRelationWaysの緩和と対になる)。
+    const isStadiumOnly = !USES_MEIJI_LANDUSE && !tags.building &&
+      (tags.leisure === 'stadium' || tags.amenity === 'stadium');
+    if (!tags.building && !isCampusOnly && !isStadiumOnly) return;
     // 【2026-07-16】駅舎は生成しない(ユーザー要望)。線路またぎ建物のdrop(fitRealBuildingToRoads)
     // だけでは線路脇に建つ駅舎が残るため、タグで明示的に除外する。
     if (tags.building === 'train_station' || tags.building === 'station' ||
