@@ -45,10 +45,17 @@ try {
 // 東京(伊勢原)がテストで問題なく見えていたのは、直近の試行が既にディスクキャッシュに
 // 乗っていて上流に問い合わせずに済んでいただけの可能性が高く、地形データが国によって
 // 恒久的に取得不可というわけではない。
+// 【2026-07-19・実験】private.coffee(Kumi Systems運営)は非営利・レート制限なしを謳う
+// 無料Overpassインスタューションのため、試しにこちらをメイン(先頭=最初に試す)にする。
+// 前回追加したラウンドロビン(3本均等分散)はここでは使わず、単純に先頭から順に試す方式へ
+// 戻す(=private.coffeeが健全な限りずっとそこを使う。overpass-api.de/kumi.systemsは
+// private.coffeeが不調な時だけのフォールバック)。「レート制限なし」はサードパーティの
+// 説明であり実測未確認のため、うまくいかなければ元の順序(overpass-api.de先頭)か
+// ラウンドロビンに戻すこと。
 const OVERPASS_MIRRORS = [
+  'https://overpass.private.coffee/api/interpreter', // 2026-07-19実験: メインに変更
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
-  'https://overpass.private.coffee/api/interpreter', // 2026-07-16追加(クライアント直接モードの輪番と同じ3本構成に)
 ];
 
 const APIS = {
@@ -124,20 +131,24 @@ const INJECT = `<script>
   // (実機コンソールで429/504の連鎖を確認)。直接モードもミラー輪番にし、429/5xx/
   // ネットワークエラーを返したミラーは一定時間除外する。ペース配分・直列化チェーンも
   // ミラー(ホスト)ごとに独立させ、健全なミラーが複数ある間は実効スループットも上がる。
-  const OVERPASS_PREFIX = 'https://overpass-api.de/api/interpreter';
+  const OVERPASS_PREFIX = 'https://overpass-api.de/api/interpreter'; // part8.js側が呼ぶ元URL(書き換え対象の目印。ミラー順とは無関係)
+  // 【2026-07-19・実験】サーバ側(OVERPASS_MIRRORS)と揃え、private.coffeeを先頭=メインにする。
+  // 「先頭の健全なミラー」方式だと本家(1本)に負荷が集中する問題が以前あったが、それは
+  // overpass-api.deを先頭固定していたことが原因。private.coffeeはレート制限なしを謳う
+  // ため、今回はあえてそこへ集中させる実験。うまくいかなければ元の順序 or ラウンドロビンに戻す。
   const OVERPASS_DIRECT_MIRRORS = [
+    'https://overpass.private.coffee/api/interpreter', // 2026-07-19実験: メインに変更
     'https://overpass-api.de/api/interpreter',
     'https://overpass.kumi.systems/api/interpreter',
-    'https://overpass.private.coffee/api/interpreter',
   ];
   const mirrorBackoffUntil = {}; // ミラーURL -> このtimestampまで使わない
-  // 「先頭の健全なミラー」方式だと本家が429を返すまで永遠に本家だけが選ばれ、負荷分散に
-  // ならない(実機ログ: 修正後もoverpass-api.deだけに投げ続けて429/504)。輪番で回す。
-  let mirrorIdx = 0;
-  const paceThrough = async (chainKey) => { // chainKeyごとに1.1秒間隔を直列で保証
+  function directIntervalFor(mirror) { // 【2026-07-19実験】private.coffeeだけ間隔を詰めて取得頻度を上げる
+    return mirror === 'https://overpass.private.coffee/api/interpreter' ? 350 : DIRECT_MIN_INTERVAL_MS;
+  }
+  const paceThrough = async (chainKey) => { // chainKeyごとに間隔を直列で保証(間隔自体はミラーごとに変わりうる)
     const prevChain = directChains[chainKey] || Promise.resolve();
     const myTurn = prevChain.then(async () => {
-      const wait = (lastDirectAt[chainKey] || 0) + DIRECT_MIN_INTERVAL_MS - Date.now();
+      const wait = (lastDirectAt[chainKey] || 0) + directIntervalFor(chainKey) - Date.now();
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       lastDirectAt[chainKey] = Date.now();
     });
@@ -153,11 +164,12 @@ const INJECT = `<script>
           if (prefix === OVERPASS_PREFIX) {
             const now = Date.now();
             let mirror = null;
+            // 【2026-07-19実験】ラウンドロビンではなく、常に配列先頭(private.coffee)から
+            // 順に健全なものを選ぶ(=private.coffeeが健全な限りずっとそこへ集中させる)。
             for (let i = 0; i < OVERPASS_DIRECT_MIRRORS.length; i++) {
-              const cand = OVERPASS_DIRECT_MIRRORS[(mirrorIdx + i) % OVERPASS_DIRECT_MIRRORS.length];
+              const cand = OVERPASS_DIRECT_MIRRORS[i];
               if ((mirrorBackoffUntil[cand] || 0) < now) {
                 mirror = cand;
-                mirrorIdx = (mirrorIdx + i + 1) % OVERPASS_DIRECT_MIRRORS.length; // 次回は次のミラーから
                 break;
               }
             }
@@ -211,12 +223,19 @@ function cachePath(apiDir, upstreamUrl) {
 }
 
 /* ---------- 上流レート制限 (ホスト別・直列キュー) ---------- */
+// 【2026-07-19・実験】MIN_INTERVAL_MS(1.1秒)はoverpass-api.deの公開レート制限に合わせて
+// 決めた値。private.coffeeは「レート制限なし」を謳うため、そちらだけ間隔を詰めて
+// 取得頻度を上げる(過負荷でエラーが増えるようなら数値を戻す)。ホストごとに独立した
+// キュー(chains/lastStartAtはhost別)なので、この間隔もホスト別に変えて問題ない。
+function intervalForHost(host) {
+  return host === 'overpass.private.coffee' ? 350 : MIN_INTERVAL_MS;
+}
 const lastStartAt = new Map();
 const chains = new Map();
 function scheduleUpstream(host, task) {
   const prev = chains.get(host) || Promise.resolve();
   const p = prev.then(async () => {
-    const wait = (lastStartAt.get(host) || 0) + MIN_INTERVAL_MS - Date.now();
+    const wait = (lastStartAt.get(host) || 0) + intervalForHost(host) - Date.now();
     if (wait > 0) await sleep(wait);
     lastStartAt.set(host, Date.now());
     return task();
@@ -375,7 +394,7 @@ async function handleApi(req, res, apiKey) {
     p = (async () => {
       const t0 = Date.now();
       const up = api.mirrors
-        ? await fetchUpstreamMulti(api.mirrors.map((m) => m + rest), upstreamOpts)
+        ? await fetchUpstreamMulti(api.mirrors.map((m) => m + rest), upstreamOpts) // 先頭(private.coffee)優先
         : await fetchUpstream(upstreamUrl, upstreamOpts);
       log(`MISS ${apiKey} -> upstream ${up.status} (${Date.now() - t0}ms)`);
       if (up.status === 200) {
