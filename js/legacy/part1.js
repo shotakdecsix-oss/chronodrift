@@ -502,7 +502,13 @@ function processRoadMeshQueue() {
   // 常に固定6ms/フレームのままだったため、混雑時は建物の方が道路より速く追いつき、
   // 道路が建物に追い抜かれて「道路だけ拡張が止まって見える」逆転が起きていた。
   // 道路側もバックログに応じて時間予算を伸ばし、常に建物より優先して追いつけるようにする。
-  const roadBudgetMs = Math.min(24, 6 + Math.floor(pendingRoadMeshes.length / 150));
+  // 【2026-07-19】建物側(part9.js)には起動・ジャンプ直後30秒 or 現在地タイル未完了中の
+  // 「初期ラッシュ」で予算を8ms→14msへ広げる仕組みがあるが、道路側には同種のブーストが
+  // 無かった。生成順序は「地形→道路→建物」のはずなのに、ラッシュ中はむしろ道路の方が
+  // 相対的に手薄になっていた(ユーザー報告: 道路・線路の生成が遅い)。同じ判定を使い、
+  // ラッシュ中は上限を24ms→42msへ広げる(この間のコマ落ちは建物側ラッシュと同様に許容)。
+  const _roadRush = performance.now() < 30000 || _curTileRush;
+  const roadBudgetMs = Math.min(_roadRush ? 42 : 24, 6 + Math.floor(pendingRoadMeshes.length / 150));
   let i = 0;
   while (i < pendingRoadMeshes.length) {
     if ((i & 7) === 0 && performance.now() - t0 > roadBudgetMs) break;
