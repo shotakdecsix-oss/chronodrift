@@ -334,9 +334,13 @@ function animate() {
     const bcx = Math.floor(b.x / CHUNK_SIZE), bcz = Math.floor(b.z / CHUNK_SIZE);
     if (!IS_MEIJI && !chunkNearTerrainReady(bcx, bcz)) {
       b._tries = (b._tries || 0) + 1;
-      // 200回(プレイヤーが二度と戻らない遠方チャンク等)試しても揃わなければ、
+      // 【2026-07-19】200回(プレイヤーが二度と戻らない遠方チャンク等)試しても揃わなければ、
       // 諦めてFAR基準のまま生成する(無限に足踏みし続けるのを防ぐ)。
-      if (b._tries < 200) { pendingBuildings.push(b); continue; }
+      // ただし失敗のたび配列末尾へ戻す方式(下記)のため、密集地でバックログが数千件ある間は
+      // 「末尾へ戻ってから次に再判定されるまで」が数十フレームかかり、200回待つと数十秒〜
+      // 数分の「近くだけ穴が空いたドーナツ状」になっていた(実機報告)。40回に短縮し、
+      // 最悪ケースの待ち時間の天井を下げる(フォールバック自体は既存の安全策のまま)。
+      if (b._tries < 40) { pendingBuildings.push(b); continue; }
     }
     // 【重要・2026-07-16】実OSM建物(b.real)はisOnRoadチェックを免除する。isOnRoadは
     // 建物の外接円半径(halfDiag=対角線の半分)で道路中心線との距離を見るため、
@@ -354,7 +358,7 @@ function animate() {
     // 揃わなければ(隣タイルが4回失敗で諦め扱いになった場合など)待たずに生成する。
     if (b.real && !osmTilesReadyAround(b.x, b.z, 64)) {
       b._tries = (b._tries || 0) + 1;
-      if (b._tries < 200) { pendingBuildings.push(b); continue; }
+      if (b._tries < 40) { pendingBuildings.push(b); continue; } // 【2026-07-19】200→40(理由は上のchunkNearTerrainReady側コメント参照)
     }
     // 実建物はゲーム側の広い道路・線路リボンに食い込む分だけ寸法を縮めてから生成する
     // (part2.js fitRealBuildingToRoads参照。道路レコード登録はデータ到着時に同期で済んで
