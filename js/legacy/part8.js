@@ -855,6 +855,18 @@ function generateChunk(chunkX, chunkZ) {
     return Math.abs(getGroundY(qx + SLOPE_CHECK_DIST, qz) - h0) > SLOPE_MAX_DH ||
            Math.abs(getGroundY(qx, qz + SLOPE_CHECK_DIST) - h0) > SLOPE_MAX_DH;
   };
+  // 【2026-07-18】大きな建物のすぐ隣にわずかに残った土地など、家一軒分の最低限の
+  // クリアランス(isOnRoad/hasBuildingNearbyの通常の余白)はギリギリ満たすが実質
+  // 「隙間」でしかない狭小地には建てないようにする。footprint・隣接建物までの距離・
+  // 実建物からの距離をひとまわり広げた基準(LOT_MARGIN)で同じ衝突判定を通し、
+  // 広げた分だけでも何かにかかるなら「狭すぎる土地」とみなして除外する。
+  const LOT_MARGIN = 4; // isInsideKnownRealBuildingの既定pad(3m)より広く取り、大きな実建物の脇の狭小地も除外する
+  const hasRoomToBuild = (qx, qz, bw, bd) => {
+    if (isInsideKnownRealBuilding(qx, qz, LOT_MARGIN)) return false;
+    if (isOnRoad(qx, qz, bw + LOT_MARGIN * 2, bd + LOT_MARGIN * 2)) return false;
+    if (hasBuildingNearby(qx, qz, Math.max(bw, bd) / 2 + LOT_MARGIN)) return false;
+    return true;
+  };
   const buildable = (qx, qz) => {
     if (isInsideKnownRealBuilding(qx, qz)) return false;
     if (inAvoid(qx, qz)) return false;
@@ -899,8 +911,7 @@ function generateChunk(chunkX, chunkZ) {
           if (hx < x0 || hx >= x1 || hz < z0 || hz >= z1) continue; // このチャンク担当分のみ(二重生成防止)
           if (!buildable(hx, hz)) continue;
           const bw = 6.5 + Math.random() * 3, bd = 6 + Math.random() * 2.5;
-          if (isOnRoad(hx, hz, bw, bd)) continue;
-          if (hasBuildingNearby(hx, hz, Math.max(bw, bd) / 2 + 2.5)) continue; // 隣家との隙間は狭く
+          if (!hasRoomToBuild(hx, hz, bw, bd)) continue; // 【2026-07-18】狭小地(大きな建物の隙間等)を除外
           const pal = HOUSE_PALETTE[(Math.random() * HOUSE_PALETTE.length) | 0];
           addBuilding(hx, hz, bw, bd, 3.5 + Math.random() * 3.5,
                       { color: pal.w, roofColor: pal.r, type: 'house' });
@@ -933,12 +944,11 @@ function generateChunk(chunkX, chunkZ) {
         // hasBuildingNearby(既存建物との数m間隔の空け)だけでは、本物の大きい建物の
         // フットプリント内に手続き生成の建物が重なって生成されるのを防げない
         // (東京駅周辺での住宅密集バグの主因の一つ。[[project_isehara_game_procedural_infill_race]])。
-        if (isInsideKnownRealBuilding(jx, jz)) continue;
         if (isSteepSlope(jx, jz)) continue; // 【2026-07-18】傾斜地には建てない(buildable()参照)
         const bw = 7+Math.random()*5;
         const bd = 6.5+Math.random()*4.5;
-        if (isOnRoad(jx, jz, bw, bd)) continue;
-        if (hasBuildingNearby(jx, jz, Math.max(bw,bd)/2+1.5)) continue;
+        // 【2026-07-18】isInsideKnownRealBuildingを含む狭小地除外はhasRoomToBuildに統合
+        if (!hasRoomToBuild(jx, jz, bw, bd)) continue;
         // 低層住宅のみ: ほぼ2階建て(低層アパート枝・classifyResidentialによる
         // マンション/オフィス昇格・applySizeFloorの大型化は手続き生成では行わない)
         const bh = 4+Math.random()*3.5;
@@ -963,8 +973,7 @@ function generateChunk(chunkX, chunkZ) {
         if (!buildable(jx, jz)) continue; // 実landuse区画内 or 本物の建物が近くにある場合のみ
         if (!nearMinorRoad(jx, jz, 35)) continue;
         const bw = 7 + Math.random() * 4, bd = 6.5 + Math.random() * 3.5;
-        if (isOnRoad(jx, jz, bw, bd)) continue;
-        if (hasBuildingNearby(jx, jz, Math.max(bw, bd) / 2 + 1.5)) continue;
+        if (!hasRoomToBuild(jx, jz, bw, bd)) continue; // 【2026-07-18】狭小地を除外
         const pal = HOUSE_PALETTE[(Math.random() * HOUSE_PALETTE.length) | 0];
         // 【2026-07-16】低層住宅のみ: 8m超(3階以上)の枝とマンション昇格を廃止
         const bh = 4 + Math.random() * 3.5;
