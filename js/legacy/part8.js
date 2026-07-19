@@ -420,6 +420,14 @@ async function fetchOSMTileBatch() {
   const _bz0 = Math.floor((player.position.z - _blockPad) / OSM_TILE_M), _bz1 = Math.floor((player.position.z + _blockPad) / OSM_TILE_M);
   const _blockingTiles = new Set();
   for (let tx = _bx0; tx <= _bx1; tx++) for (let tz = _bz0; tz <= _bz1; tz++) _blockingTiles.add(tx + ',' + tz);
+  // 【2026-07-19】ユーザー報告: デバッグオーバーレイで見ると、取得待ち(赤)のタイルが
+  // 現在地から離れた場所(先読み5x5・進行方向先読み分)まで一度に広がりすぎていて、
+  // 3並列(OSM_TILE_CONCURRENCY)がそちらにも分散してしまっていた。現在地タイル中心の
+  // 近傍3x3(9枚、「5〜10個くらい」の要望に合わせた範囲)は、外側・進行方向先読みタイルより
+  // 常に先に取得されるようスコアを優遇する。近傍が尽きれば(全部ready or backoff中)、
+  // 自然と外側タイルの番が回ってくる(sort+splice方式なのでハードな足止めは不要)。
+  const NEAR_TIER_R = 1; // Chebyshev距離1以内 = 3x3 = 9枚
+  const _pTileX = Math.floor(player.position.x / OSM_TILE_M), _pTileZ = Math.floor(player.position.z / OSM_TILE_M);
   // 【2026-07-16】距離のみのソートだと真後ろと真正面のタイルが同順位になり、移動中に
   // 前方タイルが後回しになることがあった。進行方向(checkOSMTilesで更新される
   // _osmMoveUx/Uz)への射影ぶんスコアを引いて、同距離なら前方を必ず先に取得する。
@@ -427,7 +435,9 @@ async function fetchOSMTileBatch() {
   const _tileScore = (t) => {
     const dx = t.tx + 0.5 - ptx, dz = t.tz + 0.5 - ptz;
     const base = Math.abs(dx) + Math.abs(dz) - (dx * _osmMoveUx + dz * _osmMoveUz) * 0.8;
-    return _blockingTiles.has(t.tx + ',' + t.tz) ? base - 1000 : base; // ブロック中タイルは他の近傍より必ず先
+    if (_blockingTiles.has(t.tx + ',' + t.tz)) return base - 1000; // 建物生成を直接ブロックしている分は最優先
+    if (Math.abs(t.tx - _pTileX) <= NEAR_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_TIER_R) return base - 500; // 近傍3x3は外側より先
+    return base;
   };
   // 【2026-07-17・Fable5診断】距離だけでなく、backoff中(osmTileNextRetryAtが未来)の
   // タイルは近さに関係なく後ろへ回す。以前は「近い順」だけだったため、直近で失敗した
