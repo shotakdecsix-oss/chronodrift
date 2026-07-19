@@ -94,8 +94,8 @@ const DEBUG_TILE_COLORS = {
   unqueued: 0x555555,       // まだ道路タイルすらリクエストしていない
   fetching: 0xdd3333,       // リクエスト済みだが道路/線路が未確定(取得中・バックオフ中)
   waitTerrain: 0x3388dd,    // 道路/線路は確定・地形(NEAR高解像度グリッド)が未確定
-  buildingPending: 0xffaa22,// 道路・地形は確定・このタイル分の建物がまだ残っている
-  done: 0x33cc55,           // このタイル分は道路・地形・既知の建物残件ともに揃っている
+  buildingPending: 0xffaa22,// 道路・地形は確定・道路メッシュ or 建物がまだ生成中/残っている
+  done: 0x33cc55,           // 道路メッシュ・地形・既知の建物残件がすべて揃っている(表示上「完了」)
 };
 function _debugTilePlane(key) {
   let m = debugTilePlanes.get(key);
@@ -132,6 +132,14 @@ function updateDebugTileOverlay(force) {
   for (let i = pendingBuildingIdx; i < pendingBuildings.length; i++) bump(pendingByTile, tileKeyOf(pendingBuildings[i].x, pendingBuildings[i].z));
   for (const b of dormantBuildings) bump(dormantByTile, tileKeyOf(b.x, b.z));
   for (const rec of buildingRecords) bump(doneByTile, tileKeyOf(rec.x, rec.z));
+  // 【2026-07-19】roadReadyTiles は「道路データを受信・登録済み」なだけで、実際の3Dメッシュ化
+  // (processRoadMeshQueue、フレーム分割)はまだこれからのことがある。特にタイル到着直後は
+  // 数百〜数千本がpendingRoadMeshesに積まれた瞬間で、データはreadyでも画面にはまだ何も
+  // 出ていない。これを見ずにroadReadyだけで判定すると、直近タイルなのに道路・建物とも
+  // 未描画のまま「完了(緑)」と誤表示してしまう(実機報告)。道路メッシュの残件もタイル単位で
+  // 集計し、残っていれば「完了」扱いにしない。
+  const roadMeshPendingByTile = new Map();
+  for (const r of pendingRoadMeshes) bump(roadMeshPendingByTile, tileKeyOf((r.x1 + r.x2) / 2, (r.z1 + r.z2) / 2));
   const seen = new Set();
   const logRows = [];
   for (let dx = -R; dx <= R; dx++) for (let dz = -R; dz <= R; dz++) {
@@ -147,11 +155,12 @@ function updateDebugTileOverlay(force) {
       z0 > nearCZ - NEAR_D / 2 + 10 && z1 < nearCZ + NEAR_D / 2 - 10);
     const pending = (pendingByTile.get(key) || 0) + (dormantByTile.get(key) || 0);
     const done = doneByTile.get(key) || 0;
+    const roadMeshPending = roadMeshPendingByTile.get(key) || 0;
     let status;
     if (!queued) status = 'unqueued';
     else if (!roadReady) status = 'fetching';
     else if (!terrainReady) status = 'waitTerrain';
-    else if (pending > 0) status = 'buildingPending';
+    else if (roadMeshPending > 0 || pending > 0) status = 'buildingPending';
     else status = 'done';
     const cx = x0 + OSM_TILE_M / 2, cz = z0 + OSM_TILE_M / 2;
     // 【2026-07-19】中心の地面高さだけだと起伏のあるタイルで平面が地形に埋まって見えるため、
@@ -165,7 +174,7 @@ function updateDebugTileOverlay(force) {
     mesh.position.set(cx, topY + 0.6, cz);
     mesh.material.color.setHex(DEBUG_TILE_COLORS[status]);
     mesh.visible = true;
-    logRows.push({ tile: key, status, road: roadReady, terrain: terrainReady, buildDone: done, buildPending: pending, fails: osmTileFailCount.get(key) || 0 });
+    logRows.push({ tile: key, status, road: roadReady, roadMeshPending, terrain: terrainReady, buildDone: done, buildPending: pending, fails: osmTileFailCount.get(key) || 0 });
   }
   // 範囲外に出た平面は隠すだけ(破棄しない。再度範囲に入ったらそのまま使い回す)
   for (const [key, mesh] of debugTilePlanes) if (!seen.has(key)) mesh.visible = false;
