@@ -32,10 +32,10 @@ const osmTileQueue = [];
 // 【2026-07-16】2→3。直接モードはミラー輪番(3ホスト)になったため、ホストあたりの
 // 同時実行は従来以下のまま全体スループットを上げられる。プロキシ経由でもサーバ側の
 // per-hostペース配分(1.1s)が守られるので上流には安全。429が増えるようなら2に戻す。
-// 【2026-07-19・実験】private.coffeeをメインに切り替え(server.js参照)、レート制限なしを
-// 謳う先を主に叩くようになったため、取得頻度を上げる実験として3→5に上げる。429/5xxが
-// 目立って増えるようなら3(またはそれ以下)へ戻すこと。
-const OSM_TILE_CONCURRENCY = 5;
+// 【2026-07-19・実験→撤回】private.coffeeメイン化に合わせて5へ上げたが、実機Renderログで
+// private.coffee/kumi.systemsが常時タイムアウトし、実質ほぼ全リクエストがoverpass-api.de
+// (公式に2並列/IPの制限)に集中していたことが判明。3のままの方が安全なので戻す。
+const OSM_TILE_CONCURRENCY = 3;
 let osmTileActiveCount = 0;
 let _osmMoveUx = 0, _osmMoveUz = 0; // プレイヤーの進行方向(単位ベクトル)。取得順の前方優先に使う
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)

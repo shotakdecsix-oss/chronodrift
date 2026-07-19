@@ -45,17 +45,16 @@ try {
 // 東京(伊勢原)がテストで問題なく見えていたのは、直近の試行が既にディスクキャッシュに
 // 乗っていて上流に問い合わせずに済んでいただけの可能性が高く、地形データが国によって
 // 恒久的に取得不可というわけではない。
-// 【2026-07-19・実験】private.coffee(Kumi Systems運営)は非営利・レート制限なしを謳う
-// 無料Overpassインスタューションのため、試しにこちらをメイン(先頭=最初に試す)にする。
-// 前回追加したラウンドロビン(3本均等分散)はここでは使わず、単純に先頭から順に試す方式へ
-// 戻す(=private.coffeeが健全な限りずっとそこを使う。overpass-api.de/kumi.systemsは
-// private.coffeeが不調な時だけのフォールバック)。「レート制限なし」はサードパーティの
-// 説明であり実測未確認のため、うまくいかなければ元の順序(overpass-api.de先頭)か
-// ラウンドロビンに戻すこと。
+// 【2026-07-19・実験→撤回】private.coffeeをメインにする実験を行ったが、実機のRenderログで
+// private.coffee/kumi.systemsが「毎回」upstream timeout(45秒待ちを2回=最大90秒超)になり、
+// overpass-api.deだけが(429/504はあるものの)唯一実際に200を返せていることが確認された
+// (この間/api/overpassの応答が最大881秒=約15分にまで悪化)。「レート制限なし」という
+// サードパーティの説明は少なくとも今この瞬間のRenderの環境からは成立しておらず、むしろ
+// 常に失敗する2本を毎回律儀に試す分だけ確実に遅くなっていた。overpass-api.deを先頭へ戻す。
 const OVERPASS_MIRRORS = [
-  'https://overpass.private.coffee/api/interpreter', // 2026-07-19実験: メインに変更
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
 ];
 
 const APIS = {
@@ -132,23 +131,19 @@ const INJECT = `<script>
   // ネットワークエラーを返したミラーは一定時間除外する。ペース配分・直列化チェーンも
   // ミラー(ホスト)ごとに独立させ、健全なミラーが複数ある間は実効スループットも上がる。
   const OVERPASS_PREFIX = 'https://overpass-api.de/api/interpreter'; // part8.js側が呼ぶ元URL(書き換え対象の目印。ミラー順とは無関係)
-  // 【2026-07-19・実験】サーバ側(OVERPASS_MIRRORS)と揃え、private.coffeeを先頭=メインにする。
-  // 「先頭の健全なミラー」方式だと本家(1本)に負荷が集中する問題が以前あったが、それは
-  // overpass-api.deを先頭固定していたことが原因。private.coffeeはレート制限なしを謳う
-  // ため、今回はあえてそこへ集中させる実験。うまくいかなければ元の順序 or ラウンドロビンに戻す。
+  // 【2026-07-19・実験→撤回】private.coffeeを先頭にする実験はRenderの実機ログで
+  // private.coffee/kumi.systemsが常時タイムアウトすることが確認されたため撤回。
+  // overpass-api.deを先頭に戻す(server.js側のOVERPASS_MIRRORSと同じ理由)。
   const OVERPASS_DIRECT_MIRRORS = [
-    'https://overpass.private.coffee/api/interpreter', // 2026-07-19実験: メインに変更
     'https://overpass-api.de/api/interpreter',
     'https://overpass.kumi.systems/api/interpreter',
+    'https://overpass.private.coffee/api/interpreter',
   ];
   const mirrorBackoffUntil = {}; // ミラーURL -> このtimestampまで使わない
-  function directIntervalFor(mirror) { // 【2026-07-19実験】private.coffeeだけ間隔を詰めて取得頻度を上げる
-    return mirror === 'https://overpass.private.coffee/api/interpreter' ? 350 : DIRECT_MIN_INTERVAL_MS;
-  }
-  const paceThrough = async (chainKey) => { // chainKeyごとに間隔を直列で保証(間隔自体はミラーごとに変わりうる)
+  const paceThrough = async (chainKey) => { // chainKeyごとに1.1秒間隔を直列で保証
     const prevChain = directChains[chainKey] || Promise.resolve();
     const myTurn = prevChain.then(async () => {
-      const wait = (lastDirectAt[chainKey] || 0) + directIntervalFor(chainKey) - Date.now();
+      const wait = (lastDirectAt[chainKey] || 0) + DIRECT_MIN_INTERVAL_MS - Date.now();
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       lastDirectAt[chainKey] = Date.now();
     });
@@ -164,8 +159,9 @@ const INJECT = `<script>
           if (prefix === OVERPASS_PREFIX) {
             const now = Date.now();
             let mirror = null;
-            // 【2026-07-19実験】ラウンドロビンではなく、常に配列先頭(private.coffee)から
-            // 順に健全なものを選ぶ(=private.coffeeが健全な限りずっとそこへ集中させる)。
+            // 配列先頭(overpass-api.de)から順に健全なものを選ぶ。他ミラーはbackoff中の
+            // フォールバック用(private.coffee/kumi.systemsは実測で常時タイムアウトしたため
+            // 先頭には置かない。詳細は[[project_isehara_game_overpass_mirror_experiment]]参照)。
             for (let i = 0; i < OVERPASS_DIRECT_MIRRORS.length; i++) {
               const cand = OVERPASS_DIRECT_MIRRORS[i];
               if ((mirrorBackoffUntil[cand] || 0) < now) {
@@ -223,19 +219,12 @@ function cachePath(apiDir, upstreamUrl) {
 }
 
 /* ---------- 上流レート制限 (ホスト別・直列キュー) ---------- */
-// 【2026-07-19・実験】MIN_INTERVAL_MS(1.1秒)はoverpass-api.deの公開レート制限に合わせて
-// 決めた値。private.coffeeは「レート制限なし」を謳うため、そちらだけ間隔を詰めて
-// 取得頻度を上げる(過負荷でエラーが増えるようなら数値を戻す)。ホストごとに独立した
-// キュー(chains/lastStartAtはhost別)なので、この間隔もホスト別に変えて問題ない。
-function intervalForHost(host) {
-  return host === 'overpass.private.coffee' ? 350 : MIN_INTERVAL_MS;
-}
 const lastStartAt = new Map();
 const chains = new Map();
 function scheduleUpstream(host, task) {
   const prev = chains.get(host) || Promise.resolve();
   const p = prev.then(async () => {
-    const wait = (lastStartAt.get(host) || 0) + intervalForHost(host) - Date.now();
+    const wait = (lastStartAt.get(host) || 0) + MIN_INTERVAL_MS - Date.now();
     if (wait > 0) await sleep(wait);
     lastStartAt.set(host, Date.now());
     return task();
@@ -330,15 +319,21 @@ async function fetchUpstream(upstreamUrl, opts) {
 // 全滅した場合は最後に得られたレスポンス(あれば)かエラーを返す。
 // 各ミラーは独立ホストなので scheduleUpstream のレート制限キューも別々になり、
 // 一方のホストが混雑/拒否していてももう一方には影響しない。
+// 【2026-07-19】以前は全ミラーとも一律maxAttempts:2で試していたが、実機ログで
+// kumi.systems/private.coffeeが「毎回」タイムアウト(45秒×2回=90秒超/ミラー)することが
+// 判明し、本命(先頭)に辿り着く前にリクエスト全体が数分〜十数分単位で遅延する原因になって
+// いた。2番目以降(フォールバック)のミラーは1回だけ試して見切りをつけ、生きている
+// 可能性が高い先頭ミラーへ早く戻れるようにする。
 async function fetchUpstreamMulti(upstreamUrls, opts) {
   let lastRes = null, lastErr = null;
   // クールダウン中のホストを外し、健全なミラーから先に試す(全滅時は従来どおり全部試す)
   const _now = Date.now();
   const healthy = upstreamUrls.filter((u) => (hostCooldownUntil.get(new URL(u).host) || 0) < _now);
   if (healthy.length) upstreamUrls = healthy;
-  for (const url of upstreamUrls) {
+  for (let idx = 0; idx < upstreamUrls.length; idx++) {
+    const url = upstreamUrls[idx];
     try {
-      const res = await fetchUpstream(url, Object.assign({}, opts, { maxAttempts: 2 }));
+      const res = await fetchUpstream(url, Object.assign({}, opts, { maxAttempts: idx === 0 ? 2 : 1 }));
       if (res.status === 200) return res;
       lastRes = res;
     } catch (e) {
