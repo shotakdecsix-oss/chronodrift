@@ -96,6 +96,7 @@ const DEBUG_TILE_COLORS = {
   waitTerrain: 0x3388dd,    // 道路/線路は確定・地形(NEAR高解像度グリッド)が未確定
   buildingPending: 0xffaa22,// 道路・地形は確定・道路メッシュ or 建物がまだ生成中/残っている
   done: 0x33cc55,           // 道路メッシュ・地形・既知の建物残件がすべて揃っている(表示上「完了」)
+  gaveUp: 0x9b3fd4,         // 【2026-07-20】4回連続失敗で「諦めて」ready扱いになっただけ。実データは未着の可能性が高い
 };
 function _debugTilePlane(key) {
   let m = debugTilePlanes.get(key);
@@ -156,9 +157,19 @@ function updateDebugTileOverlay(force) {
     const pending = (pendingByTile.get(key) || 0) + (dormantByTile.get(key) || 0);
     const done = doneByTile.get(key) || 0;
     const roadMeshPending = roadMeshPendingByTile.get(key) || 0;
+    const fails = osmTileFailCount.get(key) || 0;
+    // 【2026-07-20】fetchOSMTileBatch(part8.js)は同じタイルが4回連続失敗すると、建物生成を
+    // 永遠にブロックしないため「諦めて」roadReadyTilesへ強制的に追加する(道路取得自体は
+    // バックグラウンドで再試行を続ける)。これは「本当にデータが届いた」わけではないのに
+    // road===trueになってしまい、以前はそのまま緑(完了)表示していた。実機で「現在地のすぐ
+    // 近くの道路すら生成されず緑」という報告と一致(建物294件はOSMと無関係な手続き生成分)。
+    // 成功時はosmTileFailCountがdeleteされる(=0に戻る)ため、fails>=4はほぼ確実に
+    // 「諦めルートで済扱いになっただけ」を意味する。優先度高くgaveUpとして区別する。
+    const gaveUp = roadReady && fails >= 4;
     let status;
     if (!queued) status = 'unqueued';
     else if (!roadReady) status = 'fetching';
+    else if (gaveUp) status = 'gaveUp';
     else if (!terrainReady) status = 'waitTerrain';
     else if (roadMeshPending > 0 || pending > 0) status = 'buildingPending';
     else status = 'done';

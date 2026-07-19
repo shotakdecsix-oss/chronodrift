@@ -537,7 +537,17 @@ async function fetchOSMTileBatch() {
   // 現在地未確定+近傍が常に1枚クエリになるため、近傍だけがこのバグを踏み続け、
   // 遠方の3枚まとめ(46秒猶予、式は同じ)だけが正常に通っていた=「遠景だけ出る」の実体)。
   // 1枚・複数枚を問わず同じ式に統一する。
-  const tileTimeoutMs = osmTimeoutSec * 1000 + 8000;
+  // 【2026-07-20】サーバー側はcacheKeySourceが同じリクエストを1本のinflight Promiseに
+  // 束ねているため、クライアントが34秒でabortして再試行しても、サーバー内部で進行中の
+  // 同一Overpass取得処理自体は止まらず継続する(Renderログ実測: 同一タイルの応答が
+  // 最大881秒かかったケースでも最終的に200で成功していた)。つまり現在地タイルが
+  // 4回連続失敗する主因は「データが本当に取れない」のではなく「クライアントの我慢が
+  // サーバーの実際の処理時間より短く、進行中の応答を毎回取りこぼしている」可能性が高い。
+  // 現在地タイル(ptKeyを含むバッチ)に限り、サーバー側の1回の再試行チェーン
+  // (プライマリmirror: 45秒×最大2回=最大91.5秒)をある程度カバーできるよう
+  // 猶予を70秒まで伸ばす。他タイル(周辺・遠方)は従来通りの短い猶予のまま。
+  const _curTileInBatch = keys.includes(ptKey);
+  const tileTimeoutMs = _curTileInBatch ? Math.max(osmTimeoutSec * 1000 + 8000, 70000) : osmTimeoutSec * 1000 + 8000;
   const abortCtl = new AbortController();
   const timeoutId = setTimeout(() => abortCtl.abort(), tileTimeoutMs);
   try {
