@@ -85,6 +85,9 @@ function processStationNodes(elements) {
 // いたため)。loadOSM()をタイル取得への一本化に伴い削除 — 伊勢原も他地域と全く同じく、
 // checkOSMTiles()がプレイヤー周辺のタイルを未取得として検出し、通常のフローで取得する。
 
+// 舗装/未舗装の判別用(OSM surfaceタグ)。タグが無い場合はhighway種別からの推定にフォールバックする。
+const UNPAVED_SURFACES = new Set(['unpaved','dirt','earth','ground','gravel','fine_gravel','grass','sand','mud','pebblestone','compacted','woodchips','clay','grass_paver']);
+
 function processTileData(data, tileCount) {
   if (!data || !data.elements) return;
   // building=タグを持つrelation(マルチポリゴン)をway相当の疑似要素に変換し、既存のbuilding
@@ -110,10 +113,17 @@ function processTileData(data, tileCount) {
     if (tags.highway) {
       const hw = tags.highway;
       const width = hw==='trunk'||hw==='primary' ? 8 : hw==='secondary' ? 6 : hw==='tertiary'||hw==='residential' ? 4 : 2.5;
-      const type = hw==='motorway' ? 'motorway' : hw==='motorway_link' ? 'trunk'
+      let type = hw==='motorway' ? 'motorway' : hw==='motorway_link' ? 'trunk'
                  : (hw==='trunk'||hw==='primary'||hw==='secondary'||hw==='tertiary') ? hw : 'road';
       if (USES_MEIJI_LANDUSE && (type === 'road' || type === 'motorway')) return; // 明治・江戸: 細街路も高速道路もない
       if (MODE === 'space' && (type === 'road' || type === 'tertiary' || type === 'secondary')) return; // 宇宙: 鉄道・高速道路・国道(幹線)以外の小さな道路は出さない
+      // 細街路のみ舗装/未舗装を見た目に反映(幹線級は現実にほぼ全て舗装のため対象外)。
+      // surfaceタグがあればそれに従い、無ければhighway=track/pathのみ未舗装と推定する。
+      if (type === 'road') {
+        const sf = tags.surface;
+        const unpaved = sf ? UNPAVED_SURFACES.has(sf) : (hw === 'track' || hw === 'path');
+        if (unpaved) type = 'unpaved';
+      }
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);

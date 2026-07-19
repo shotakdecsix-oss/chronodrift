@@ -347,8 +347,8 @@ function drawMinimap() {
   }
 
   // Roads (color-coded by type)
-  const mmRoadColor = { motorway:'#44bb44', trunk:'#ffcc00', primary:'#ffcc00', secondary:'#ffaa40', tertiary:'#aabbcc', railway:'#cc44ff', road:'#505878', water:'#3388cc' };
-  const mmRoadWidth = { motorway:4, trunk:3, primary:2.5, secondary:2, tertiary:1.5, railway:2, road:1, water:2.5 };
+  const mmRoadColor = { motorway:'#44bb44', trunk:'#ffcc00', primary:'#ffcc00', secondary:'#ffaa40', tertiary:'#aabbcc', railway:'#cc44ff', road:'#505878', unpaved:'#8a7554', water:'#3388cc' };
+  const mmRoadWidth = { motorway:4, trunk:3, primary:2.5, secondary:2, tertiary:1.5, railway:2, road:1, unpaved:1, water:2.5 };
   const R = MM_RANGE + 60; // 表示範囲外の要素は描画コマンド自体を発行しない
 
   // 実形状の水面ポリゴン(道路より下層に描く)

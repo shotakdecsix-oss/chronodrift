@@ -627,6 +627,11 @@ function realRoadTex(kind) {
     line(0.12, 2, '#9aa0a4'); line(0.88, 2, '#9aa0a4');
     line(0.17, 2.5, WHITE); line(0.83, 2.5, WHITE);
     line(0.50, 2.5, WHITE);
+  } else if (kind === 'unpaved') { // 未舗装路(砂利・土。中央線・歩道なし、わだちのみ)
+    g.fillStyle = '#8a7554'; g.fillRect(0, 0, W, H); noise(0, 1, 300, 0.075);
+    g.fillStyle = 'rgba(0,0,0,0.12)';
+    g.fillRect(u(0.26), 0, u(0.38) - u(0.26), H); // 左わだち
+    g.fillRect(u(0.62), 0, u(0.74) - u(0.62), H); // 右わだち
   } else { // minor: 生活道路(中央線なし・路側帯の白線のみ)
     g.fillStyle = '#45484d'; g.fillRect(0, 0, W, H); noise(0, 1, 180, 0.05);
     line(0.08, 2.5, WHITE); line(0.92, 2.5, WHITE);
@@ -776,6 +781,7 @@ const ROAD_MAT = {
   railway:    new THREE.MeshBasicMaterial({ color: 0xaa22ff, side: THREE.DoubleSide }),
   rail_white: new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide }),
   road:       new THREE.MeshBasicMaterial({ color: MODE_CONF.roadMinor, side: THREE.DoubleSide }),
+  unpaved:    new THREE.MeshBasicMaterial({ color: 0x9c8355, side: THREE.DoubleSide }), // 土・砂利色(舗装色と区別)
   water:      new THREE.MeshBasicMaterial({ color: MODE_CONF.water, side: THREE.DoubleSide }),
 };
 if (USES_MEIJI_LANDUSE) { // 明治・江戸: 全道路を土道の色調に
@@ -898,14 +904,16 @@ function addRoad(x1, z1, x2, z2, width, type='road') {
     else if (type === 'secondary') w = 9;
     else if (type === 'tertiary') w = 6.5;
     else if (type === 'road') w = Math.max(w, 4.2);
+    else if (type === 'unpaved') w = Math.max(w, 3.2); // 未舗装路(農道・山道)は舗装路よりやや狭め
   }
 
-  // 現実モード: アスファルト+車線+歩道 / バラスト+枕木+レール のテクスチャ路面
+  // 現実モード: アスファルト+車線+歩道 / バラスト+枕木+レール / 土・砂利 のテクスチャ路面
   const mat = (IS_REAL && type !== 'water')
     ? (isRailway ? realRoadMat('rail', 8)
        : type === 'trunk' ? realRoadMat('trunk', 24)
        : type === 'primary' ? realRoadMat('primary', 24)
        : type === 'secondary' ? realRoadMat('secondary', 24)
+       : type === 'unpaved' ? realRoadMat('unpaved', 16)
        : realRoadMat('minor', 24))
     : (ROAD_MAT[type] || ROAD_MAT.road);
   // 0.15→0.35: 幅広道路は左右端の間で地形(バイリニア面)が盛り上がることがあるため余裕を持たせる
