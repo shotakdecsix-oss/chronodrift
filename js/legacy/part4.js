@@ -5,7 +5,12 @@
 // ======= 道路沿いの小物自動配置 =======
 // すべてインスタンスプールへの追記なのでメッシュ・マテリアルは増えない
 function decorateRoad(x1, z1, x2, z2, type, w, rec) {
-  if (type === 'water' || type === 'railway') return;
+  // 【2026-07-20】未舗装(農道・山道等。part8.js参照)は下のminor判定に含まれず、
+  // else節(幹線=secondary以上)に落ちてガードレール・信号機が付いてしまっていた
+  // (舗装/未舗装の分岐導入前は全て'road'扱いでminor側に入っていたための取りこぼし)。
+  // 未舗装路には自販機はもちろんガードレール・信号機も実態としてまず無いため、
+  // 装飾なしのまま素通りさせる。
+  if (type === 'water' || type === 'railway' || type === 'unpaved') return;
   const dx = x2 - x1, dz = z2 - z1;
   const len = Math.sqrt(dx * dx + dz * dz);
   if (len < 18) return;

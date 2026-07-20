@@ -568,7 +568,10 @@ const PERF = {
 }[PERF_PRESET];
 const ROAD_UNLOAD_DIST = PERF.roadUnload;
 const MINOR_ROAD_MESH_DIST = PERF.minorRoadDist;
-const isMinorRoadType = (t) => t === 'road' || t === 'tertiary';
+// 【2026-07-20】未舗装(type:'unpaved'。part8.js参照)も細街路と同じ扱いにする。
+// 舗装/未舗装で分岐する前は全て'road'だったため元々ここに含まれていた枠で、
+// 分岐後にここを更新し忘れると農道・山道が幹線扱いの遠距離まで描画され続けてしまう。
+const isMinorRoadType = (t) => t === 'road' || t === 'tertiary' || t === 'unpaved';
 let _roadUnloadFrame = 0;
 // force=true: 90フレーム周期を待たず即座に判定する(「今すぐ整理」ボタン用)
 function unloadFarRoads(force) {
