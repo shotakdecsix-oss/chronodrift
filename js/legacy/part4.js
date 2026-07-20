@@ -77,6 +77,40 @@ const stationLabels = []; // for billboard update each frame
 // (建物・道路と違って駅だけこの追従の仕組みが無かった)。
 const stationRecords = [];
 
+// 駅舎本体の矩形(rotで回転済み・中心cx,cz、幅2*halfW×奥行2*halfL)が、skipRail以外の
+// 道路・線路セグメントと被っていないか判定する。isOnRoad(part2.js)は外接円ベースの判定で
+// 細長い建物(駅舎は30m×15m)には過剰判定になるため([[project_isehara_game_building_orientation]]の
+// 既知の問題と同種)、fitRealBuildingToRoadsと同じ「回転後ローカル座標での窓関数」方式で
+// 実際の矩形と線分の距離を見る。skipRailは駅舎がそもそも隣に建つ想定の最寄り線路
+// (bestRail)そのもので、これに近いこと自体は正常なので除外する。
+function stationOverlapsOtherTrack(cx, cz, rot, halfW, halfL, skipRail) {
+  const c = Math.cos(rot), s = Math.sin(rot);
+  const searchR = Math.sqrt(halfW * halfW + halfL * halfL) + MAX_ROAD_HALF_W + 1;
+  const cellR = Math.max(1, Math.ceil(searchR / ROAD_CELL)) + 1;
+  const gx = Math.floor(cx / ROAD_CELL), gz = Math.floor(cz / ROAD_CELL);
+  for (let dxc = -cellR; dxc <= cellR; dxc++) for (let dzc = -cellR; dzc <= cellR; dzc++) {
+    const arr = roadGrid.get((gx + dxc) + ',' + (gz + dzc));
+    if (!arr) continue;
+    for (const r of arr) {
+      if (r.type === 'water') continue;
+      if (skipRail && Math.abs(r.x1 - skipRail.x1) < 0.5 && Math.abs(r.z1 - skipRail.z1) < 0.5 &&
+          Math.abs(r.x2 - skipRail.x2) < 0.5 && Math.abs(r.z2 - skipRail.z2) < 0.5) continue;
+      const rhw = (r.rw || 5) / 2 + 0.5;
+      const ax = r.x1 - cx, az = r.z1 - cz, bx = r.x2 - cx, bz = r.z2 - cz;
+      const au = ax * c - az * s, av = ax * s + az * c;
+      const bu = bx * c - bz * s, bv = bx * s + bz * c;
+      if (Math.min(au, bu) > halfW + rhw || Math.max(au, bu) < -(halfW + rhw)) continue;
+      if (Math.min(av, bv) > halfL + rhw || Math.max(av, bv) < -(halfL + rhw)) continue;
+      const du = bu - au, dv = bv - av;
+      const vmin = Math.abs(du) >= Math.abs(dv)
+        ? _minAbsOverWindow(au, av, du, dv, halfW)
+        : _minAbsOverWindow(av, au, dv, du, halfL);
+      if (vmin !== null && vmin < rhw) return true;
+    }
+  }
+  return false;
+}
+
 function addStation(x, z, name) {
   const gy = getGroundY(x, z); // 地表基準にしないと高地の駅ランドマークが埋まる
   const parts = []; // このパーツをまとめて後からY方向に平行移動する(rebuildStationHeight)
@@ -106,11 +140,19 @@ function addStation(x, z, name) {
     }
     const px = -rz, pz = rx; // 線路に直交する向き(駅舎を線路の脇に配置する)
     const ry = Math.atan2(rx, rz); // 建物の長辺(ローカルZ)を線路と平行に揃える回転
-    const off = 12; // 線路中心からのオフセット
-    const sx = x + px * off, sz = z + pz * off;
+    const bw = 30, bd = 15, bh = 8; // 線路沿いに長い、堂々とした駅舎
+    // 【2026-07-20】駅舎が道路・線路に被って建つ不具合の修正。以前はoff=12固定で
+    // 「最寄り線路(bestRail)から12m離せば足りる」という前提だったが、複数線路が並走する駅や
+    // 線路沿いに道路が通っている区間ではそれでも他の線路・道路に被ることがあった。
+    // stationOverlapsOtherTrackで実際に被っているか確認し、被っていればoffを段階的に広げる。
+    let off = 12; // 線路中心からのオフセット
+    let sx = x + px * off, sz = z + pz * off;
+    for (let tries = 0; tries < 10 && stationOverlapsOtherTrack(sx, sz, ry, bd / 2, bw / 2, bestRail); tries++) {
+      off += 3;
+      sx = x + px * off; sz = z + pz * off;
+    }
     const sgy = getGroundY(sx, sz);
     refX = sx; refZ = sz; // 駅舎位置を基準にNEAR更新時の高さを再サンプリングする
-    const bw = 30, bd = 15, bh = 8; // 線路沿いに長い、堂々とした駅舎
 
     const body = new THREE.Mesh(new THREE.BoxGeometry(bd, bh, bw), lambertMat(0xe8e0cc));
     body.position.set(sx, sgy + bh / 2, sz);

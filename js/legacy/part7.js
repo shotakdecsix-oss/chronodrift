@@ -525,8 +525,44 @@ document.addEventListener('click', () => {
     perfCtrlEl.classList.remove('open');
     perfBtn.classList.remove('active');
   }
+  if (timeCtrlEl && timeCtrlEl.classList.contains('open')) {
+    timeCtrlEl.classList.remove('open');
+    timeBtn.classList.remove('active');
+  }
   if (gpsEl && gpsEl.classList.contains('open')) gpsEl.classList.remove('open');
 });
+
+// ======= 時間帯ポップオーバー(🕐タップで開閉、外側タップで閉じる) =======
+// 朝/昼/夕/夜を手動で固定表示できる(part1.js setTimeOverride参照)。
+// 建物が紫っぽく見える件の切り分け用に、昼固定で見た目を確認できるようにする狙いもある。
+const timeBtn = document.getElementById('timeBtn');
+const timeCtrlEl = document.getElementById('timeCtrl');
+const TIME_LABELS = { auto: '自動', morning: '朝', noon: '昼', evening: '夕', night: '夜' };
+const TIME_OVERRIDE_H2 = { night: 0, morning: 6, noon: 12, evening: 18 };
+if (timeBtn && timeCtrlEl) {
+  let curTimeSel = 'auto';
+  try { curTimeSel = localStorage.getItem('iseharaTimeOverride') || 'auto'; } catch (e) {}
+  const timeSub = document.getElementById('timeSub');
+  if (timeSub) timeSub.textContent = TIME_LABELS[curTimeSel] || '自動';
+  timeCtrlEl.querySelectorAll('.charRow button[data-time]').forEach((b) => {
+    b.classList.toggle('active', b.dataset.time === curTimeSel);
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      curTimeSel = b.dataset.time;
+      timeCtrlEl.querySelectorAll('.charRow button[data-time]').forEach(bb => bb.classList.toggle('active', bb === b));
+      if (timeSub) timeSub.textContent = TIME_LABELS[curTimeSel] || '自動';
+      try { localStorage.setItem('iseharaTimeOverride', curTimeSel); } catch (err) {}
+      if (typeof setTimeOverride === 'function') {
+        setTimeOverride(curTimeSel === 'auto' ? null : TIME_OVERRIDE_H2[curTimeSel]);
+      }
+    });
+  });
+  timeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    timeCtrlEl.classList.toggle('open');
+    timeBtn.classList.toggle('active', timeCtrlEl.classList.contains('open'));
+  });
+}
 
 // ======= 描写・パフォーマンス設定ポップオーバー(⚙タップで開閉、外側タップで閉じる) =======
 // 選択はlocalStorageに保存し、リロードで反映(part1.js PERF_PRESET/PERF参照。

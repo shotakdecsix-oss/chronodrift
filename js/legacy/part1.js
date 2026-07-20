@@ -227,10 +227,24 @@ const DAY_KF = [
   { sky:['#2a70c8','#4a95e0','#8fc4ef','#cfe8fb'], glow:0xfff0d2, glowA:0.30, fog:0x9fc4e0, sun:0xfff4e0, sunInt:2.3, amb:0xbcd0e6, ambInt:2.5, star:0.0 },
   { sky:['#1e2448','#6a3a68','#d0673c','#ffb060'], glow:0xff783c, glowA:0.50, fog:0xa86a56, sun:0xff9a58, sunInt:1.15,amb:0x8a6a80, ambInt:1.6, star:0.12 },
 ];
+// 手動時間帯オーバーライド(⚙時間帯パネルから設定。part7.js参照)。
+// nullなら実時刻(従来通り)。0/6/12/18で夜/朝/昼/夕の各キーフレームをそのまま固定表示する。
+const TIME_OVERRIDE_H = { night: 0, morning: 6, noon: 12, evening: 18 };
+let _timeOverrideH = null;
+try {
+  const savedT = localStorage.getItem('iseharaTimeOverride');
+  if (savedT && TIME_OVERRIDE_H[savedT] != null) _timeOverrideH = TIME_OVERRIDE_H[savedT];
+} catch (e) {}
+function setTimeOverride(h) { _timeOverrideH = h; applyTimeOfDay(); }
 function applyTimeOfDay() {
   if (MODE === 'space') return; // 宇宙は常に宇宙
-  const now = new Date();
-  const h = now.getHours() + now.getMinutes() / 60; // 0..24
+  let h;
+  if (_timeOverrideH != null) {
+    h = _timeOverrideH;
+  } else {
+    const now = new Date();
+    h = now.getHours() + now.getMinutes() / 60; // 0..24
+  }
   const seg = Math.min(3, Math.floor(h / 6));
   const a = DAY_KF[seg], b = DAY_KF[(seg + 1) % 4];
   const t = (h - seg * 6) / 6;
