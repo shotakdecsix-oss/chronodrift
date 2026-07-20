@@ -204,6 +204,11 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
 
   // 国別建物プロファイル(現実モード限定。タグ実測値が無い箇所だけのフォールバックに使う)
   const cprof = MODE === 'real' ? getCountryBuildingProfile(currentCountryCode) : null;
+  // 【2026-07-18】cprof(例: 米国=sprawlingSuburban)は郊外の低層住宅街を想定したプロファイル。
+  // 高層ビルに敷地の余白(lotPadding)を付けるとNYの高層ビル街でフリーズする不具合があったため
+  // lotPaddingは既にこの高さでガードしてある(下記参照)。この閾値をここへ引き上げ、
+  // 壁色パレット(cprof.wallPalette)にも同じガードを効かせる(次のコメント参照)。
+  const LOT_PADDING_MAX_H = 15;
 
   // 【2026-07-18】観光ランドマーク(東京タワー等)は下の汎用な箱+屋根生成を丸ごとスキップし、
   // drawLandmarkTowerの専用ジオメトリだけを描く。kindはこのelseブロック内でのみ決まるが、
@@ -225,7 +230,14 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
   } else if (style && style.color != null) {
     wallC = style.color;
   } else if (MODE === 'real') {
-    const wp = (cprof && cprof.wallPalette) || DEFAULT_WALLS_REAL;
+    // 【2026-07-20】NYの建物色が画一的すぎるという報告への対応。building:colour等の実測タグも
+    // style.color(オフィス/マンション既定色)も無い'default'タイプの建物(OSMではbuilding=yesの
+    // 高層ビルにもよく付く)が、国プロファイルの郊外パレット(cprof.wallPalette)にそのまま
+    // 落ちていた。NYのような高層ビル街でも「アメリカだから」郊外住宅の淡い色6色だけが
+    // 塗られ続けることになり、これが単調さの主因だった(lotPaddingは既に高さでガード済み
+    // だったが、壁色は未対応だった)。背の高い建物は国を問わず既定の広めパレットへ逃がす。
+    const useCprofPalette = cprof && cprof.wallPalette && h < LOT_PADDING_MAX_H;
+    const wp = useCprofPalette ? cprof.wallPalette : DEFAULT_WALLS_REAL;
     wallC = wp[(Math.random() * wp.length) | 0];
   } else {
     wallC = DEFAULT_WALLS[(Math.random() * DEFAULT_WALLS.length) | 0];
@@ -280,7 +292,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
   // 不具合が確認された。高層ビルに庭の余白があるのはそもそも不自然なので高さでスキップし、
   // かつ国・密度を問わない固定予算(lotPaddingBudget)でも歯止めをかける(detailOK()の850は
   // 他の装飾と共有の閾値で緩すぎ、今回の不具合の主因だった)。
-  const LOT_PADDING_MAX_H = 15;
+  // (LOT_PADDING_MAX_Hは関数冒頭・壁色パレットのガードと共通化済み)
   if (isReal && cprof && cprof.lotPaddingRange && h < LOT_PADDING_MAX_H && lotPaddingBudget > 0 && detailOK()) {
     const [padMin, padMax] = cprof.lotPaddingRange;
     const pad = padMin + Math.random() * (padMax - padMin);
