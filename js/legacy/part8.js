@@ -1263,6 +1263,7 @@ function updateChunks() {
         scene.remove(m);
         // 屋根・小物の単位ジオメトリは全建物で共有しているため破棄しない
         if (m.geometry && !m.geometry.userData.shared) m.geometry.dispose();
+        if (m.material) releaseFacadeMat(m.material); // facadeMat以外は無害なno-op(part2.js参照)
       });
       chunkMeshes.delete(key);
       loadedChunks.delete(key); // allow re-generation if player returns

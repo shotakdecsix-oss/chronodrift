@@ -365,6 +365,7 @@ function removeBuildingsOverlappingRoad(r) {
         if (!p) continue;
         scene.remove(p);
         if (p.geometry && !p.geometry.userData.shared) p.geometry.dispose();
+        if (p.material) releaseFacadeMat(p.material); // facadeMat以外は無害なno-op(part2.js参照)
       }
       removeIds.add(rec.bid);
       if (rec.real) {
@@ -823,6 +824,7 @@ function unloadFarBuildings(force) {
       if (!p) continue;
       scene.remove(p);
       if (p.geometry && !p.geometry.userData.shared) p.geometry.dispose();
+      if (p.material) releaseFacadeMat(p.material); // facadeMat以外は無害なno-op(part2.js参照)
     }
     removeIds.add(rec.bid);
     // 再接近時に復元できるよう、軽量な記述だけdormantBuildingsへ(すでに

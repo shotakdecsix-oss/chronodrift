@@ -86,10 +86,34 @@ const CANDY_BAND_MATS = [0xffa0c0, 0xa0d8ff, 0xffe090].map(c => new THREE.MeshBa
 const _hex6 = c => '#' + ('00000' + c.toString(16)).slice(-6);
 const _shadeCss = (c, f) => _hex6(shadeHex(c, f));
 const facadeCache = new Map();
+// 【2026-07-20・スマホでのタブクラッシュ調査(続報)】テクスチャ解像度・量子化の縮小(直前の修正)
+// で軽量プレイの生存時間は数分→約10分に伸びたが、それでも最終的には落ちるとの報告。
+// facadeCacheは共有材のため一度作ったエントリを安全に破棄できず(建物アンロード時に
+// 引き続き参照されているかを追跡していない)、量子化やテクスチャ縮小はあくまで「1件あたりの
+// 重さ」や「組み合わせの理論上限」を下げただけで、件数の増加そのものは止めていなかった。
+// 色タグが豊富な都市(NY等)を10分歩き回れば理論上限内でもcache件数は増え続けうるため、
+// 軽量時は総件数にハード上限を設け、上限到達後は新規テクスチャの生成をやめて既存の
+// 同genre(kind)のエントリを使い回す(見た目のバリエーションは頭打ちになるが、
+// GPUメモリの増加はここで確実に止まる)。
+const FACADE_CACHE_MAX = PERF_PRESET === 'lite' ? 220 : Infinity;
+// 【2026-07-20・スマホでのタブクラッシュ調査(第3報)】上限キャップでも軽量プレイが
+// 最終的には落ちるとの報告。facadeMatは呼び出し元がpart3.js addBuilding側の壁メッシュ
+// 1箇所だけ(1回の呼び出し=必ず1つのmeshにだけ割り当てられる。呼び出し側で同じ変数を
+// 使い回して複数meshに割り当てることは無い)なので、「今何棟がこの材質を使っているか」を
+// 単純な参照カウントで安全に追跡できる。カウントが0になったら(=どの建物からも
+// 参照されなくなったら)テクスチャごと実際に破棄し、cacheからも消す。これにより
+// 上限キャップに頼らず、使われなくなったテクスチャは常時バックグラウンドで解放される
+// (ユーザー体験には出ない。既存の90フレームごとの遠方建物アンロード処理に相乗り)。
 function facadeMat(kind, color, variant) {
   const key = kind + '_' + color + '_' + variant;
   const hit = facadeCache.get(key);
-  if (hit) return hit;
+  if (hit) { hit.userData.refCount = (hit.userData.refCount || 0) + 1; return hit; }
+  if (facadeCache.size >= FACADE_CACHE_MAX) {
+    for (const [k, m] of facadeCache) {
+      if (k.startsWith(kind + '_')) { m.userData.refCount = (m.userData.refCount || 0) + 1; return m; } // 同genreの既存エントリを使い回す(新規テクスチャは作らない)
+    }
+    // 同genreが1件も無い場合だけ(起動直後等)そのまま新規作成にフォールバックする
+  }
   // 【2026-07-16】ビル系(office/apt、現実モード)はテクスチャを縦4フロア分にし、フロアごとに
   // 窓の点灯を独立に抽選する。従来は1フロア分のタイルを全フロアへUV繰り返ししていたため、
   // タイル内の窓の点灯状態が全フロアに複製され「全点灯 or 全消灯」のビルにしか見えなかった。
@@ -273,8 +297,21 @@ function facadeMat(kind, color, variant) {
   etex.wrapS = etex.wrapT = THREE.RepeatWrapping;
   const emi = MODE === 'space' ? 1.2 : MODE === 'edo' ? 0.9 : IS_MEIJI ? 0.55 : 0.85;
   const m = new THREE.MeshLambertMaterial({ map: tex, emissive: 0xffffff, emissiveMap: etex, emissiveIntensity: emi });
+  m.userData.cacheKey = key; m.userData.refCount = 1; // releaseFacadeMat参照
   facadeCache.set(key, m);
   return m;
+}
+// 建物アンロード時に呼ぶ(part1.js unloadFarBuildings等)。facadeMat以外が返した材質
+// (roofSurfMat/lambertMat由来。userData.cacheKeyを持たない)には何もしない安全設計。
+// 参照カウントが0になったら実際にテクスチャごと破棄し、facadeCacheからも消す。
+function releaseFacadeMat(mat) {
+  if (!mat || !mat.userData || mat.userData.cacheKey == null) return;
+  mat.userData.refCount--;
+  if (mat.userData.refCount > 0) return;
+  facadeCache.delete(mat.userData.cacheKey);
+  if (mat.map) mat.map.dispose();
+  if (mat.emissiveMap) mat.emissiveMap.dispose();
+  mat.dispose();
 }
 
 // BoxGeometryのUVをファサードタイルの繰り返し数に張り替える。
