@@ -392,6 +392,20 @@ function animate() {
   // 留める(その程度の遅延なら「常に一番近い建物から出る」体感には十分)。
   _buildingSortFrame++;
   if (_buildingSortFrame % 30 === 0) {
+    // 【2026-07-20・タブクラッシュ調査】pendingBuildingIdxは処理済み分を「読み飛ばす」
+    // カーソルなだけで、配列からは一切取り除いていなかった。配列全体が空になってidx===
+    // lengthになった時だけ丸ごとpendingBuildings.length=0にリセットされる(下の488行目)が、
+    // タイルを取得し続ける通常のプレイでは新規建物が常に末尾へ積まれ続けるため、この
+    // リセットはほぼ発生しない。結果、処理済みの建物オブジェクトが配列の先頭に無期限に
+    // 溜まり続け、実機ログでpendingBuildings.lengthが約20分のプレイで15,000→55万件超まで
+    // 単調増加し続けることを確認した(GPU/JSヒープを圧迫し続けるタブクラッシュの主因と判断)。
+    // 道路メッシュキュー(pendingRoadMeshes)は既にsplice(0,i)で処理済み分を都度切り捨てて
+    // いる(processRoadMeshQueue参照)のと同じ考え方で、処理済みの先頭側がある程度溜まったら
+    // 配列自体を縮める。
+    if (pendingBuildingIdx > 5000) {
+      pendingBuildings.splice(0, pendingBuildingIdx);
+      pendingBuildingIdx = 0;
+    }
     sortNewEntriesByDistanceToPlayer(pendingBuildings, pendingBuildingIdx, b => ({ x: b.x, z: b.z }));
   }
   const _buildBacklog = pendingBuildings.length - pendingBuildingIdx;
