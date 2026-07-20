@@ -13,9 +13,11 @@ function resolveBuildingHeight(tags) {
 }
 const APT_HEIGHT_M = 10;      // これ以上の高さは一戸建てタグでもマンション扱いにする
 const APT_FOOTPRINT_M2 = 200; // これ以上のフットプリント面積も同様
-const APARTMENT_STYLE = { color: 0x90a0c0, roofColor: 0x506080, emissive: 0x001122, type: 'apartment' };
+// 【2026-07-20】「ビル・マンションが白すぎる/画一的」という報告を受け、やや深みのある色に調整
+// (part2.js getBuildingStyleの同種スタイルと値を揃えている。値の意味は変わらず単なる色調整)。
+const APARTMENT_STYLE = { color: 0x8290ab, roofColor: 0x506080, emissive: 0x001122, type: 'apartment' };
 // オフィス・商業ビル用(ガラス張りの寒色系。part2.jsのkind選択で自動的に'office'ファサードになる)
-const OFFICE_STYLE = { color: 0x8090a8, roofColor: 0x505868, emissive: 0x0a1420, type: 'office' };
+const OFFICE_STYLE = { color: 0x76869c, roofColor: 0x505868, emissive: 0x0a1420, type: 'office' };
 const COMMERCIAL_INDUSTRIAL_STYLE = { color: 0x808890, roofColor: 0x505860, emissive: 0x111111, type: 'industrial' };
 // 「高さ・階数・フットプリント面積がある閾値を超えたらタグに関わらずマンション/オフィス扱いに
 // する」ルール。house/defaultタイプ(=タグが曖昧、または一戸建てタグだが実際は大きい)だけを対象にする。
@@ -91,13 +93,19 @@ function applySizeFloor(style, w, d, h) {
 // 【2026-07-16】現実モードの壁色バリエーション。同じ国プロファイル・同じstyle.colorでも
 // 建物ごとに明暗・寒暖の微差をつける。連続乱数ではなく6種の量子化ティントに限定することで、
 // lambertMat/facadeMatの色キーキャッシュが際限なく増殖しない(最大6倍で頭打ち)。
+// 【2026-07-20】「白すぎる・画一的・立体感がない」という報告への対応。従来は最暗0.84〜
+// 最明1.14と幅が狭く(全建物が実質同じ明るさ帯にしか散らばらない)、しかも最も明るい
+// 枠が「白っぽい」という更に明るくする方向だけだったため、街全体が単調に白く見えていた。
+// 色数は6のまま(キャッシュ増殖なし)で、暗い側を大きく広げ(0.62まで)、白側の
+// 「もっと明るく」枠を廃止して暖色寄りの中間トーンに置き換え、明暗のレンジ自体を
+// 約2倍に広げて隣り合う建物の濃淡差(=見た目の立体感)を出す。
 const WALL_TINTS = [
-  [0.84, 0.86, 0.90], // 暗め・やや寒色
-  [0.93, 0.93, 0.95],
+  [0.62, 0.65, 0.72], // 濃色(日陰・打ちっぱなしコンクリート寄り)
+  [0.80, 0.83, 0.88], // 暗め・やや寒色
+  [0.95, 0.94, 0.92], // 中間・やや暖色
   [1.00, 1.00, 1.00], // 素の色
-  [1.07, 1.05, 1.02], // 明るめ・やや暖色
-  [0.92, 0.97, 1.06], // 青みがかったガラス風
-  [1.12, 1.12, 1.14], // 白っぽい
+  [1.08, 1.04, 0.98], // 明るめ・暖色(テラコッタ寄り)
+  [0.90, 0.96, 1.12], // 青みがかったガラス風(寒色でコントラスト)
 ];
 function tintWall(c) {
   const t = WALL_TINTS[(Math.random() * WALL_TINTS.length) | 0];

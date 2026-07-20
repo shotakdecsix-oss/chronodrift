@@ -6,8 +6,14 @@
 // スタイル不明のOSM建物の壁色(江戸・メルヘン・宇宙モードは幻想紫のまま。窓はファサードテクスチャで表現)
 const DEFAULT_WALLS = [0x9a7acc, 0x8a6ab8, 0xaa80d8, 0x9880c8];
 // 現実モード用: building=yesだけ等でタグから種別不明な建物は、紫だと明らかに浮くので
-// 日本の街並みでよくある外壁トーン(生成りグレー・ベージュ系)を使う
-const DEFAULT_WALLS_REAL = [0xd8d0c0, 0xc8c8c0, 0xe0d8c8, 0xb8b8b0, 0xd0c8b0, 0xc0bcb0];
+// 日本の街並みでよくある外壁トーンを使う。
+// 【2026-07-20】以前は6色とも0xb8〜0xe0の狭い明るいレンジに固まっており(全部「生成り」の
+// バリエーション)、「白すぎる・画一的・立体感がない」という報告の主因になっていた
+// (building=yesはOSMで最も多いタグなので、この6色が街の大半の建物色を占める)。
+// 色数(6)は facadeMat/lambertMat のキャッシュキー増殖を抑えるためあえて変えず、
+// 明るい生成り系を半分残しつつ、濃いめのコンクリート・レンガ・チャコール系に置き換えて
+// レンジを広げる(0xb8〜0xe0 → 0x70〜0xe0)。
+const DEFAULT_WALLS_REAL = [0xd8d0c0, 0xc8c8c0, 0xe0d8c8, 0x8c8478, 0x9c8266, 0x707478];
 
 // マテリアルキャッシュ — 建物ごとに new していたのを同色で共有し、
 // チャンク生成でマテリアルが無限増殖するのを防ぐ
@@ -929,16 +935,16 @@ function getBuildingStyle(tags) {
   } else if (bt === 'office' || tags.office) {
     // オフィスビル(ガラス張り寒色系)。東京・NY等の都心はマンションよりオフィスの方が
     // 多いため、'shop'(店構え演出)とは別の落ち着いた見た目にする。
-    style = { color: 0x8090a8, roofColor: 0x505868, emissive: 0x0a1420, type: 'office' };
+    style = { color: 0x76869c, roofColor: 0x505868, emissive: 0x0a1420, type: 'office' };
   } else if (bt === 'commercial' || bt === 'retail') {
     // 【重要】以前はbuilding=commercialを'shop'(明るいオレンジ+のれん/看板バンド等の
     // 店構え演出)に分類していたが、commercialタグは小さな商店からオフィスタワーまで
     // 幅広く使われており、高層のオフィスビルにコンビニ風の演出が付くのは不自然だった。
     // 'office'と同じ落ち着いた見た目にする(退避不要にstyleを直接持つ=OFFICE_STYLEと
     // 値は揃えているが、part3.jsのOFFICE_STYLE定数は使えないのでここでは複製する)。
-    style = { color: 0x8090a8, roofColor: 0x505868, emissive: 0x0a1420, type: 'office' };
+    style = { color: 0x76869c, roofColor: 0x505868, emissive: 0x0a1420, type: 'office' };
   } else if (bt === 'apartments') {
-    style = { color: 0x90a0c0, roofColor: 0x506080, emissive: 0x001122, type: 'apartment' };
+    style = { color: 0x8290ab, roofColor: 0x506080, emissive: 0x001122, type: 'apartment' };
   } else if (bt === 'house' || bt === 'detached' || bt === 'residential') {
     style = { color: 0xd4b070, roofColor: 0x886030, emissive: 0x110800, type: 'house' };
   } else if (bt === 'industrial' || bt === 'warehouse' || bt === 'factory') {
