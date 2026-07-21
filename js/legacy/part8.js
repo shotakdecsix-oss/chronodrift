@@ -579,7 +579,13 @@ async function fetchOSMTileBatch() {
     const minLon = Math.min(ll00.lon, ll11.lon), maxLon = Math.max(ll00.lon, ll11.lon);
     return `${minLat.toFixed(5)},${minLon.toFixed(5)},${maxLat.toFixed(5)},${maxLon.toFixed(5)}`;
   });
-  const boosted = keys.some(k => osmTileTimeoutBoost.has(k));
+  // 【2026-07-21・実機報告】足元(現在地=ptKeyを含むバッチ、常に1枚クエリ)は生成体感を
+  // 直接左右するため、timeout短縮の対象から常に除外する(=従来通りの長いtimeout宣言を
+  // 使う)。短縮版(20秒)のまま今の混雑状況に晒すと、正常処理中の足元クエリが打ち切られ→
+  // ブースト(長いtimeout)での再試行という往復が発生し、以前より足元の道路・建物表示が
+  // 遅れる退行を実機で確認した。短縮によるスロット節約は、体感への影響が小さい周辺・
+  // 遠方タイル(3枚まとめ等)側だけで十分。
+  const boosted = keys.includes(ptKey) || keys.some(k => osmTileTimeoutBoost.has(k));
   const { query, timeout: osmTimeoutSec } = buildOSMBatchQuery(bboxes, boosted);
   let failed = false;
   // 【重要】以前は Promise.race([fetch(...), timeoutPromise]) で「50秒で見切る」だけだった。
