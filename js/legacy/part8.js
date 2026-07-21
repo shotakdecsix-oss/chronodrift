@@ -538,9 +538,25 @@ async function fetchOSMTileBatch() {
   const _tileScore = (t) => {
     const dx = t.tx + 0.5 - ptx, dz = t.tz + 0.5 - ptz;
     const base = Math.abs(dx) + Math.abs(dz) - (dx * _osmMoveUx + dz * _osmMoveUz) * 0.8;
-    if (_blockingTiles.has(t.tx + ',' + t.tz)) return base - 1000; // 建物生成を直接ブロックしている分は最優先
-    if (Math.abs(t.tx - _pTileX) <= NEAR_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_TIER_R) return base - 500; // 近傍3x3は外側より先
-    return base;
+    // 【2026-07-21・ユーザー報告】距離だけのスコアだと、プレイヤーが動き続ける限り新しく
+    // 近傍に入ってくるタイルが毎回優先され、外側のタイルが理論上いつまでも後回しにされる
+    // 「飢餓」が起きうる(実機ログで、あるタイルが8分近くfetchingのまま一度も取得を
+    // 試みられていないことを確認)。
+    // 【2026-07-21・ユーザー指摘で修正】最初の実装はエイジング・ボーナスが階層(最優先/近傍/
+    // それ以外)を跨いで逆転しうる式になっており、「60秒待った遠方タイル」が「待ち時間0の
+    // 近傍タイル」より優先されてしまっていた。これは近傍優先という設計の趣旨に反する
+    // (体感を左右するのは常に近傍なので、そこは待ち時間に関わらず最優先であるべき)。
+    // 階層そのものを大きく離れたオフセット(0 / -10000 / -100000)で分離し、エイジングは
+    // 「同じ階層内でのタイブレーク」だけに使う(最大でも100。階層間の10000ギャップより
+    // 十分小さく、階層を跨いでの逆転は起こり得ない)。これにより、外側タイル同士の中で
+    // 「一番待たされている物」が優先されるようになり(=特定タイルだけが恒常的に
+    // 後回しにされ続ける飢餓は解消)、近傍優先の原則自体は変えない。
+    const _tk = t.tx + ',' + t.tz;
+    const waitedMs = Date.now() - (osmTileQueuedAt.get(_tk) || Date.now());
+    const agingTiebreak = Math.min(100, waitedMs / 600); // 60秒で頭打ち、最大100(階層間ギャップ10000より十分小さい)
+    if (_blockingTiles.has(_tk)) return base - agingTiebreak - 100000; // 建物生成を直接ブロックしている分は最優先
+    if (Math.abs(t.tx - _pTileX) <= NEAR_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_TIER_R) return base - agingTiebreak - 10000; // 近傍3x3は外側より先
+    return base - agingTiebreak;
   };
   // 【2026-07-17・Fable5診断】距離だけでなく、backoff中(osmTileNextRetryAtが未来)の
   // タイルは近さに関係なく後ろへ回す。以前は「近い順」だけだったため、直近で失敗した
