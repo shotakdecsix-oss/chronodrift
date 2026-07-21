@@ -223,6 +223,14 @@ body {
   white-space:nowrap;
 }
 #mapSearchBtn:hover, #geoBtn:hover { background:rgba(30,110,160,0.95); }
+/* ジャンプ先履歴(検索でジャンプした地名を⚙保存し、検索欄の下にチップ表示・再タップで再ジャンプ) */
+#mapSearchHistory { display:none; flex-wrap:wrap; gap:6px; width:90vw; pointer-events:all; }
+#mapSearchHistory button {
+  background:rgba(20,80,120,0.6); color:#c8ecff;
+  border:1px solid rgba(64,192,255,0.45); border-radius:999px;
+  padding:5px 12px; font-size:12px; cursor:pointer; white-space:nowrap;
+}
+#mapSearchHistory button:hover { background:rgba(30,110,160,0.85); }
 /* 水中エフェクト(キャラが完全に水没した時) */
 #waterOverlay {
   position:fixed; inset:0; z-index:100; display:none; pointer-events:none;
@@ -329,6 +337,9 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
     <button id="mapSearchBtn">🔎 検索</button>
     <button id="geoBtn">📡 現在地</button>
   </div>
+  <!-- 2026-07-21: 検索でジャンプした地名の履歴(ユーザー要望)。part7.jsが
+       localStorageから読み込んでチップとして描画し、タップで再ジャンプする。 -->
+  <div id="mapSearchHistory"></div>
   <div id="leafletMap"></div>
   <button id="mapCloseBtn">✕ 閉じる</button>
 </div>

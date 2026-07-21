@@ -137,9 +137,47 @@ function jumpToLatLon(toLat, toLon) {
   setTimeout(() => mapOverlay.classList.remove('active'), 300);
 }
 
+// ======= ジャンプ先履歴(検索でジャンプした地名。ユーザー要望) =======
+// 検索(searchPlaceJump)で実際にジャンプした地名をlocalStorageに新しい順で保存し、
+// 検索欄の下にチップとして表示する。タップで地名・座標をそのまま使って再ジャンプできる。
+// 地図タップ・現在地ジャンプは地名を持たないため対象外(検索由来の地名だけを記録する)。
+const JUMP_HISTORY_KEY = 'iseharaJumpHistory';
+const JUMP_HISTORY_MAX = 8;
+const mapSearchHistoryEl = document.getElementById('mapSearchHistory');
+function loadJumpHistory() {
+  try { return JSON.parse(localStorage.getItem(JUMP_HISTORY_KEY)) || []; } catch (e) { return []; }
+}
+function addJumpHistory(name, lat, lon) {
+  if (!name) return;
+  let list = loadJumpHistory().filter(h => h.name !== name); // 同名は先頭に移動(重複させない)
+  list.unshift({ name, lat, lon });
+  if (list.length > JUMP_HISTORY_MAX) list.length = JUMP_HISTORY_MAX;
+  try { localStorage.setItem(JUMP_HISTORY_KEY, JSON.stringify(list)); } catch (e) {}
+  renderJumpHistory();
+}
+function renderJumpHistory() {
+  if (!mapSearchHistoryEl) return;
+  const list = loadJumpHistory();
+  mapSearchHistoryEl.innerHTML = '';
+  if (!list.length) { mapSearchHistoryEl.style.display = 'none'; return; }
+  mapSearchHistoryEl.style.display = 'flex';
+  list.forEach((h) => {
+    const b = document.createElement('button');
+    b.textContent = '🕘 ' + h.name;
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      mapSearchInput.value = h.name;
+      mapHintEl.textContent = '📍 ' + h.name + ' へジャンプ！';
+      jumpToLatLon(h.lat, h.lon);
+    });
+    mapSearchHistoryEl.appendChild(b);
+  });
+}
+
 function openMapJump() {
   mapOverlay.classList.add('active');
   mapHintEl.textContent = 'タップした場所にジャンプします';
+  renderJumpHistory(); // 開くたびに最新の履歴を反映(他タブでの追加等にも追従)
   const { lat, lon } = xzToLatLon(player.position.x, player.position.z);
 
   if (!leafletMap) {
@@ -222,6 +260,10 @@ async function searchPlaceJump() {
     return;
   }
   mapHintEl.textContent = '📍 ' + name + ' へジャンプ！';
+  // 【重要】jumpToLatLonは遠距離ジャンプだとlocation.reload()を呼ぶため、その前に
+  // 履歴の保存(同期的なlocalStorage書き込み)を済ませておく(呼んだ後だと実行が
+  // 打ち切られる可能性がある)。
+  addJumpHistory(name, lat, lon);
   jumpToLatLon(lat, lon);
 }
 document.getElementById('mapSearchBtn').addEventListener('click', searchPlaceJump);
