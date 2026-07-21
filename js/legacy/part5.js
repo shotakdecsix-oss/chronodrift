@@ -229,10 +229,28 @@ async function fetchElevationsGSI(latlons) {
       }
     }
   }, 8);
-  return jobs.map(j => {
+  const out = jobs.map(j => {
     const tile = tiles.get(j.key);
     if (tile === 'error') return 'gsiError';
     const h = tile ? tile[j.py * 256 + j.px] : NaN;
     return Number.isFinite(h) ? h : null;
   });
+  // 【2026-07-21・国外の誤判定対策】gsiCoversは矩形(緯度20-46°・経度122-154°)による
+  // ざっくりした判定で、日本の遠隔離島(沖ノ鳥島・南鳥島・与那国等)を確実に含めるために
+  // 広めに取ってある。この矩形は結果的に韓国・北朝鮮・ロシア極東・台湾・中国沿岸の一部も
+  // 含んでしまう。これらの地点はGSIタイルが存在しない(404=「データ無し」として仕様通り
+  // null扱い)ため、本来は普通の陸地であるにもかかわらず「海上(データ無し)」と誤認され、
+  // elevBaseが確定できず既定値0にフォールバックした結果、実標高0mを基準にoceanFloor
+  // (-10のゲーム高さ=実標高換算で-5m)一色の平らな「海」として描画されてしまっていた
+  // (実機報告: 韓国・北朝鮮・ロシアが標高-5mで固定)。
+  // 対策: このバッチ内に実データ(数値)が1点も無く、かつ取得失敗('gsiError')でもない
+  // (=正真正銘GSIが「データ無し」と答えた)場合、それは真の日本近海というより「そもそも
+  // 日本国外」である可能性が高いと判断し、バッチ全体を無効(null)にしてopentopodata
+  // (世界カバレッジ)へフォールバックさせる(呼び出し側の既存ロジックがそのまま使える)。
+  // 本当に日本の遠隔離島まわりの外洋(全点データ無しが正しい)の場合はopentopodata側も
+  // 同様にデータが無く同じ結果になるだけなので、悪化はしない。
+  const hasRealData = out.some(v => typeof v === 'number');
+  const hasError = out.some(v => v === 'gsiError');
+  if (!hasRealData && !hasError) return null;
+  return out;
 }
