@@ -529,7 +529,10 @@ async function fetchOSMTileBatch() {
   // 近傍3x3(9枚、「5〜10個くらい」の要望に合わせた範囲)は、外側・進行方向先読みタイルより
   // 常に先に取得されるようスコアを優遇する。近傍が尽きれば(全部ready or backoff中)、
   // 自然と外側タイルの番が回ってくる(sort+splice方式なのでハードな足止めは不要)。
-  const NEAR_TIER_R = 1; // Chebyshev距離1以内 = 3x3 = 9枚
+  // 【2026-07-21・ユーザー報告】3x3(距離1)だと、テーブル上は現在地のすぐ隣に見えるタイルが
+  // 近傍優先の枠外(遠方タイルと同列)になり、Overpass混雑時に数分単位で放置される事例を確認
+  // (例: 22,-21が219秒待ち)。5x5(距離2)へ拡大し、体感上「近い」と感じる範囲をカバーする。
+  const NEAR_TIER_R = 2; // Chebyshev距離2以内 = 5x5 = 25枚
   const _pTileX = Math.floor(player.position.x / OSM_TILE_M), _pTileZ = Math.floor(player.position.z / OSM_TILE_M);
   // 【2026-07-16】距離のみのソートだと真後ろと真正面のタイルが同順位になり、移動中に
   // 前方タイルが後回しになることがあった。進行方向(checkOSMTilesで更新される
