@@ -65,6 +65,7 @@ body {
 #hudRail {
   position:fixed; top:50%; left:var(--safe-left); transform:translateY(-50%);
   display:flex; flex-direction:column; gap:10px; z-index:30;
+  will-change:transform; /* 画面回転時の表示/タップ判定ズレ対策(2026-07-23) */
 }
 .railBtn {
   width:48px; height:48px; border-radius:50%;
@@ -179,6 +180,7 @@ body {
   font-size:26px; color:var(--text); cursor:pointer; pointer-events:all; z-index:30;
   touch-action:none; user-select:none; -webkit-user-select:none;
   -webkit-touch-callout:none; -webkit-tap-highlight-color:transparent;
+  will-change:transform; /* 画面回転時の表示/タップ判定ズレ対策(2026-07-23) */
 }
 #hopBtn:active { background:rgba(139,123,255,0.35); }
 /* 高度キープ(ホバー)トグル。上昇ボタンの少し左に並べ、bottom行を揃える */
@@ -187,6 +189,7 @@ body {
   width:52px; height:52px; border-radius:50%;
   font-size:20px; color:var(--text); cursor:pointer; pointer-events:all; z-index:30;
   user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color:transparent;
+  will-change:transform; /* 画面回転時の表示/タップ判定ズレ対策(2026-07-23) */
 }
 #altKeepBtn.active { background:rgba(139,123,255,0.45); border-color:var(--accent); }
 /* Map overlay */

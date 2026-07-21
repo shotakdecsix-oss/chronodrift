@@ -712,6 +712,24 @@ window.addEventListener('resize', () => {
   camera.updateProjectionMatrix();
 });
 
+// ======= 画面回転時のHUDボタン位置ズレ対策 =======
+// 【2026-07-23追加】ユーザー報告: スマホを横向きにすると、ジャンプボタン等の
+// 見た目の位置とタップが反応する位置がズレて押せなくなる。position:fixedと
+// env(safe-area-inset-*)を組み合わせた要素で、回転直後は表示だけ新しい向きに
+// 描画され、実際のタップ判定(ヒットテスト)が回転前のレイアウトのまま残る
+//既知のブラウザ側の不具合(特にiOS Safari)が原因と考えられる。
+// 回転完了後に強制リフローさせ、表示とタップ判定のズレを解消する。
+function forceHudReflow() {
+  // display切替→即読み戻しは同一同期処理内で完結するため、画面のちらつきは発生しない。
+  document.body.style.display = 'none';
+  void document.body.offsetHeight; // 強制リフロー
+  document.body.style.display = '';
+}
+window.addEventListener('orientationchange', () => setTimeout(forceHudReflow, 300));
+// orientationchangeが来ない/タイミングがずれる端末向けの保険。resize自体は上の
+// レンダラー処理のみだったので、こちらは少し遅らせて安全マージンを持たせる。
+window.addEventListener('resize', () => setTimeout(forceHudReflow, 100));
+
 // ======= 起動ブートストラップ(元 part6.js 末尾から移動) =======
 // 【重要】このIIFEはxzToLatLon(part7.js定義)などを同期的に呼ぶため、
 // 9ファイルすべての読み込みが終わった後(=このpart9.jsの実行時点)で初めて安全に実行できる。
