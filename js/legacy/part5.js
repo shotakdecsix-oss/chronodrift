@@ -191,34 +191,48 @@ function _gsiLoadTile(tx, ty) {
   }
   return p;
 }
-// latlons([{lat,lon},...])に対応する標高(m)の配列を返す。データ無し地点(海上)は null。
-// グリッド全体が使えない場合(国外の点が混じる/ネットワーク失敗)は null を返す。
+// latlons([{lat,lon},...])に対応する標高(m)の配列を返す。データ無し地点(海上)は null、
+// 取得失敗(404以外のエラー)地点は 'gsiError'(呼び出し側でopentopodataへ個別補完させる)。
+// グリッド全体が使えない場合(国外の点が混じる)だけ null を返す。
+// 【2026-07-21・Fable5診断】以前はタイル取得がどれか1枚(404以外の理由で)失敗すると、
+// try/catchでグリッド全体をnull扱いにし、呼び出し側が441点まるごとopentopodata
+// (1リクエスト/秒・5バッチ逐次)へフォールバックしていた。密集地でNEAR地形の再取得が
+// 「たまに」数秒→数十秒規模まで悪化し、その間ずっとchunkNearTerrainReadyが古い窓のまま
+// 判定され続け、建物生成が地形待ちで空回りする一因になっていた(実機計測: 生成予算の
+// 56%が地形/周辺タイル待ちの再キューで消費されていたことを確認)。エラーをタイル単位に
+// 閉じ込め、1回だけリトライしてもダメならそのタイルに属する点だけを後段でopentopodataに
+// 回す(全滅ではなく局所的な補完で済む)。
 async function fetchElevationsGSI(latlons) {
   if (!latlons.length || !latlons.every(ll => gsiCovers(ll.lat, ll.lon))) return null;
-  try {
-    const n = 2 ** GSI_DEM_Z;
-    const jobs = latlons.map(ll => {
-      const xt = (ll.lon + 180) / 360 * n;
-      const latR = ll.lat * Math.PI / 180;
-      const yt = (1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * n;
-      const tx = Math.floor(xt), ty = Math.floor(yt);
-      return { key: tx + ',' + ty, tx, ty,
-        px: Math.min(255, Math.floor((xt - tx) * 256)),
-        py: Math.min(255, Math.floor((yt - ty) * 256)) };
-    });
-    // タイル単位に重複排除して並列取得(キャッシュ削除に巻き込まれないようローカルに保持)
-    const tiles = new Map();
-    const keys = [...new Set(jobs.map(j => j.key))];
-    await runLimited(keys, async (k, i) => {
-      const j = jobs.find(jb => jb.key === k);
+  const n = 2 ** GSI_DEM_Z;
+  const jobs = latlons.map(ll => {
+    const xt = (ll.lon + 180) / 360 * n;
+    const latR = ll.lat * Math.PI / 180;
+    const yt = (1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * n;
+    const tx = Math.floor(xt), ty = Math.floor(yt);
+    return { key: tx + ',' + ty, tx, ty,
+      px: Math.min(255, Math.floor((xt - tx) * 256)),
+      py: Math.min(255, Math.floor((yt - ty) * 256)) };
+  });
+  // タイル単位に重複排除して並列取得(キャッシュ削除に巻き込まれないようローカルに保持)
+  const tiles = new Map(); // key -> Float32Array|null(海上)|'error'(取得失敗)
+  const keys = [...new Set(jobs.map(j => j.key))];
+  await runLimited(keys, async (k) => {
+    const j = jobs.find(jb => jb.key === k);
+    try {
       tiles.set(k, await _gsiLoadTile(j.tx, j.ty));
-    }, 8);
-    return jobs.map(j => {
-      const tile = tiles.get(j.key);
-      const h = tile ? tile[j.py * 256 + j.px] : NaN;
-      return Number.isFinite(h) ? h : null;
-    });
-  } catch (e) {
-    return null; // ネットワークエラー等 → 呼び出し側で opentopodata にフォールバック
-  }
+    } catch (e) {
+      try {
+        tiles.set(k, await _gsiLoadTile(j.tx, j.ty)); // 1回だけリトライ
+      } catch (e2) {
+        tiles.set(k, 'error'); // このタイルの点だけ呼び出し側でopentopodataに回す
+      }
+    }
+  }, 8);
+  return jobs.map(j => {
+    const tile = tiles.get(j.key);
+    if (tile === 'error') return 'gsiError';
+    const h = tile ? tile[j.py * 256 + j.px] : NaN;
+    return Number.isFinite(h) ? h : null;
+  });
 }

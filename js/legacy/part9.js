@@ -498,7 +498,27 @@ function animate() {
   // で同様にバックログ応じた可変予算にして底上げ済み)。それでも道路が大きく詰まっている
   // 間は、建物側の予算をさらに絞って道路に追いつく時間を確保する(0にはしない — 道路が
   // 疎な田舎道沿いの孤立した建物などが永久に生成されなくなるのを避けるため)。
-  const _roadBacklogForGate = pendingRoadMeshes.length;
+  // 【2026-07-21・Fable5診断】以前はpendingRoadMeshes全体(プレイヤーから遠い場所の
+  // バックログも含む)の件数だけでこのゲートを判定していたため、「地形→道路→建物」の
+  // 優先順は本来同じエリア内でしか意味が無いのに、プレイヤーから遠く離れた場所の道路
+  // バックログが原因で足元の建物生成まで絞られてしまっていた(実機計測: roadBacklogGate=552
+  // で常時ゲートが掛かりっぱなしだったのに対し、その大半は先読み分の遠方道路だったと
+  // 推定される)。pendingRoadMeshesは30フレーム毎にプレイヤーへの近い順でソート済み
+  // (sortNewEntriesByDistanceToPlayer参照)なので、先頭から順に800m以内かどうかだけを
+  // 数える。81件を超えた時点、または先頭300件を見た時点で打ち切り(全件走査を避ける。
+  // ソートは0.5秒毎の再計算なので多少の誤差は許容)。
+  let _roadBacklogForGate = 0;
+  {
+    const _NEARBY_ROAD_R2 = 800 * 800;
+    const _scanN = Math.min(pendingRoadMeshes.length, 300);
+    for (let i = 0; i < _scanN; i++) {
+      const r = pendingRoadMeshes[i];
+      const rx = (r.x1 + r.x2) / 2, rz = (r.z1 + r.z2) / 2;
+      const dx = rx - player.position.x, dz = rz - player.position.z;
+      if (dx * dx + dz * dz <= _NEARBY_ROAD_R2) _roadBacklogForGate++;
+      if (_roadBacklogForGate > 80) break;
+    }
+  }
   // 初期ラッシュ中は道路優先の絞りも緩める(5だと数万件の建物バックログが捌けない)
   if (_roadBacklogForGate > 80) _buildBudget = Math.min(_buildBudget, _rush ? 40 : 5);
   // 【重要】件数ベースの予算だけだと、1棟あたりのコストが場所によって大きく違う場合に

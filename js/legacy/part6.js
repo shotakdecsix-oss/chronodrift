@@ -211,7 +211,30 @@ async function loadNearTerrain(centerX = 0, centerZ = 0) {
   // 道路・建物の読み込み体感が改善する。国外・失敗時のみopentopodataへ。
   const gsi = await fetchElevationsGSI(pts);
   if (gsi) {
-    for (let i = 0; i < raw.length; i++) raw[i] = gsi[i]; // null(海上)は下でoceanFloor扱い
+    // 【2026-07-21・Fable5診断】fetchElevationsGSIはタイル単位で失敗を閉じ込め、
+    // 個別に失敗した点だけ'gsiError'を返すようになった。ほとんどの点はそのまま使い、
+    // 失敗点だけを小バッチでopentopodataに個別補完する(441点全体を道連れにしない)。
+    const errIdx = [];
+    for (let i = 0; i < raw.length; i++) {
+      if (gsi[i] === 'gsiError') errIdx.push(i);
+      else raw[i] = gsi[i]; // null(海上)は下でoceanFloor扱い
+    }
+    if (errIdx.length) {
+      try {
+        const errBatches = [];
+        for (let i = 0; i < errIdx.length; i += 100) errBatches.push(errIdx.slice(i, i + 100));
+        const errResults = await runLimited(errBatches, idxBatch => {
+          const loc = idxBatch.map(i => { const ll = pts[i]; return `${ll.lat.toFixed(6)},${ll.lon.toFixed(6)}`; }).join('|');
+          return fetch(`https://api.opentopodata.org/v1/srtm30m?locations=${encodeURIComponent(loc)}`).then(r => r.json());
+        });
+        for (let bi = 0; bi < errResults.length; bi++) {
+          const j = errResults[bi];
+          if (!j || !j.results) continue; // このバッチだけ諦める(該当点はoceanFloor扱いのまま)。全体は失敗にしない
+          const idxBatch = errBatches[bi];
+          j.results.forEach((r, k) => { raw[idxBatch[k]] = r.elevation; });
+        }
+      } catch (e) { /* 局所補完の失敗は許容(該当点だけoceanFloor扱いになる。全滅フォールバックはしない) */ }
+    }
   } else try {
     const batches = [];
     for (let i = 0; i < pts.length; i += 100) batches.push(pts.slice(i, i + 100));
