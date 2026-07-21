@@ -881,11 +881,17 @@ function reactivateNearbyDormantBuildings() {
   const _realRevLim = _nearCapNow ? Math.min(BUILDING_GEN_DIST_REAL, _lastRealKeepDist * 0.8) : BUILDING_GEN_DIST_REAL;
   const d2Real = _realRevLim * _realRevLim;
   const d2Proc = BUILDING_GEN_DIST_PROC * BUILDING_GEN_DIST_PROC;
-  // 【2026-07-21・Fable5診断】上限到達状態が解けた直後、生成距離内のdormantが密集地では
-  // 数万件規模になりうる。1パスで全件pendingBuildingsへ流し込むと、そのフレームだけ
-  // ソート・生成コストが跳ね上がる懸念があるため、1サイクルあたりの復帰件数に上限を設け、
-  // 残りは次回(~1.5秒後)以降に持ち越す(近い順の優先はpendingBuildings側の並び替えが担う)。
-  const REVIVE_BUDGET = 200;
+  // 【2026-07-21・Fable5診断→実機で過剰スロットル判明】上限到達状態が解けた直後、生成距離内の
+  // dormantが密集地では数万件規模になりうるため、1パスで全件pendingBuildingsへ流し込む
+  // スパイクを避ける上限を設けたい、というのが元々の狙い。ところが最初の実装は上限から
+  // 遠い(余裕がある)通常時にも一律200件/サイクルに絞ってしまい、dormantが多く溜まっている
+  // 状況(実機ログ: records 7150/12000で余裕があるのにdormant 74219)で復帰そのものが
+  // ボトルネックになり、建物生成が大幅に遅延する退行を引き起こした(実機報告で発覚)。
+  // 「スパイクを抑えたいのは上限付近だけ」という本来の狙いに合わせ、上限にまだ余裕がある
+  // 間(80%未満)は従来通り無制限に復帰させ、80%以上(上限到達・その直後の回復途中)だけ
+  // 200件/サイクルに絞る。
+  const _recoveringNearCap = buildingRecords.length >= PERF.bMax * 0.8;
+  const REVIVE_BUDGET = _recoveringNearCap ? 200 : Infinity;
   let revived = 0;
   for (let i = dormantBuildings.length - 1; i >= 0 && revived < REVIVE_BUDGET; i--) {
     const b = dormantBuildings[i];
