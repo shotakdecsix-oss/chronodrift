@@ -28,6 +28,9 @@ let _roadSortFrame = 0;
 let _bgGenerated = 0;      // 実際にaddBuildingまで進んだ件数
 let _bgRequeued = 0;       // チャンク地形 or 周辺タイル未確定で末尾へ回された件数(生成には至っていない)
 let _bgDormant = 0;        // 生成距離外 or bMax上限でdormantへ退避した件数
+let _bgRevived = 0;        // 【2026-07-21・Fable5診断(dormant復帰)】dormant→pendingへ復帰した件数
+                            // (reactivateNearbyDormantBuildings内で加算)。レート律速(予算不足)か
+                            // 選択律速(近傍セルに復帰対象が見つからない)かの切り分けに使う。
 let _lastBuildBudget = 0, _lastRoadBacklogForGate = 0, _lastCurTileRush = false;
 // 毎フレームnewしない方針(_instMat等と同じパターン)。exploreOnUpdate/updateCameraで使い回す
 // 短命Vector3をモジュールスコープに退避(CODE_REVIEW_20260717 P11)。
@@ -285,8 +288,9 @@ function updateDebugTileOverlay(force) {
       // 【2026-07-21・Fable5診断(b)】隔離キューの規模(chunkWaitキー数/tileWaitキー数/合計件数)。
       // requeued/2sが今後小さくなっても、この件数が大きければ「空回りは止まったが、
       // ゲート不成立の建物自体はまだ多い」ことを示す(正常。スキャナが低頻度で捌く)。
-      'gateWaitKeys', chunkWaitBuildings.size + tileWaitBuildings.size, 'gateWaitTotal', gateWaitTotalCount());
-    _bgGenerated = 0; _bgRequeued = 0; _bgDormant = 0;
+      'gateWaitKeys', chunkWaitBuildings.size + tileWaitBuildings.size, 'gateWaitTotal', gateWaitTotalCount(),
+      'revived/2s', _bgRevived);
+    _bgGenerated = 0; _bgRequeued = 0; _bgDormant = 0; _bgRevived = 0;
   }
 }
 

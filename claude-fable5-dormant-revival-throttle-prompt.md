@@ -1,90 +1,86 @@
-# 相談プロンプト: bMax近傍が「常態」の密集地で、dormant復帰上限そのものが支配的ボトルネックになっている
+# 相談プロンプト(更新版): 容量ベースに書き換え後も、密集地でdormant復帰が構造的に追いつかない
 
-以下をそのままFable 5に貼ってください。文脈: あなたが以前診断してくれた「bMax飽和時に
-dormantBuildingsが無限に増え続ける片道弁」問題(修正6: ヒストグラムtarget修正、
-reactivateNearbyDormantBuildingsへのヒステリシスマージン+高層距離換算統一+復帰件数上限
-REVIVE_BUDGET=200を実装済み)と、その後の「建物生成が取得後の段階で詰まる」問題
-(生成予算の大半がchunkNearTerrainReady/osmTilesReadyAround待ちの空回りで消費されていた件、
-対策(c)GSIタイル部分リトライ+道路ゲート近傍限定は実装・実機確認済み)の両方の続き。
-今回、対策(c)デプロイ後の実機ログを見たところ、REVIVE_BUDGET=200自体が新たな支配的
-ボトルネックになっていることを示すデータが取れた。この解釈と対策を検証してほしい。
+以下をそのままFable 5に貼ってください。このファイルは同名の相談の更新版です。前回のあなたの
+助言(LIFO starvation診断)を受けて、REVIVE_BUDGETは既に「固定200件/サイクル」から
+「bMaxまでの空き枠に応じた可変値」+「LIFO配列ではなく空間グリッドによる距離優先スキャン」へ
+書き換え済みです。しかし今回、対策(b)(chunkWaitBuildings/tileWaitBuildingsによる隔離キュー、
+建物生成本流のrequeue churn対策)を別途実装・実機確認したところ、そちらは狙い通り効いた
+(requeued/2sが1500〜2000台→0、generated/2sが100台→600近くまで改善)一方、
+dormant復帰そのものは容量ベース化後も依然としてボトルネックのままであることが実機ログで
+確認できた。この結果を踏まえて再検証してほしい。
 
-## 実装済みの現状(part1.js)
+## 実装済みの現状(part1.js, 対策(b)と同時にデプロイ済み)
 
 ```js
 function reactivateNearbyDormantBuildings() {
+  _dormantCheckFrame++;
+  if (_dormantCheckFrame % 90 !== 0) return; // ~1.5秒毎(60fps基準)
+  if (dormantCount === 0) return;
   ...
-  if (buildingRecords.length >= PERF.bMax) return; // 上限到達中は完全停止
-  ...
+  // 「bMaxの95%までの空き枠」を上限にした可変予算(旧: 固定200)。
+  // 空きが大きいほど多く復帰、空きが少なければ絞る設計。
+  const REVIVE_BUDGET = Math.max(0, Math.min(600, Math.floor(PERF.bMax * 0.95 - buildingRecords.length)));
+  if (REVIVE_BUDGET === 0) return;
   const _nearCapNow = buildingRecords.length >= PERF.bMax * 0.95;
   const _realRevLim = _nearCapNow ? Math.min(BUILDING_GEN_DIST_REAL, _lastRealKeepDist * 0.8) : BUILDING_GEN_DIST_REAL;
   ...
-  // 上限から遠い(80%未満)間は無制限、80%以上だけ200件/サイクル(~1.5秒毎)に絞る
-  const _recoveringNearCap = buildingRecords.length >= PERF.bMax * 0.8;
-  const REVIVE_BUDGET = _recoveringNearCap ? 200 : Infinity;
-  ...
+  // 以降、空間グリッド(200mセル)を中心から外側へリング状に距離優先でスキャンし、
+  // REVIVE_BUDGETに達するまでpendingBuildingsへ戻す(LIFO配列走査は廃止済み)。
 }
 ```
 
-この200/サイクル(≈133件/秒)という値は、「上限から抜けた直後、生成距離内のdormant数万件が
-1パスで雪崩れ込むスパイクを防ぐ」という**過渡的な**シナリオを想定して入れた(あなたの前回の
-助言通り)。80%未満では無制限に戻すことで、通常時の過剰スロットルは解消済み(実機確認済み)。
+## 新たに判明した問題: 「空き枠ベース」でも密集地では空き枠自体が常に小さい
 
-## 新たに判明した問題: 密集地では「80%以上」が過渡的ではなく常態
+東京駅クラス(bMax=12000のstd設定)では records が常時 bMax の90〜95%に張り付いたまま推移する。
+この状態だと `PERF.bMax * 0.95 - buildingRecords.length` という空き枠自体が構造的に小さくなり、
+「固定200件」だった頃と実質同じ問題が「割合ベースの空き枠」という形を変えて再発している。
 
-東京駅クラスの密集地では、`records`(bMax=12000のstd設定)が9600(80%)〜12000の間で
-ずっと張り付いたまま推移し続ける。実機ログ(約10〜15秒間隔で6回連続採取、[buildgen]は
-generated/requeued/toDormantを直近2秒の累計、tableのbuildPendingは
-pendingBuildings+dormantBuildingsの合算値):
+実機ログ(対策(b)デプロイ後、[buildgen]は直近2秒累計):
 
 ```
-records 11150/12000  dormant 92498  [buildgen] budget20 gate0 generated200 requeued0    toDormant0   pendingTotal0
-records 11465/12000  dormant 92387  [buildgen] budget20 gate0 generated111 requeued0    toDormant89  pendingTotal0
-records 10138/12000  dormant 93747  [buildgen] budget21 gate0 generated228 requeued274  toDormant150 pendingTotal22
-records 10241/12000  dormant 93611  [buildgen] budget22 gate0 generated100 requeued1574 toDormant64  pendingTotal58
-records 10477/12000  dormant 93469  [buildgen] budget20 gate0 generated200 requeued1662 toDormant58  pendingTotal0
-records 10776/12000  dormant 86625  [buildgen] budget160 gate0 generated2007 requeued2057 toDormant102 pendingTotal6545 (直後に504でOverpassクールダウン中)
+records 11371/12000  dormant 50906  gateWaitKeys0 gateWaitTotal0  generated/2s 29   requeued/2s 0
+records 11112/12000  dormant 51133  gateWaitKeys0 gateWaitTotal0  generated/2s 597  requeued/2s 0
 ```
 
-この間、テーブル上で特定タイル(例: 22,-21)の`buildPending`は**7356のまま6回連続で
-一切変化しなかった**。records(=80%閾値9600)を常時上回っているため`_recoveringNearCap`が
-ずっとtrueになり、REVIVE_BUDGET=200が実質「常時適用のレート上限」として機能している。
-dormant(86000〜93000件)に対し133件/秒の復帰速度では、数分単位で待たないと特定エリアの
-建物が復帰しない計算になる。requeued(空回り。あなたの指摘通りpendingBuildings本流の
-churnで、対策(b)未実装のため依然発生している)とは別に、**dormant側の復帰速度そのものが
-もう一段のボトルネック**になっていることが今回のログで裏付けられた。
+records=11112/12000のとき、空き枠 = floor(12000*0.95 - 11112) = 288件/1.5秒 ≈ 192件/秒。
+dormant在庫は50000件超で、2回の観測間(数十秒)でむしろ50906→51133と微増している
+(unloadFarBuildingsによる新規退避が復帰を上回っている)。対策(b)によりpendingBuildings本流の
+空回り(requeued)は完全に0になったが、これは「生成キューに入ってからの空回り」を解消しただけで、
+「そもそもdormantから生成キューに戻す速度」自体は変わっていない、という当初の見立て通りの
+結果になっている。
 
 ## 見立てている因果(検証してほしい)
 
-1. REVIVE_BUDGET=200は「上限からの一時的な回復」を想定した値で、「bMax近傍に恒常的に
-   留まり続ける密集地」という定常状態は想定していなかった。std設定のbMax=12000自体が、
-   東京駅のような実在建物密度に対して足りておらず、プレイヤーがそこに留まる限り
-   records は常に80%超のまま動かない。
-2. この定常状態では、REVIVE_BUDGET=200が「スパイク防止」ではなく「dormantの実効的な
-   排出速度の上限」として働き続け、133件/秒という値は数万件規模のdormant backlogに対して
-   明らかに小さすぎる。
-3. 対策(b)(chunkWaitBuildings/tileWaitBuildingsによる隔離キュー、未実装)はpendingBuildings
-   本流の空回り(requeued)を解消するが、dormantBuildings→pendingBuildingsの復帰速度
-   (REVIVE_BUDGET)自体は別物なので、(b)だけでは今回の「buildPendingが数字ごと動かない」
-   症状は解消しない可能性が高い。
+1. 「固定値→bMaxに対する空き枠の割合」という書き換えは、単発的な上限到達直後の回復には
+   有効だが、「プレイヤーがそもそも密集地に留まり続け、records が恒常的に90%超で推移する」
+   という定常状態には効かない。この定常状態では空き枠自体が構造的に小さいため、
+   どんな割合で計算しても復帰速度の絶対量が頭打ちになる。
+2. 対策(b)(隔離キュー)とdormant復帰(REVIVE_BUDGET)は独立した別問題であり、(b)の実装だけでは
+   「プレイヤーが今いる密集地の建物が埋まらない」という体感症状は解消しない。これは前回相談時の
+   見立て通りだった。
 
 ## 相談したいこと
 
-1. 上記の見立ては妥当か。REVIVE_BUDGETを「bMaxに対する割合」ではなく「定常状態か過渡
-   状態か」で切り替える設計に無理があったか(そもそも密集地では常に定常的に上限付近に
-   留まるので、この二分法自体が成立しない場所がある、という理解で合っているか)。
-2. 対策の方向性としてどれが妥当か。候補: (a) REVIVE_BUDGETをdormantの規模や滞留時間に
-   応じて動的に増やす(例: dormant件数が多いほど、あるいは同じ建物が長時間dormantに
-   留まっているほど優先度を上げる)、(b) 復帰と退避(unloadFarBuildings)を「進行方向優先」で
-   組にし、プレイヤーの前方だけは無制限復帰を許す、(c) この規模の密集地ではbMax自体を
-   動的に(その場のプレイヤー近傍実建物密度を見て)引き上げる、(d) 「表示できる上限に
-   構造的に達しているので、これ以上は復帰速度を上げても焼け石に水」と判断し、
-   代わりにデバッグオーバーレイのbuildPending表示自体を「pendingのみ」と「dormant込み」に
-   分けて、ユーザーに誤解を与えない表示に直す、(e) その他。
-3. GPUクラッシュ対策の経緯(bMaxキャップ自体は死守したい)を踏まえると、(c)のような
-   bMax動的引き上げは危険か、それとも「プレイヤー近傍だけ一時的に緩め、離れたら通常の
-   キャップ+ヒステリシス縮小(修正6)で回収する」ような設計であれば許容できるか。
-4. 実装順として、対策(b)(隔離キュー)と今回の件はどちらを先に着手すべきか、それとも
-   同じデプロイでまとめるべきか。
+1. 上記の見立ては妥当か。「bMaxに対する割合」という設計自体が、密集地の定常状態には
+   原理的に対応できない(空き枠という概念そのものが、常時90%超で張り付く環境では
+   常に小さいまま)という理解で合っているか。
+2. 対策の方向性としてどれが妥当か。候補:
+   (a) REVIVE_BUDGETをdormantの規模や滞留時間に応じて動的に増やす(空き枠とは別軸で、
+       dormant側の在庫や最古滞留時間を見て予算を底上げする)
+   (b) 復帰と退避(unloadFarBuildings)を「進行方向優先」で組にし、プレイヤーの前方だけは
+       空き枠に関係なく優先的に復帰させる(後方は多少埋まらなくても体感への影響が小さい)
+   (c) この規模の密集地ではbMax自体をプレイヤー近傍の実建物密度に応じて動的に引き上げる
+   (d) 「表示できる上限に構造的に達しているので、復帰速度を上げても焼け石に水」と判断し、
+       デバッグオーバーレイの表示(buildDormant列)を「復帰見込みなし」であることが分かる
+       表現に変え、ユーザーの期待値を調整する方向にする
+   (e) その他
+3. GPUクラッシュ対策の経緯(bMaxキャップ自体は死守したい)を踏まえると、(c)のようなbMax
+   動的引き上げは依然危険か。「プレイヤー近傍だけ一時的に緩め、離れたら通常のキャップ+
+   ヒステリシス縮小で回収する」設計であれば許容できるか、それとも今回のデータからは
+   (a)(b)のようなbMaxに触れない設計で十分な改善が見込めるか。
+4. records が90%超で恒常的に張り付くこと自体(＝実質的に「見えている密度が上限で頭打ち」に
+   なっていること)は、体感上どの程度深刻な問題として扱うべきか。dormant在庫が5万件規模でも
+   実際に生成キューに戻ってきて欲しいのは「プレイヤーの視界・進行方向近辺」だけのはずで、
+   在庫の絶対量そのものを追いかける設計は的外れではないか。
 
 コードの実装自体は別チャットで行う前提。まずは原因の妥当性と対策の方針だけ検証してほしい。

@@ -919,6 +919,7 @@ function reactivateNearbyDormantBuildings() {
             dormantCount--;
             pendingBuildings.push(b);
             revived++;
+            _bgRevived++; // 【2026-07-21・Fable5診断(dormant復帰)】part9.js側の[buildgen]ログ用
           }
         }
         if (arr.length === 0) dormantGrid.delete(gx + ',' + gz);
