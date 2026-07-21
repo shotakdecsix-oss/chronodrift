@@ -21,6 +21,14 @@ let _forestBX = Infinity, _forestBZ = Infinity;
 // 常にプレイヤーの現在地に近い建物・道路から生成されるようにする。
 let _buildingSortFrame = 0;
 let _roadSortFrame = 0;
+// 【2026-07-21・ユーザー要望】建物生成が「データ取得待ち」なのか「取得後の生成処理待ち」
+// なのかを切り分けるための計測。exploreOnUpdate内の建物生成ループ(下記)で、1件処理する
+// たびにどの分岐を通ったかをカウントし、updateDebugTileOverlayの定期ログでまとめて出す
+// (集計自体は毎フレームやってもインクリメントのみで軽量)。
+let _bgGenerated = 0;      // 実際にaddBuildingまで進んだ件数
+let _bgRequeued = 0;       // チャンク地形 or 周辺タイル未確定で末尾へ回された件数(生成には至っていない)
+let _bgDormant = 0;        // 生成距離外 or bMax上限でdormantへ退避した件数
+let _lastBuildBudget = 0, _lastRoadBacklogForGate = 0, _lastCurTileRush = false;
 // 毎フレームnewしない方針(_instMat等と同じパターン)。exploreOnUpdate/updateCameraで使い回す
 // 短命Vector3をモジュールスコープに退避(CODE_REVIEW_20260717 P11)。
 const _moveForward = new THREE.Vector3(), _moveRight = new THREE.Vector3();
@@ -98,22 +106,49 @@ const DEBUG_TILE_COLORS = {
   done: 0x33cc55,           // 道路メッシュ・地形・既知の建物残件がすべて揃っている(表示上「完了」)
   gaveUp: 0x9b3fd4,         // 【2026-07-20】4回連続失敗で「諦めて」ready扱いになっただけ。実データは未着の可能性が高い
 };
-function _debugTilePlane(key) {
-  let m = debugTilePlanes.get(key);
-  if (!m) {
-    const geo = new THREE.PlaneGeometry(OSM_TILE_M * 0.92, OSM_TILE_M * 0.92);
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0xffffff, transparent: true, opacity: 0.35,
-      depthWrite: false, side: THREE.DoubleSide, fog: false, // フォグで遠方が見えなくなるとデバッグにならないので無効化
-    });
-    m = new THREE.Mesh(geo, mat);
-    m.rotation.x = -Math.PI / 2;
-    m.renderOrder = 5;
-    m.visible = false;
-    scene.add(m);
-    debugTilePlanes.set(key, m);
+// 【2026-07-21・ユーザー要望】地形/道路線路/建物のどれがボトルネックか一目で分かるよう、
+// 1タイル=1色の合成ステータスだけでなく、3項目を別々の色で同時可視化する。
+// 地形(elevation NEAR grid)は道路のOSMタイル取得とは別系統の仕組み(player中心の
+// 常時追従グリッドで、タイル単位のキューには乗っていない)なので、これを分けて見えるように
+// することで「地形だけ予想外に遅れている」といった原因の切り分けがしやすくなる。
+const DEBUG_LAYER_COLORS = {
+  notReady: 0x555555, // 灰: まだ判定材料が無い(未取得 or 前提条件待ち)
+  waiting:  0x3388dd, // 青: 取得/計算待ち
+  fetching: 0xdd3333, // 赤: 取得中(道路/線路のみ。実際にネットワーク待ちの状態)
+  pending:  0xffaa22, // 橙: データは届いたがメッシュ化/生成がまだ残っている
+  ready:    0x33cc55, // 緑: 完了
+  gaveUp:   0x9b3fd4, // 紫: 諦めてready扱いになっただけ(実データ未着の可能性)
+};
+// 1タイル=横に並んだ3枚の短冊(地形/道路線路/建物)。個々はMeshBasicMaterialの色だけを
+// 毎回書き換える(ジオメトリ・マテリアルは使い回し、生成/破棄はしない)ので、3倍になっても
+// 生成コストは増えない。オフ中はvisible=falseで集計自体をスキップする点は従来と同じ。
+function _debugTilePlaneGroup(key) {
+  let g = debugTilePlanes.get(key);
+  if (!g) {
+    g = new THREE.Group();
+    const stripD = OSM_TILE_M * 0.92;
+    const stripW = stripD / 3;
+    const mkStrip = (offsetX) => {
+      const geo = new THREE.PlaneGeometry(stripW * 0.86, stripD); // 短冊間に隙間を空けて見分けやすくする
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0.45,
+        depthWrite: false, side: THREE.DoubleSide, fog: false, // フォグで遠方が見えなくなるとデバッグにならないので無効化
+      });
+      const m = new THREE.Mesh(geo, mat);
+      m.position.x = offsetX;
+      return m;
+    };
+    g.terrainMesh = mkStrip(-stripW);
+    g.roadMesh = mkStrip(0);
+    g.buildMesh = mkStrip(stripW);
+    g.add(g.terrainMesh, g.roadMesh, g.buildMesh);
+    g.rotation.x = -Math.PI / 2;
+    g.renderOrder = 5;
+    g.visible = false;
+    scene.add(g);
+    debugTilePlanes.set(key, g);
   }
-  return m;
+  return g;
 }
 function setDebugTileOverlay(on) {
   debugTileOverlayOn = on;
@@ -179,10 +214,27 @@ function updateDebugTileOverlay(force) {
       const gy = getGroundY(x0 + OSM_TILE_M * sx / 2, z0 + OSM_TILE_M * sz / 2);
       if (gy > topY) topY = gy;
     }
-    const mesh = _debugTilePlane(key);
-    mesh.position.set(cx, topY + 0.6, cz);
-    mesh.material.color.setHex(DEBUG_TILE_COLORS[status]);
-    mesh.visible = true;
+    const group = _debugTilePlaneGroup(key);
+    group.position.set(cx, topY + 0.6, cz);
+    // 【2026-07-21・ユーザー要望】地形/道路線路/建物を短冊3本で個別に色分け。
+    // 地形はOSMタイルのキューとは無関係に判定される(queuedでなくても地形自体は
+    // 進んでいることがあるが、「このタイルの話として見るか」を揃えるためqueued前提にする)。
+    const terrainColor = !queued ? DEBUG_LAYER_COLORS.notReady
+      : terrainReady ? DEBUG_LAYER_COLORS.ready : DEBUG_LAYER_COLORS.waiting;
+    let roadColor;
+    if (!queued) roadColor = DEBUG_LAYER_COLORS.notReady;
+    else if (gaveUp) roadColor = DEBUG_LAYER_COLORS.gaveUp;
+    else if (!roadReady) roadColor = DEBUG_LAYER_COLORS.fetching;
+    else if (roadMeshPending > 0) roadColor = DEBUG_LAYER_COLORS.pending;
+    else roadColor = DEBUG_LAYER_COLORS.ready;
+    let buildColor;
+    if (!queued || !roadReady) buildColor = DEBUG_LAYER_COLORS.notReady; // データ未着でまだ判定不能
+    else if (pending > 0) buildColor = DEBUG_LAYER_COLORS.pending;
+    else buildColor = DEBUG_LAYER_COLORS.ready;
+    group.terrainMesh.material.color.setHex(terrainColor);
+    group.roadMesh.material.color.setHex(roadColor);
+    group.buildMesh.material.color.setHex(buildColor);
+    group.visible = true;
     logRows.push({ tile: key, status, road: roadReady, roadMeshPending, terrain: terrainReady, buildDone: done, buildPending: pending, fails: osmTileFailCount.get(key) || 0 });
   }
   // 範囲外に出た平面は隠すだけ(破棄しない。再度範囲に入ったらそのまま使い回す)
@@ -196,6 +248,16 @@ function updateDebugTileOverlay(force) {
       'cooldown(ms)', Math.max(0, osmGlobalCooldownUntil - Date.now()),
       'streak', _osm429Streak, 'records', buildingRecords.length, '/', PERF.bMax,
       'dormant', dormantBuildings.length);
+    // 【2026-07-21・ユーザー要望】データ取得(上の[fetch]行)とは別に、取得後の生成処理側の
+    // スループットを見る計器。budget/roadGate/rushは直近フレームのスナップショット、
+    // gen/requeue/dormantはこの~2秒間の累計。requeueが支配的ならチャンク地形/周辺タイル
+    // 未確定によるキューの「空回り」がボトルネック、genが少なくbudgetも小さいなら
+    // 予算(roadBacklogGate)自体が絞られている、genはそこそこ多いのに全体のbuildPending
+    // (上のテーブル)が減らないなら生成そのものより供給(OSM取得)側の方が速い、と切り分けられる。
+    console.log('[buildgen] budget', _lastBuildBudget, 'roadBacklogGate', _lastRoadBacklogForGate,
+      'rush', _lastCurTileRush, 'generated/2s', _bgGenerated, 'requeued/2s', _bgRequeued,
+      'toDormant/2s', _bgDormant, 'pendingTotal', pendingBuildings.length - pendingBuildingIdx);
+    _bgGenerated = 0; _bgRequeued = 0; _bgDormant = 0;
   }
 }
 
@@ -445,6 +507,11 @@ function animate() {
   // 確認された)。件数の上限に加えて実測時間(8ms)でも早期に打ち切り、残りは次フレームへ
   // 回すことで、どんなに1棟が重くても1フレームの処理時間には必ず天井を設ける。
   const _buildFrameDeadline = performance.now() + (_rush ? 14 : 8); // 初期ラッシュ中は時間予算も拡大
+  // 【2026-07-21・ユーザー要望】診断用: このフレームの予算スナップショットを保存
+  // (定期ログで「予算自体が絞られているのか」を見えるようにする)。
+  _lastBuildBudget = _buildBudget;
+  _lastRoadBacklogForGate = _roadBacklogForGate;
+  _lastCurTileRush = _curTileRush;
   for (let n = 0; n < _buildBudget && pendingBuildingIdx < pendingBuildings.length; n++) {
     if (n > 0 && performance.now() > _buildFrameDeadline) break; // 時間切れ: 残りは次フレームへ
     const b = pendingBuildings[pendingBuildingIdx++];
@@ -457,6 +524,7 @@ function animate() {
       const bdx = b.x - player.position.x, bdz = b.z - player.position.z;
       if (bdx * bdx + bdz * bdz > BUILDING_GEN_DIST_REAL * BUILDING_GEN_DIST_REAL) {
         dormantBuildings.push(b);
+        _bgDormant++;
         continue;
       }
       // 【2026-07-16】描画済み建物の総数上限(PERF.bMax)。密集地では距離制限だけだと
@@ -464,6 +532,7 @@ function animate() {
       // dormantへ退避し、移動でunloadFarBuildingsが枠を空けたら近い順に復帰する。
       if (buildingRecords.length >= PERF.bMax) {
         dormantBuildings.push(b);
+        _bgDormant++;
         continue;
       }
     }
@@ -476,7 +545,7 @@ function animate() {
       // 「末尾へ戻ってから次に再判定されるまで」が数十フレームかかり、200回待つと数十秒〜
       // 数分の「近くだけ穴が空いたドーナツ状」になっていた(実機報告)。40回に短縮し、
       // 最悪ケースの待ち時間の天井を下げる(フォールバック自体は既存の安全策のまま)。
-      if (b._tries < 40) { pendingBuildings.push(b); continue; }
+      if (b._tries < 40) { pendingBuildings.push(b); _bgRequeued++; continue; }
     }
     // 【重要・2026-07-16】実OSM建物(b.real)はisOnRoadチェックを免除する。isOnRoadは
     // 建物の外接円半径(halfDiag=対角線の半分)で道路中心線との距離を見るため、
@@ -494,7 +563,7 @@ function animate() {
     // 揃わなければ(隣タイルが4回失敗で諦め扱いになった場合など)待たずに生成する。
     if (b.real && !osmTilesReadyAround(b.x, b.z, 64)) {
       b._tries = (b._tries || 0) + 1;
-      if (b._tries < 40) { pendingBuildings.push(b); continue; } // 【2026-07-19】200→40(理由は上のchunkNearTerrainReady側コメント参照)
+      if (b._tries < 40) { pendingBuildings.push(b); _bgRequeued++; continue; } // 【2026-07-19】200→40(理由は上のchunkNearTerrainReady側コメント参照)
     }
     // 実建物はゲーム側の広い道路・線路リボンに食い込む分だけ寸法を縮めてから生成する
     // (part2.js fitRealBuildingToRoads参照。道路レコード登録はデータ到着時に同期で済んで
@@ -505,6 +574,7 @@ function animate() {
       b.w = _f.w; b.d = _f.d; b._fit = 1;
     }
     if (b.real || !isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style, b.real, b.rot);
+    _bgGenerated++;
   }
   if (pendingBuildingIdx > 0 && pendingBuildingIdx === pendingBuildings.length) {
     pendingBuildings.length = 0; pendingBuildingIdx = 0;
