@@ -278,8 +278,10 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 
 <!-- 左: アイコンレール -->
 <nav id="hudRail">
-  <button class="railBtn glass hasSub active" id="viewBtn" title="視点切替"><span class="ico" id="viewIco">👁</span><span class="sub" id="viewSub">一人称</span></button>
-  <button class="railBtn glass" id="mapBtn" title="上空視点">🗺</button>
+  <!-- 2026-07-21: 上空視点専用の🗺(旧mapBtn)を撤去し、視点切替ボタン1つに統合(機能が
+       完全に重複していた。viewBtnの巡回に上空も含まれているため、現在のモード名は
+       常にこのボタンのsubラベルで確認できる) -->
+  <button class="railBtn glass hasSub" id="viewBtn" title="視点切替(三人称→一人称→上空)"><span class="ico" id="viewIco">👁</span><span class="sub" id="viewSub">一人称</span></button>
   <button class="railBtn glass" id="jumpBtn" title="マップジャンプ">📍</button>
   <button class="railBtn glass hasSub" id="modeBtn" title="時代モード"><span class="ico" id="modeIco">🏙</span><span class="sub" id="modeSub">現実</span></button>
   <button class="railBtn glass" id="seaBtn" title="海面設定">🌊</button>

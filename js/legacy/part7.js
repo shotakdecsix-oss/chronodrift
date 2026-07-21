@@ -308,15 +308,21 @@ function findSpawnNear(x0, z0) {
 let viewMode = 0;
 let camYaw = 0, camPitch = 0.25;
 const camDist = 15, camHeight = 8; // meters
-const viewBtnLabels = ['👁 一人称', '👁 三人称', '🗺 上空'];
+// 【2026-07-21修正】以前はここが ['👁 一人称', '👁 三人称', '🗺 上空'] で、上のviewMode
+// コメント(0=三人称, 1=一人称, 2=上空。実際のカメラ分岐(part9.js)もこの並びで判定して
+// いる)と先頭2つの順序が入れ替わっていた。起動直後(viewMode=0=本来は三人称)なのに
+// ラベルが「一人称」と表示され、1回切り替えて実際に一人称(viewMode=1)になると今度は
+// 「三人称」と表示される、という実際のカメラと真逆のモード名が出る不具合になっていた。
+const viewBtnLabels = ['👁 三人称', '👁 一人称', '🗺 上空'];
 
+// 【2026-07-21】上空視点専用の🗺(旧mapBtn)を撤去し、視点切替1ボタンに統合したのに伴い、
+// 「もう一方のボタンをactiveにする」ための分岐も不要になった(常にこのボタン自身が
+// 現在のモードを示す)。
 function setViewMode(mode) {
   viewMode = mode % 3;
   const [icoText, ...labelParts] = viewBtnLabels[viewMode].split(' ');
   document.getElementById('viewIco').textContent = icoText;
   document.getElementById('viewSub').textContent = labelParts.join(' ');
-  document.getElementById('viewBtn').classList.toggle('active', viewMode !== 2);
-  document.getElementById('mapBtn').classList.toggle('active', viewMode === 2);
   const showBody = (viewMode !== 1); // hide body in first-person
   body.visible = leftArm.visible = rightArm.visible =
   head.visible = leftLeg.visible = rightLeg.visible =
@@ -327,7 +333,10 @@ function setViewMode(mode) {
 }
 
 document.getElementById('viewBtn').addEventListener('click', () => setViewMode(viewMode + 1));
-document.getElementById('mapBtn').addEventListener('click', () => setViewMode(2));
+// 起動直後(viewMode=0)のラベル・キャラ表示状態をここで確定させる。以前はsetViewModeが
+// ボタン操作時にしか呼ばれず、index.html側に決め打ちで書いた初期ラベル文字列と実際の
+// viewMode初期値が食い違うリスクがあった(実際に上の並び順バグとして顕在化していた)。
+setViewMode(0);
 
 // ======= MINIMAP =======
 const minimapCanvas = document.getElementById('minimapCanvas');

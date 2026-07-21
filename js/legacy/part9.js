@@ -423,7 +423,13 @@ function exploreOnUpdate(dt) {
       player.position.z + Math.cos(player.rotation.y + Math.PI) * 0.1
     );
     camera.rotation.order = 'YXZ';
-    camera.rotation.y = camYaw + Math.PI;
+    // 【2026-07-21修正】以前は camYaw + Math.PI で、スティックの「前進」方向
+    // (forward = -sin(camYaw), -cos(camYaw)。三人称カメラの向き・ミニマップの
+    // 視界コーン(-camYaw)と同じ基準)とちょうど180°逆向きの景色を映していた。
+    // 一人称で前に歩いているつもりが実際は後ずさりし、ミニマップの視界コーンとも
+    // 逆を向いて見える不具合(ユーザー報告)の直接の原因。他のカメラ/移動計算と
+    // 同じ camYaw そのものを使うよう統一する。
+    camera.rotation.y = camYaw;
     camera.rotation.x = -camPitch + 0.3;
   } else if (viewMode === 2) {
     // Overhead / top-down — disable fog so buildings are visible
