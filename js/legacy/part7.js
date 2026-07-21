@@ -182,10 +182,12 @@ function openMapJump() {
 
   if (!leafletMap) {
     leafletMap = L.map('leafletMap').setView([lat, lon], 16);
-    // 【2026-07-22追加】通常のOSMタイルは各国のローカル言語表記になり判読困難な場合があるため、
-    // Wikimedia提供のosm-intlスタイル(lang=jaで日本語優先表示、世界中カバー)に切り替え。
-    L.tileLayer('https://maps.wikimedia.org/osm-intl/{z}/{x}/{y}.png?lang=ja', {
-      attribution: '© OpenStreetMap contributors, Wikimedia'
+    // 【2026-07-23修正】Wikimedia提供のosm-intlタイル(maps.wikimedia.org)に切り替えていたが、
+    // 外部サイトからの埋め込みをリファラー制限等でブロックしている可能性が高く、
+    // 地図オーバーレイの中身(タイル画像)が一切表示されなくなる不具合が発生したため、
+    // 動作実績のある標準OSMタイルに戻す(判読しづらい言語表記の問題は一旦保留)。
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap'
     }).addTo(leafletMap);
 
     // Player marker
