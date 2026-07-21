@@ -2,7 +2,14 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<!-- 【2026-07-23修正】viewport-fit=coverが無いとenv(safe-area-inset-*)が常に0扱いになり、
+     ブラウザ側がノッチ/ダイナミックアイランド周りの余白を勝手に確保する(横向きで顕著)。
+     このアプリはHUD配置に env(safe-area-inset-*) を全面的に使っているため、これが無いと
+     表示位置と実際のタップ判定がズレる(横向き時の「黒帯」報告と一致)。 -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<!-- ホーム画面追加(Web app)時にアドレスバー無しの正しいstandaloneモードで開くための設定 -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>ChronoDrift</title>
 <style>
 :root {
