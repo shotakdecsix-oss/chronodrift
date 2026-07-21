@@ -778,6 +778,11 @@ let _buildingUnloadFrame = 0;
 // reactivateNearbyDormantBuildings側がこれを参照してマージン(境界の緩衝帯)を作る
 // (evict/revive境界のチャタリング防止。詳細はreactivateNearbyDormantBuildings参照)。
 let _lastRealKeepDist = BUILDING_UNLOAD_DIST_REAL;
+// 【2026-07-21・Fable5診断: revive/evictスワップ結合】このサイクル(unloadFarBuildings)で
+// 実際にbuildingRecordsから除去した件数。reactivateNearbyDormantBuildingsが同じ90フレーム
+// 周期で直後に読み、REVIVE_BUDGETに加算する(evictが活発な瞬間ほどreviveも動けるようにし、
+// records=bMax*0.95ちょうどで両者が釣り合って膠着する「アトラクタ」を構造的に解消する)。
+let _freedThisCycle = 0;
 // force=true: 90フレーム周期を待たず即座に判定する(「今すぐ整理」ボタン用。CODE_REVIEW P8関連)
 function unloadFarBuildings(force) {
   _buildingUnloadFrame++;
@@ -851,6 +856,8 @@ function unloadFarBuildings(force) {
     // 戻すと次のフレームで即dormantへ送り返されるだけの無駄が発生する)。
     dormantAdd({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h, style: rec.style, real: rec.real, rot: rec.rot });
   }
+  _freedThisCycle = removeIds.size; // 【2026-07-21・Fable5診断】このサイクルの実解放件数を記録
+  _bgEvicted += removeIds.size; // part9.js側の[buildgen]ログ用(2秒累計、ヒストグラム縮小の発火確認)
   removeBuildingsByIds(removeIds);
 }
 
@@ -883,8 +890,17 @@ function reactivateNearbyDormantBuildings() {
   // 復帰できる、雪崩スパイクは構造的に起きない(空き以上には入れられないため)。
   // 実際のメッシュ生成コストは下流(exploreOnUpdateの_buildFrameDeadline=8ms)が
   // 別途守っているので、ここでの上限緩和が直接フレーム落ちにつながることはない。
-  const REVIVE_BUDGET = Math.max(0, Math.min(600, Math.floor(PERF.bMax * 0.95 - buildingRecords.length)));
-  if (REVIVE_BUDGET === 0) return;
+  // 【2026-07-21・Fable5診断(v3): records=95%アトラクタでの膠着対策】上の空き枠
+  // (headroom)だけだと、evict(unloadFarBuildings)とrevive(このサイクル)の出入りが
+  // 釣り合ってrecordsがbMax*0.95ちょうどで静止する均衡点(アトラクタ)に捕まった瞬間、
+  // headroom=0で復帰が完全停止する(実機ログで確認: dormant急増中にrevived/2sが600→8)。
+  // 直前(同じ90フレーム周期)にunloadFarBuildingsが実際に解放した件数(_freedThisCycle)を
+  // 加算することで、evictが活発な瞬間ほどreviveも動けるようにし、膠着を構造的に防ぐ。
+  // 下限30/サイクル(≈20件/秒)はevictも完全停止している場合の最終保険(bMaxの0.25%程度
+  // なので雪崩にはならない)。総数超過はpart9側の最終弁(records>=bMaxでdormant退避)が
+  // 別途守るため、多少の見積もり超過があっても安全。
+  const headroom = Math.max(0, Math.floor(PERF.bMax * 0.95) - buildingRecords.length);
+  const REVIVE_BUDGET = Math.min(600, Math.max(30, headroom + _freedThisCycle));
   // ヒステリシスマージン(evict境界とのチャタリング防止)は維持。
   const _nearCapNow = buildingRecords.length >= PERF.bMax * 0.95;
   const _realRevLim = _nearCapNow ? Math.min(BUILDING_GEN_DIST_REAL, _lastRealKeepDist * 0.8) : BUILDING_GEN_DIST_REAL;
