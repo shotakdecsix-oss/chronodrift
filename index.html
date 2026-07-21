@@ -80,29 +80,18 @@ body {
 }
 .railBtn.hasSub { margin-bottom:12px; } /* subラベル分の余白 */
 
-/* 海面ポップオーバー(🌊タップで開閉) */
-#seaCtrl {
-  position:fixed; left:calc(var(--safe-left) + 58px); top:50%; transform:translateY(-50%);
-  border-radius:var(--hud-radius); padding:14px 16px; width:220px; z-index:35;
-  font-size:12px; display:none; touch-action:none;
+/* 【2026-07-21】海面/時間帯/キャラクター選択/視点回転は、個別アイコンをやめて
+   すべて⚙(#perfCtrl、旧・描写設定のみ)の1パネルに統合した(ユーザー要望:
+   アイコンが多すぎるので設定アイコン1つにまとめてほしい)。#seaCtrl/#charCtrl/
+   #timeCtrl は独立ポップオーバーとしては廃止し、中身は#perfCtrl内のセクションとして
+   そのまま残す(要素ID自体はJSの参照を壊さないためすべて温存)。
+   #perfCtrl内のセクション共通スタイル。 */
+#perfCtrl .settingsSection {
+  margin-top:14px; padding-top:12px; border-top:1px solid var(--hud-border);
 }
-#seaCtrl.open { display:block; }
-#seaCtrl input { width:100%; margin-top:8px; accent-color:var(--accent); }
+#perfCtrl .settingsSection:first-of-type { margin-top:10px; padding-top:0; border-top:none; }
+#perfCtrl input[type=range] { width:100%; margin-top:8px; accent-color:var(--accent); }
 #seaVal { color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; }
-
-/* キャラクター選択ポップオーバー(🧍タップで開閉) */
-#charCtrl {
-  position:fixed; left:calc(var(--safe-left) + 58px); top:50%; transform:translateY(-50%);
-  border-radius:var(--hud-radius); padding:14px 16px; width:200px; z-index:35;
-  font-size:12px; display:none;
-}
-#charCtrl.open { display:block; }
-#charCtrl .charRow { display:flex; gap:8px; margin-top:8px; }
-#charCtrl button {
-  flex:1; padding:8px 0; border-radius:999px; border:1px solid var(--hud-border);
-  background:rgba(255,255,255,0.08); color:var(--text); font-size:13px; cursor:pointer;
-}
-#charCtrl button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
 
 /* デバッグ: タイル読み込み状況オーバーレイの色凡例(🩺ONの間だけ常時表示) */
 #debugTileLegend {
@@ -114,11 +103,11 @@ body {
 #debugTileLegend span { display:inline-block; width:9px; height:9px; border-radius:2px; margin:0 3px 0 8px; vertical-align:middle; }
 #debugTileLegend span:first-child { margin-left:0; }
 
-/* 描写・パフォーマンス設定ポップオーバー(⚙タップで開閉) */
+/* 設定ポップオーバー(⚙タップで開閉。描写・海面・時間帯・キャラクター・視点回転を統合) */
 #perfCtrl {
   position:fixed; left:calc(var(--safe-left) + 58px); top:50%; transform:translateY(-50%);
-  border-radius:var(--hud-radius); padding:14px 16px; width:240px; z-index:35;
-  font-size:12px; display:none;
+  border-radius:var(--hud-radius); padding:14px 16px; width:260px; max-height:80vh;
+  overflow-y:auto; z-index:35; font-size:12px; display:none; touch-action:pan-y;
 }
 #perfCtrl.open { display:block; }
 #perfCtrl .charRow { display:flex; gap:8px; margin-top:8px; }
@@ -127,20 +116,6 @@ body {
   background:rgba(255,255,255,0.08); color:var(--text); font-size:13px; cursor:pointer;
 }
 #perfCtrl .charRow button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
-
-/* 時間帯(朝/昼/夕/夜)手動切替ポップオーバー(🕐タップで開閉) */
-#timeCtrl {
-  position:fixed; left:calc(var(--safe-left) + 58px); top:50%; transform:translateY(-50%);
-  border-radius:var(--hud-radius); padding:14px 16px; width:220px; z-index:35;
-  font-size:12px; display:none;
-}
-#timeCtrl.open { display:block; }
-#timeCtrl .charRow { display:flex; gap:8px; margin-top:8px; }
-#timeCtrl .charRow button {
-  flex:1; padding:8px 0; border-radius:999px; border:1px solid var(--hud-border);
-  background:rgba(255,255,255,0.08); color:var(--text); font-size:13px; cursor:pointer;
-}
-#timeCtrl .charRow button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
 #perfDesc { margin-top:8px; font-size:10px; line-height:1.6; color:rgba(255,255,255,0.65); }
 
 /* ── 右上 UI非表示トグル(常時表示。スティック・ジャンプ・このボタン以外を隠す) ── */
@@ -263,7 +238,7 @@ body {
 @keyframes waterShimmer { 0%,100% { opacity:0.82; } 50% { opacity:1; } }
 /* UI非表示: スティック・ジャンプ・👁トグル以外を隠して景色を全画面で楽しむモード */
 body.uiHidden #hudRail, body.uiHidden #addressDisplay, body.uiHidden #gpsDisplay,
-body.uiHidden #seaCtrl, body.uiHidden #charCtrl, body.uiHidden #perfCtrl, body.uiHidden #minimap, body.uiHidden #credit,
+body.uiHidden #perfCtrl, body.uiHidden #minimap, body.uiHidden #credit,
 body.uiHidden #status, body.uiHidden #helpModal { display:none !important; }
 body.uiHidden #uiToggleBtn { opacity:0.45; }
 </style>
@@ -284,60 +259,64 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
   <button class="railBtn glass hasSub" id="viewBtn" title="視点切替(三人称→一人称→上空)"><span class="ico" id="viewIco">👁</span><span class="sub" id="viewSub">一人称</span></button>
   <button class="railBtn glass" id="jumpBtn" title="マップジャンプ">📍</button>
   <button class="railBtn glass hasSub" id="modeBtn" title="時代モード"><span class="ico" id="modeIco">🏙</span><span class="sub" id="modeSub">現実</span></button>
-  <button class="railBtn glass" id="seaBtn" title="海面設定">🌊</button>
-  <button class="railBtn glass hasSub" id="timeBtn" title="時間帯設定"><span class="ico">🕐</span><span class="sub" id="timeSub">自動</span></button>
-  <button class="railBtn glass hasSub" id="perfBtn" title="描写・パフォーマンス設定"><span class="ico">⚙</span><span class="sub" id="perfSub">標準</span></button>
-  <button class="railBtn glass" id="charBtn" title="キャラクター選択">🧍</button>
-  <button class="railBtn glass" id="camDirBtn" title="視点回転">🔄</button>
+  <!-- 2026-07-21: 海面(🌊)/時間帯(🕐)/キャラクター選択(🧍)/視点回転(🔄)の個別アイコンを
+       廃止し、設定(⚙)1つに統合(ユーザー要望)。中身は下の#perfCtrlパネル内へ移動。 -->
+  <button class="railBtn glass hasSub" id="perfBtn" title="設定(描写・海面・時間帯・キャラクター・視点)"><span class="ico">⚙</span><span class="sub" id="perfSub">標準</span></button>
   <button class="railBtn glass" id="helpBtn" title="操作ヘルプ">?</button>
 </nav>
 
-<!-- 海面ポップオーバー(🌊タップで開閉) -->
-<div id="seaCtrl" class="glass">
-  🌊 海面の高さ <span id="seaVal">3.0</span>m
-  <input id="seaSlider" type="range" min="-10" max="10" step="0.5" value="3">
-</div>
-
-<!-- 時間帯ポップオーバー(🕐タップで開閉) -->
-<div id="timeCtrl" class="glass">
-  🕐 時間帯(手動固定)
-  <div class="charRow">
-    <button id="timeAutoBtn" data-time="auto">🕐 自動</button>
-    <button id="timeMorningBtn" data-time="morning">🌅 朝</button>
-  </div>
-  <div class="charRow">
-    <button id="timeNoonBtn" data-time="noon">☀️ 昼</button>
-    <button id="timeEveningBtn" data-time="evening">🌇 夕</button>
-    <button id="timeNightBtn" data-time="night">🌙 夜</button>
-  </div>
-  <div id="perfDesc">昼に固定して建物の色を確認できます(紫っぽく見える場合の切り分けに)</div>
-</div>
-
-<!-- 描写・パフォーマンス設定ポップオーバー(⚙タップで開閉) -->
+<!-- 設定ポップオーバー(⚙タップで開閉。描写・海面・時間帯・キャラクター・視点回転を統合) -->
 <div id="perfCtrl" class="glass">
-  ⚙ 描写範囲・負荷(変更すると再読み込みします)
-  <div class="charRow">
-    <button id="perfLiteBtn" data-preset="lite">🌱 軽量</button>
-    <button id="perfStdBtn" data-preset="std">⚖️ 標準</button>
-    <button id="perfHighBtn" data-preset="high">🏙 高品質</button>
+  <div class="settingsSection">
+    ⚙ 描写範囲・負荷(変更すると再読み込みします)
+    <div class="charRow">
+      <button id="perfLiteBtn" data-preset="lite">🌱 軽量</button>
+      <button id="perfStdBtn" data-preset="std">⚖️ 標準</button>
+      <button id="perfHighBtn" data-preset="high">🏙 高品質</button>
+    </div>
+    <div id="perfDesc">軽量: 建物1.4km/低負荷(スマホ向け)<br>標準: 建物2.2km<br>高品質: 建物4.2km/先読み拡大(高性能PC向け・メモリ大)</div>
+    <div class="charRow">
+      <button id="cleanupNowBtn">🧹 今すぐ整理</button>
+    </div>
+    <div id="perfDesc">現在地周辺以外の道路・建物・公園/水面等のGPUメッシュを解放します(記録は残るので再訪すれば元通り。長時間プレイで重くなってきたら押してください)</div>
+    <div class="charRow">
+      <button id="debugTileBtn">🩺 タイル状況</button>
+    </div>
+    <div id="perfDesc">デバッグ用: 周囲のOSMタイルごとの取得・生成状況を色分け表示します(灰=未取得 赤=取得中 青=地形待ち 橙=生成中 緑=完了)</div>
   </div>
-  <div id="perfDesc">軽量: 建物1.4km/低負荷(スマホ向け)<br>標準: 建物2.2km<br>高品質: 建物4.2km/先読み拡大(高性能PC向け・メモリ大)</div>
-  <div class="charRow">
-    <button id="cleanupNowBtn">🧹 今すぐ整理</button>
-  </div>
-  <div id="perfDesc">現在地周辺以外の道路・建物・公園/水面等のGPUメッシュを解放します(記録は残るので再訪すれば元通り。長時間プレイで重くなってきたら押してください)</div>
-  <div class="charRow">
-    <button id="debugTileBtn">🩺 タイル状況</button>
-  </div>
-  <div id="perfDesc">デバッグ用: 周囲のOSMタイルごとの取得・生成状況を色分け表示します(灰=未取得 赤=取得中 青=地形待ち 橙=生成中 緑=完了)</div>
-</div>
 
-<!-- キャラクター選択ポップオーバー(🧍タップで開閉) -->
-<div id="charCtrl" class="glass">
-  🧍 キャラクター
-  <div class="charRow">
-    <button id="charBoyBtn" data-sex="boy">👦 少年</button>
-    <button id="charGirlBtn" data-sex="girl">👧 少女</button>
+  <div class="settingsSection">
+    🌊 海面の高さ <span id="seaVal">3.0</span>m
+    <input id="seaSlider" type="range" min="-10" max="10" step="0.5" value="3">
+  </div>
+
+  <div class="settingsSection">
+    🕐 時間帯(手動固定)
+    <div class="charRow">
+      <button id="timeAutoBtn" data-time="auto">🕐 自動</button>
+      <button id="timeMorningBtn" data-time="morning">🌅 朝</button>
+    </div>
+    <div class="charRow">
+      <button id="timeNoonBtn" data-time="noon">☀️ 昼</button>
+      <button id="timeEveningBtn" data-time="evening">🌇 夕</button>
+      <button id="timeNightBtn" data-time="night">🌙 夜</button>
+    </div>
+    <div id="perfDesc">昼に固定して建物の色を確認できます(紫っぽく見える場合の切り分けに)</div>
+  </div>
+
+  <div class="settingsSection">
+    🧍 キャラクター
+    <div class="charRow">
+      <button id="charBoyBtn" data-sex="boy">👦 少年</button>
+      <button id="charGirlBtn" data-sex="girl">👧 少女</button>
+    </div>
+  </div>
+
+  <div class="settingsSection">
+    🔄 視点回転の向き
+    <div class="charRow">
+      <button id="camDirBtn">🔄 <span id="camDirLabel">標準</span></button>
+    </div>
   </div>
 </div>
 

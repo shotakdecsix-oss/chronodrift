@@ -474,14 +474,19 @@ function drawMinimap() {
 
 // ======= カメラ回転の向き / UI非表示モード =======
 // 視点操作は「反転」が新デフォルト(CAM_DIR=+1)。🔄ボタンで従来の向き(-1)に戻せる
+// 【2026-07-21】独立したレールアイコンだったのをやめ、⚙設定パネル内のボタンに統合した
+// (ユーザー要望)。パネル内のボタンなので、クリック時は他のパネル内ボタンと同じく
+// stopPropagationし、外側クリックでパネルごと閉じる処理に巻き込まれないようにする。
 let CAM_DIR = 1;
 try { if (localStorage.getItem('iseharaCamDir') === 'legacy') CAM_DIR = -1; } catch (e) {}
 const camDirBtn = document.getElementById('camDirBtn');
+const camDirLabel = document.getElementById('camDirLabel');
 function updateCamDirBtn() {
-  camDirBtn.title = CAM_DIR === 1 ? '視点:反転' : '視点:標準';
+  if (camDirLabel) camDirLabel.textContent = CAM_DIR === 1 ? '標準' : '反転';
   camDirBtn.classList.toggle('active', CAM_DIR === -1);
 }
-camDirBtn.addEventListener('click', () => {
+camDirBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
   CAM_DIR = -CAM_DIR;
   try { localStorage.setItem('iseharaCamDir', CAM_DIR === -1 ? 'legacy' : 'inverted'); } catch (e) {}
   updateCamDirBtn();
@@ -511,69 +516,43 @@ if (addressEl && gpsEl) {
   });
 }
 
-// ======= 海面ポップオーバー(🌊タップで開閉、外側タップで閉じる) =======
-const seaBtn = document.getElementById('seaBtn');
-const seaCtrlEl = document.getElementById('seaCtrl');
-if (seaBtn && seaCtrlEl) {
-  seaBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    seaCtrlEl.classList.toggle('open');
-    seaBtn.classList.toggle('active', seaCtrlEl.classList.contains('open'));
-  });
-}
+// ======= 設定ポップオーバー内の各種操作(外側タップでパネルごと閉じる) =======
+// 【2026-07-21】海面(🌊)・時間帯(🕐)・キャラクター選択(🧍)・視点回転(🔄)は、
+// 個別アイコン+個別ポップオーバーをやめ、すべて⚙(#perfCtrl)1枚に統合した
+// (ユーザー要望: アイコンが多すぎるので設定アイコンにまとめてほしい)。
+// 開閉トリガーは⚙(perfBtn)のみになったため、ここでは「外側クリックで閉じる」対象も
+// #perfCtrl/#gpsEl だけになる(seaCtrl/timeCtrl/charCtrlという別要素はもう存在しない)。
 document.addEventListener('click', () => {
-  if (seaCtrlEl && seaCtrlEl.classList.contains('open')) {
-    seaCtrlEl.classList.remove('open');
-    seaBtn.classList.remove('active');
-  }
-  if (charCtrlEl && charCtrlEl.classList.contains('open')) {
-    charCtrlEl.classList.remove('open');
-    charBtn.classList.remove('active');
-  }
   if (perfCtrlEl && perfCtrlEl.classList.contains('open')) {
     perfCtrlEl.classList.remove('open');
     perfBtn.classList.remove('active');
   }
-  if (timeCtrlEl && timeCtrlEl.classList.contains('open')) {
-    timeCtrlEl.classList.remove('open');
-    timeBtn.classList.remove('active');
-  }
   if (gpsEl && gpsEl.classList.contains('open')) gpsEl.classList.remove('open');
 });
 
-// ======= 時間帯ポップオーバー(🕐タップで開閉、外側タップで閉じる) =======
+// ======= 時間帯(パネル内、⚙で開閉) =======
 // 朝/昼/夕/夜を手動で固定表示できる(part1.js setTimeOverride参照)。
 // 建物が紫っぽく見える件の切り分け用に、昼固定で見た目を確認できるようにする狙いもある。
-const timeBtn = document.getElementById('timeBtn');
-const timeCtrlEl = document.getElementById('timeCtrl');
 const TIME_LABELS = { auto: '自動', morning: '朝', noon: '昼', evening: '夕', night: '夜' };
 const TIME_OVERRIDE_H2 = { night: 0, morning: 6, noon: 12, evening: 18 };
-if (timeBtn && timeCtrlEl) {
+{
   let curTimeSel = 'auto';
   try { curTimeSel = localStorage.getItem('iseharaTimeOverride') || 'auto'; } catch (e) {}
-  const timeSub = document.getElementById('timeSub');
-  if (timeSub) timeSub.textContent = TIME_LABELS[curTimeSel] || '自動';
-  timeCtrlEl.querySelectorAll('.charRow button[data-time]').forEach((b) => {
+  document.querySelectorAll('#perfCtrl .charRow button[data-time]').forEach((b) => {
     b.classList.toggle('active', b.dataset.time === curTimeSel);
     b.addEventListener('click', (e) => {
       e.stopPropagation();
       curTimeSel = b.dataset.time;
-      timeCtrlEl.querySelectorAll('.charRow button[data-time]').forEach(bb => bb.classList.toggle('active', bb === b));
-      if (timeSub) timeSub.textContent = TIME_LABELS[curTimeSel] || '自動';
+      document.querySelectorAll('#perfCtrl .charRow button[data-time]').forEach(bb => bb.classList.toggle('active', bb === b));
       try { localStorage.setItem('iseharaTimeOverride', curTimeSel); } catch (err) {}
       if (typeof setTimeOverride === 'function') {
         setTimeOverride(curTimeSel === 'auto' ? null : TIME_OVERRIDE_H2[curTimeSel]);
       }
     });
   });
-  timeBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    timeCtrlEl.classList.toggle('open');
-    timeBtn.classList.toggle('active', timeCtrlEl.classList.contains('open'));
-  });
 }
 
-// ======= 描写・パフォーマンス設定ポップオーバー(⚙タップで開閉、外側タップで閉じる) =======
+// ======= 設定パネル(⚙タップで開閉、外側タップで閉じる) =======
 // 選択はlocalStorageに保存し、リロードで反映(part1.js PERF_PRESET/PERF参照。
 // 距離系はconstで各所に焼き込まれるため、モード切替と同じ「保存してリロード」方式)。
 const perfBtn = document.getElementById('perfBtn');
@@ -640,16 +619,7 @@ if (debugTileBtn) {
   });
 }
 
-// ======= キャラクター選択ポップオーバー(🧍タップで開閉、外側タップで閉じる) =======
-const charBtn = document.getElementById('charBtn');
-const charCtrlEl = document.getElementById('charCtrl');
-if (charBtn && charCtrlEl) {
-  charBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    charCtrlEl.classList.toggle('open');
-    charBtn.classList.toggle('active', charCtrlEl.classList.contains('open'));
-  });
-}
+// ======= キャラクター選択(パネル内、⚙で開閉) =======
 document.getElementById('charBoyBtn').addEventListener('click', (e) => { e.stopPropagation(); setCharacterSex('boy'); });
 document.getElementById('charGirlBtn').addEventListener('click', (e) => { e.stopPropagation(); setCharacterSex('girl'); });
 

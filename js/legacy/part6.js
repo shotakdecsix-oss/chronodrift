@@ -380,7 +380,10 @@ function initDistantSea() {
 function setupSeaSlider() {
   const sl = document.getElementById('seaSlider');
   const lab = document.getElementById('seaVal');
-  const box = document.getElementById('seaCtrl');
+  // 【2026-07-21】海面スライダーは独立した#seaCtrlポップオーバーから⚙設定パネル
+  // (#perfCtrl)内のセクションへ統合されたため、タッチドラッグがカメラ回転ハンドラに
+  // 奪われないようにするstopPropagationの対象も、パネル全体(#perfCtrl)に合わせる。
+  const box = document.getElementById('perfCtrl');
   if (!sl || !lab) return;
   sl.min = -10; sl.max = 10; sl.step = 0.5;   // 海面標高 -10〜10m を 0.5m 刻みで
   sl.value = seaLevelM;
