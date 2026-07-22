@@ -868,7 +868,7 @@ const PERF = {
   // isOnRoad判定・再接近時の復元は従来どおり機能する)。
   lite: { roadUnload: 1600, bGenReal: 1400, bUnloadReal: 2000, chunkR: 4,  forestR: 360, prefetchR: 2, bMax: 6000,  minorRoadDist: 700 },
   std:  { roadUnload: 2500, bGenReal: 2200, bUnloadReal: 2900, chunkR: 8,  forestR: 480, prefetchR: 2, bMax: 12000, minorRoadDist: 1100 },
-  high: { roadUnload: 3200, bGenReal: 4200, bUnloadReal: 5200, chunkR: 10, forestR: 600, prefetchR: 3, bMax: 25000, minorRoadDist: 1600 },
+  high: { roadUnload: 3200, bGenReal: 3200, bUnloadReal: 4000, chunkR: 10, forestR: 600, prefetchR: 3, bMax: 25000, minorRoadDist: 1600 },
 }[PERF_PRESET];
 const ROAD_UNLOAD_DIST = PERF.roadUnload;
 const MINOR_ROAD_MESH_DIST = PERF.minorRoadDist;
