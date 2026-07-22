@@ -649,7 +649,6 @@ function animate() {
   // (長時間プレイでの重量化→クラッシュ)のを防ぐため、遠方の建物を解放する
   unloadFarBuildings();
   reactivateNearbyDormantBuildings(); // 逆に、近づいた遠景建物は生成キューへ復帰させる
-  updateFarLowriseCull(); // 【2026-07-24】上空にいる時だけ遠景の低層建物を間引く(処理落ち対策)
   scanGateWaitQueues(); // 【2026-07-21・Fable5診断(b)】ゲート待ち隔離キューの低頻度スキャン
   // (2026-07-16: 高度LOD(updateAltitudeLOD)は撤去 — 40m/300mまで絞ってもクラッシュ防止に
   //  効かないことが実証され、上空の「スカスカ感」の害だけが残ったため。クラッシュの実対策は
