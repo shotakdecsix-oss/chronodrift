@@ -430,7 +430,9 @@ function recenterForResumeIfFar(lat, lon) {
 // 一切ここでは行わず、initialWorldLoaded=trueにした直後からpart8.jsのタイル取得システムが
 // プレイヤー周辺タイルを取りに行く(伊勢原・東京・NY等、全地域で同じ経路)。
 async function loadOSM() {
-  const resume = consumeResumePos();
+  // 【2026-07-24】明示的な再開(モード切替・遠方ジャンプ)が無ければ、定期保存された
+  // 最終位置(クラッシュ・タブ強制終了からの再開用。part1.js readLastPos参照)を使う。
+  const resume = consumeResumePos() || readLastPos();
   if (resume) recenterForResumeIfFar(resume.lat, resume.lon);
   const lat = resume ? resume.lat : SPAWN_LAT;
   const lon = resume ? resume.lon : SPAWN_LON;

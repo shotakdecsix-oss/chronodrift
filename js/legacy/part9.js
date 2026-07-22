@@ -728,6 +728,15 @@ function forceHudReflow() {
 }
 window.addEventListener('orientationchange', () => setTimeout(forceHudReflow, 300));
 
+// ======= クラッシュ・タブ強制終了からの再開用に現在地を定期保存 =======
+// 【2026-07-24追加】ユーザー要望: クラッシュした時に初期位置(現在地GPS/伊勢原)へ
+// 飛ばされてしまうのを直したい。10秒ごとに現在地をlocalStorage(iseharaLastPos)へ
+// 上書き保存しておき、次回起動時(明示的なモード切替・遠方ジャンプの再開マーカーが
+// 無ければ)part6.js loadOSM()がここから再開する(part1.js saveLastPos/readLastPos参照)。
+// 初回のsaveLastPosはプレイヤーの初期位置が確定した後(起動ブートストラップIIFE完了後)に
+// 呼ばれるべきだが、setIntervalは10秒後が初回発火なのでその頃には確実に確定している。
+setInterval(saveLastPos, 10000);
+
 // ======= 起動ブートストラップ(元 part6.js 末尾から移動) =======
 // 【重要】このIIFEはxzToLatLon(part7.js定義)などを同期的に呼ぶため、
 // 9ファイルすべての読み込みが終わった後(=このpart9.jsの実行時点)で初めて安全に実行できる。
@@ -741,9 +750,13 @@ window.addEventListener('orientationchange', () => setTimeout(forceHudReflow, 30
   let isModeSwitch = false;
   // 【2026-07-18】遠方ジャンプ(300km超)による再開かどうかを、破壊読み(consumeResumePos)
   // する前に先読みしておく。理由は下のloadNearTerrain(0,0)呼び分けを参照。
+  // 【2026-07-24】iseharaResumePos(明示的な再開)が無い場合、iseharaLastPos(クラッシュ・
+  // タブ強制終了からの再開用に定期保存された最終位置。part1.js readLastPos/saveLastPos参照)
+  // も同じ扱いにする — これが無いと、loadOSM側はiseharaLastPosから正しい位置へ復帰するのに、
+  // この後の「通常起動時だけ位置情報へジャンプする」処理がそれを知らずに上書きしてしまう。
   let resumeFarJump = false;
   try {
-    const s = localStorage.getItem('iseharaResumePos');
+    const s = localStorage.getItem('iseharaResumePos') || localStorage.getItem('iseharaLastPos');
     if (s) {
       isModeSwitch = true;
       const p = JSON.parse(s);

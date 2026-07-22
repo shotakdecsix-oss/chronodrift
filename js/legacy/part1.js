@@ -283,6 +283,29 @@ function consumeResumePos() {
   } catch (e) {}
   return null;
 }
+// 【2026-07-24追加】クラッシュ・タブ強制終了からの再開用(ユーザー要望)。
+// iseharaResumePosはモード切替・遠方ジャンプ直前にだけ明示的にセットされる「1回きり」の
+// マーカーだが、クラッシュはJSが何も実行できないまま終わるため、その仕組みには乗れない。
+// 代わりに、プレイ中ずっと定期的(saveLastPosを一定間隔で呼ぶ。part9.js参照)に現在地を
+// 上書き保存しておき、次回起動時に(iseharaResumePosが無ければ)ここから再開する。
+// 読み捨てにはせず(consumeResumePosと違い削除しない)、次の定期保存でまた上書きされる
+// 「常に最新の現在地」を指すポインタとして扱う。
+function readLastPos() {
+  try {
+    const s = localStorage.getItem('iseharaLastPos');
+    if (!s) return null;
+    const p = JSON.parse(s);
+    if (typeof p.lat === 'number' && typeof p.lon === 'number') return p;
+  } catch (e) {}
+  return null;
+}
+function saveLastPos() {
+  try {
+    const ll = xzToLatLon(player.position.x, player.position.z);
+    localStorage.setItem('iseharaLastPos',
+      JSON.stringify({ lat: ll.lat, lon: ll.lon, yaw: camYaw, rot: player.rotation.y }));
+  } catch (e) {}
+}
 // モード別の環境パレット
 const MODE_CONF = {
   real: {
@@ -334,12 +357,7 @@ const canvas = document.getElementById('canvas');
 // (どちらが手前か毎フレーム入れ替わってちらつく)しやすくなる。対数深度バッファは全体に精度を
 // 均等に配分するため、この「高度が上がるほどちらつきが悪化する」症状に直接効く。
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
-// 【2026-07-24追加】スマホでの処理落ち対策(①)。タッチ主体端末はGPUの塗り性能が低いため、
-// PC(devicePixelRatio上限2のまま)より低い上限(1.5)にしてフラグメントシェーダーの
-// 負荷(塗るピクセル数)を減らす。ドローコール数は変わらないので回転時のスパイクの
-// 根本対策ではないが、低リスクで即試せる緩和策として先に検証する。
-const IS_MOBILE = matchMedia('(pointer: coarse)').matches;
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, IS_MOBILE ? 1.5 : 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 // 影を無効化 — 3000m範囲を1024pxで描く影は約3m/texelでほぼ視認できず、
 // シャドウパスで全建物を毎フレーム二重描画するコストだけが残るため
