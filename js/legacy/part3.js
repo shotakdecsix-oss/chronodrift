@@ -123,10 +123,10 @@ function tintWall(c) {
 // 東京タワー/スカイツリー/大阪城/京都タワーは、実測タグを汎用ルールに流すと「巨大な箱ビル」
 // にしかならず似ても似つかない。名前検出(part2.js detectLandmarkTower)された建物だけ、
 // ここで手組みの専用ジオメトリを組み立てる。高さはpart8.jsで実際の高さに上書き済み。
-const LANDMARK_TOWER_HEIGHT = { tokyo_tower: 333, skytree: 634, osaka_castle: 55, kyoto_tower: 131 };
+const LANDMARK_TOWER_HEIGHT = { tokyo_tower: 333, skytree: 634, osaka_castle: 55, kyoto_tower: 131, eiffel_tower: 330 };
 const LM_ORANGE = 0xE8541E, LM_WHITE = 0xF2F0E8, LM_STEEL = 0xE6E9EA, LM_STEEL_DK = 0xC7CCCE,
       LM_CASTLE_WALL = 0xF5F0E6, LM_CASTLE_BAND = 0x2A2620, LM_CASTLE_ROOF = 0x2E5D45, LM_GOLD = 0xD4AF37,
-      LM_KYOTO = 0xEDE6D6, LM_RED = 0xCC2211;
+      LM_KYOTO = 0xEDE6D6, LM_RED = 0xCC2211, LM_IRON = 0x5C4632, LM_IRON_DK = 0x3E2F20;
 function drawLandmarkTower(dm, x, gy, z, kind) {
   // 四角い先細り角柱を1段。y0=段の底(地表からの高さ)、ht=段の高さ、rBase=底面の半幅相当。
   const sq = (mat, y0, ht, rBase) => dm(UNIT_TAPER4, mat, x, gy + y0 + ht / 2, z, rBase * 2, ht, rBase * 2);
@@ -136,7 +136,8 @@ function drawLandmarkTower(dm, x, gy, z, kind) {
         mSteel = lambertMat(LM_STEEL), mSteelDk = lambertMat(LM_STEEL_DK),
         mRed = lambertMat(LM_RED, 0x330000), mGold = lambertMat(LM_GOLD),
         mCastleWall = lambertMat(LM_CASTLE_WALL), mCastleBand = lambertMat(LM_CASTLE_BAND),
-        mCastleRoof = lambertMat(LM_CASTLE_ROOF), mKyoto = lambertMat(LM_KYOTO);
+        mCastleRoof = lambertMat(LM_CASTLE_ROOF), mKyoto = lambertMat(LM_KYOTO),
+        mIron = lambertMat(LM_IRON), mIronDk = lambertMat(LM_IRON_DK);
 
   if (kind === 'tokyo_tower') {
     sq(mOrange, 0, 150, 17);            // 脚〜大展望台
@@ -178,6 +179,17 @@ function drawLandmarkTower(dm, x, gy, z, kind) {
     rd(mWhite, 123, 8, 0.8);            // 尖塔先端
     dm(UNIT_SPH, mRed, x, gy + 130.5, z, 1.2, 1.2, 1.2);
     addDecorLight(0xff2200, 0.6, 18, x, gy + 130, z);
+  } else if (kind === 'eiffel_tower') {
+    // 【2026-07-24追加】世界的ランドマーク第1弾。実際の格子構造は表現せず、東京タワー等と
+    // 同じ「先細り角柱の積み重ね」で全体シルエットを近似する(既存ランドマークと絵柄を統一)。
+    // 実測に近い節目(1階57m/2階115m/3階276m/アンテナ先端330m)で段を割る。
+    sq(mIron, 0, 57, 62);    // 地上〜1階展望台(4本脚が大きく広がる裾野を表現)
+    sq(mIron, 57, 58, 30);   // 1階〜2階展望台
+    sq(mIron, 115, 100, 14); // 2階〜3階展望台の手前まで
+    sq(mIron, 215, 61, 5);   // 3階展望台(276m)まで
+    rd(mIronDk, 276, 46, 2); // アンテナ支柱(330mまで)
+    dm(UNIT_SPH, mRed, x, gy + 328, z, 1.5, 1.5, 1.5); // 航空障害灯
+    addDecorLight(0xffcc66, 0.7, 22, x, gy + 280, z);  // 夜間のシャンパンゴールド照明を示唆
   }
 }
 

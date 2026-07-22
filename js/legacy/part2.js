@@ -981,6 +981,9 @@ const LANDMARK_TOWER_NAMES = {
   '東京スカイツリー': 'skytree', 'Tokyo Skytree': 'skytree', 'Tokyo SkyTree': 'skytree', 'TOKYO SKYTREE': 'skytree',
   '大阪城': 'osaka_castle', '大阪城天守閣': 'osaka_castle', 'Osaka Castle': 'osaka_castle',
   '京都タワー': 'kyoto_tower', 'Kyoto Tower': 'kyoto_tower',
+  // 【2026-07-24追加】世界的ランドマーク第1弾。OSMの主name(現地語)+name:en+name:jaの
+  // どれかに完全一致すれば検出する(東京タワー等と同じ完全一致方式。誤爆防止のため)。
+  'Tour Eiffel': 'eiffel_tower', 'Eiffel Tower': 'eiffel_tower', 'エッフェル塔': 'eiffel_tower',
 };
 function detectLandmarkTower(tags) {
   if (MODE !== 'real') return null; // 現実モード限定(江戸/明治は別途shrine/temple以外を描画しない既存フィルタで弾かれる)
