@@ -143,7 +143,8 @@ function jumpToLatLon(toLat, toLon) {
 // 地図タップ・現在地ジャンプは地名を持たないため対象外(検索由来の地名だけを記録する)。
 const JUMP_HISTORY_KEY = 'iseharaJumpHistory';
 const JUMP_HISTORY_MAX = 8;
-const mapSearchHistoryEl = document.getElementById('mapSearchHistory');
+const mapSearchHistoryEl = document.getElementById('mapSearchHistory'); // <details>本体(開閉・表示制御)
+const mapSearchHistoryChipsEl = document.getElementById('mapSearchHistoryChips'); // チップを入れる中身
 function loadJumpHistory() {
   try { return JSON.parse(localStorage.getItem(JUMP_HISTORY_KEY)) || []; } catch (e) { return []; }
 }
@@ -156,11 +157,13 @@ function addJumpHistory(name, lat, lon) {
   renderJumpHistory();
 }
 function renderJumpHistory() {
-  if (!mapSearchHistoryEl) return;
+  if (!mapSearchHistoryEl || !mapSearchHistoryChipsEl) return;
   const list = loadJumpHistory();
-  mapSearchHistoryEl.innerHTML = '';
+  mapSearchHistoryChipsEl.innerHTML = '';
   if (!list.length) { mapSearchHistoryEl.style.display = 'none'; return; }
-  mapSearchHistoryEl.style.display = 'flex';
+  mapSearchHistoryEl.style.display = 'block';
+  // 【2026-07-24】<details>化により既定で閉じた状態(open属性なし)。開いたまま
+  // 再描画しても閉じ直さないよう、open状態はここでは触らない(ユーザーの開閉操作を維持)。
   list.forEach((h) => {
     const b = document.createElement('button');
     b.textContent = '🕘 ' + h.name;
@@ -170,7 +173,7 @@ function renderJumpHistory() {
       mapHintEl.textContent = t('mapHintJumpTo', { name: h.name });
       jumpToLatLon(h.lat, h.lon);
     });
-    mapSearchHistoryEl.appendChild(b);
+    mapSearchHistoryChipsEl.appendChild(b);
   });
 }
 

@@ -65,6 +65,7 @@ const I18N = {
     mapSearchPlaceholder: '地名・住所・施設名で検索',
     mapSearchBtnLabel: '🔎 検索',
     geoBtnLabel: '📡 現在地',
+    jumpHistorySummary: '🕘 履歴',
     helpBody: 'PC: WASD移動 / Shiftダッシュ / Spaceジャンプ / ドラッグ回転 / Cで高度キープ切替<br>スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ / 🔓で高度キープ切替',
     closeBtn: '閉じる',
     statusInitial: '🗺 伊勢原マップ読み込み中...',
@@ -153,6 +154,7 @@ const I18N = {
     uiToggleTitle: 'Show/hide UI',
     mapHintDefault: 'Tap a location to jump there',
     mapSearchPlaceholder: 'Search by place, address, or facility name',
+    jumpHistorySummary: '🕘 History',
     mapSearchBtnLabel: '🔎 Search',
     geoBtnLabel: '📡 My location',
     helpBody: 'PC: WASD to move / Shift to dash / Space to jump / drag to rotate view / C to toggle altitude hold<br>Mobile: left stick to move (tilt further to speed up) / swipe right side to rotate view / ⤴ to jump / 🔓 to toggle altitude hold',
@@ -456,15 +458,23 @@ const _cA = new THREE.Color(), _cB = new THREE.Color();
 function _lerpCss(a, b, t) { _cA.set(a); _cB.set(b); return _cA.lerp(_cB, t).getStyle(); }
 function _lerpHex(a, b, t) { _cA.setHex(a); _cB.setHex(b); return _cA.lerp(_cB, t).getHex(); }
 // キーフレーム: 0時=夜 / 6時=朝(夜明け) / 12時=昼 / 18時=夕方
-// winLit: 窓明かりの点灯係数(2026-07-24追加)。ユーザー要望「明かりをつけるのは夕方と夜だけ」
-// に合わせ、star(星の見え方用の係数。朝夕もうっすら見える設計)とは別に、
-// 夜=1・朝=0・昼=0・夕方=1で定義。夜→朝、昼→夕方の間で自然に遷移する。
 const DAY_KF = [
-  { sky:['#050a1e','#0a1836','#16244e','#2b4270'], glow:0x7c8cdc, glowA:0.22, fog:0x1a2848, sun:0xb9c4ff, sunInt:0.5, amb:0x3a4a7a, ambInt:1.05, star:1.0, winLit:1.0 },
-  { sky:['#33406e','#8a6a90','#e6a878','#ffdca6'], glow:0xffaa5a, glowA:0.50, fog:0xb69a86, sun:0xffd2a0, sunInt:1.25,amb:0x9a8aa0, ambInt:1.75, star:0.12, winLit:0.0 },
-  { sky:['#2a70c8','#4a95e0','#8fc4ef','#cfe8fb'], glow:0xfff0d2, glowA:0.30, fog:0x9fc4e0, sun:0xfff4e0, sunInt:2.3, amb:0xbcd0e6, ambInt:2.5, star:0.0, winLit:0.0 },
-  { sky:['#1e2448','#6a3a68','#d0673c','#ffb060'], glow:0xff783c, glowA:0.50, fog:0xa86a56, sun:0xff9a58, sunInt:1.15,amb:0x8a6a80, ambInt:1.6, star:0.12, winLit:1.0 },
+  { sky:['#050a1e','#0a1836','#16244e','#2b4270'], glow:0x7c8cdc, glowA:0.22, fog:0x1a2848, sun:0xb9c4ff, sunInt:0.5, amb:0x3a4a7a, ambInt:1.05, star:1.0 },
+  { sky:['#33406e','#8a6a90','#e6a878','#ffdca6'], glow:0xffaa5a, glowA:0.50, fog:0xb69a86, sun:0xffd2a0, sunInt:1.25,amb:0x9a8aa0, ambInt:1.75, star:0.12 },
+  { sky:['#2a70c8','#4a95e0','#8fc4ef','#cfe8fb'], glow:0xfff0d2, glowA:0.30, fog:0x9fc4e0, sun:0xfff4e0, sunInt:2.3, amb:0xbcd0e6, ambInt:2.5, star:0.0 },
+  { sky:['#1e2448','#6a3a68','#d0673c','#ffb060'], glow:0xff783c, glowA:0.50, fog:0xa86a56, sun:0xff9a58, sunInt:1.15,amb:0x8a6a80, ambInt:1.6, star:0.12 },
 ];
+// 【2026-07-24追加】窓明かりの点灯係数。DAY_KF(4点直線補間、6時間刻み)をそのまま使うと、
+// 正午キーフレームの直後から18時キーフレームに向けて6時間かけて点灯し始めてしまい、
+// 「昼過ぎなのに窓が光っている」状態になっていたため、DAY_KFとは独立に、6-16時は
+// 完全消灯・16-18時と4-6時だけ遷移する専用カーブとして持つ(h=0-24の実時間 or
+// 手動オーバーライド値を直接渡す)。
+function _winLitCurve(h) {
+  if (h >= 18 || h < 4) return 1;      // 18時〜翌4時: 点灯
+  if (h < 6) return 1 - (h - 4) / 2;   // 4-6時: 1→0(明け方、消えていく)
+  if (h < 16) return 0;                // 6-16時: 消灯(朝・昼)
+  return (h - 16) / 2;                 // 16-18時: 0→1(夕方、点いていく)
+}
 // 手動時間帯オーバーライド(⚙時間帯パネルから設定。part7.js参照)。
 // nullなら実時刻(従来通り)。0/6/12/18で夜/朝/昼/夕の各キーフレームをそのまま固定表示する。
 const TIME_OVERRIDE_H = { night: 0, morning: 6, noon: 12, evening: 18 };
@@ -513,14 +523,17 @@ function applyTimeOfDay() {
   if (starMesh) starMesh.material.opacity = night;
   // 松明は夜だけ灯す(昼間に暖色の点光源が浮くのを防ぐ)
   torchLights.forEach(l => { l.intensity = 0.1 + night * 1.1; });
-  // 【2026-07-23追加・24追加で増光・24再修正で夕方/夜限定に】ビルの窓明かり(夜景)を
-  // 時間帯に連動させる。新規テクスチャ/ジオメトリは一切増やさず、既存の共有マテリアル
-  // (facadeCache、part2.js)のemissiveIntensityだけを毎分(このapplyTimeOfDay呼び出し
-  // タイミング)まとめて書き換える — 過去のGPUクラッシュ対策(テクスチャ増加NG)と両立する。
-  // ユーザー要望「明かりをつけるのは夕方と夜だけ」により、star(朝夕もうっすら1のカーブ)
-  // ではなくwinLit(夜=1・朝=0・昼=0・夕方=1で定義したDAY_KFの専用係数)を使う。
-  // 昼(winLit=0)は完全消灯、夕方に向けて自然に点灯していく。
-  const winLit = a.winLit + (b.winLit - a.winLit) * t; // 1=点灯(夕方・夜), 0=消灯(朝・昼)
+  // 【2026-07-23追加・24追加で増光・24再修正で夕方/夜限定に・24再々修正で正午直後の
+  // 早すぎる点灯を修正】ビルの窓明かり(夜景)を時間帯に連動させる。新規テクスチャ/
+  // ジオメトリは一切増やさず、既存の共有マテリアル(facadeCache、part2.js)の
+  // emissiveIntensityだけを毎分(このapplyTimeOfDay呼び出しタイミング)まとめて
+  // 書き換える — 過去のGPUクラッシュ対策(テクスチャ増加NG)と両立する。
+  // 【バグ修正】当初DAY_KF(4点だけの直線補間)のwinLitで代用していたが、正午(12時)
+  // キーフレームの直後から夕方(18時)キーフレームに向けて6時間かけて直線的に
+  // 点灯が始まってしまい、「昼過ぎなのにもう窓が光っている」状態になっていた
+  // (ユーザー報告で発覚)。DAY_KFとは独立に、6-16時は完全消灯・16-18時と4-6時だけ
+  // 遷移する専用カーブ(_winLitCurve)に置き換える。
+  const winLit = _winLitCurve(h); // 1=点灯(18時〜翌4時), 0=消灯(6時〜16時)
   // フォグは従来どおり星と同じnightカーブで薄める(遠景の窓明かりが霞まないように)。
   WORLD_FOG.density = BASE_FOG_DENSITY * (1 - night * 0.4);
   if (typeof facadeCache !== 'undefined') {
