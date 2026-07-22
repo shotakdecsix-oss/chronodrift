@@ -456,11 +456,14 @@ const _cA = new THREE.Color(), _cB = new THREE.Color();
 function _lerpCss(a, b, t) { _cA.set(a); _cB.set(b); return _cA.lerp(_cB, t).getStyle(); }
 function _lerpHex(a, b, t) { _cA.setHex(a); _cB.setHex(b); return _cA.lerp(_cB, t).getHex(); }
 // キーフレーム: 0時=夜 / 6時=朝(夜明け) / 12時=昼 / 18時=夕方
+// winLit: 窓明かりの点灯係数(2026-07-24追加)。ユーザー要望「明かりをつけるのは夕方と夜だけ」
+// に合わせ、star(星の見え方用の係数。朝夕もうっすら見える設計)とは別に、
+// 夜=1・朝=0・昼=0・夕方=1で定義。夜→朝、昼→夕方の間で自然に遷移する。
 const DAY_KF = [
-  { sky:['#050a1e','#0a1836','#16244e','#2b4270'], glow:0x7c8cdc, glowA:0.22, fog:0x1a2848, sun:0xb9c4ff, sunInt:0.5, amb:0x3a4a7a, ambInt:1.05, star:1.0 },
-  { sky:['#33406e','#8a6a90','#e6a878','#ffdca6'], glow:0xffaa5a, glowA:0.50, fog:0xb69a86, sun:0xffd2a0, sunInt:1.25,amb:0x9a8aa0, ambInt:1.75, star:0.12 },
-  { sky:['#2a70c8','#4a95e0','#8fc4ef','#cfe8fb'], glow:0xfff0d2, glowA:0.30, fog:0x9fc4e0, sun:0xfff4e0, sunInt:2.3, amb:0xbcd0e6, ambInt:2.5, star:0.0 },
-  { sky:['#1e2448','#6a3a68','#d0673c','#ffb060'], glow:0xff783c, glowA:0.50, fog:0xa86a56, sun:0xff9a58, sunInt:1.15,amb:0x8a6a80, ambInt:1.6, star:0.12 },
+  { sky:['#050a1e','#0a1836','#16244e','#2b4270'], glow:0x7c8cdc, glowA:0.22, fog:0x1a2848, sun:0xb9c4ff, sunInt:0.5, amb:0x3a4a7a, ambInt:1.05, star:1.0, winLit:1.0 },
+  { sky:['#33406e','#8a6a90','#e6a878','#ffdca6'], glow:0xffaa5a, glowA:0.50, fog:0xb69a86, sun:0xffd2a0, sunInt:1.25,amb:0x9a8aa0, ambInt:1.75, star:0.12, winLit:0.0 },
+  { sky:['#2a70c8','#4a95e0','#8fc4ef','#cfe8fb'], glow:0xfff0d2, glowA:0.30, fog:0x9fc4e0, sun:0xfff4e0, sunInt:2.3, amb:0xbcd0e6, ambInt:2.5, star:0.0, winLit:0.0 },
+  { sky:['#1e2448','#6a3a68','#d0673c','#ffb060'], glow:0xff783c, glowA:0.50, fog:0xa86a56, sun:0xff9a58, sunInt:1.15,amb:0x8a6a80, ambInt:1.6, star:0.12, winLit:1.0 },
 ];
 // 手動時間帯オーバーライド(⚙時間帯パネルから設定。part7.js参照)。
 // nullなら実時刻(従来通り)。0/6/12/18で夜/朝/昼/夕の各キーフレームをそのまま固定表示する。
@@ -506,21 +509,22 @@ function applyTimeOfDay() {
   // 太陽/月の位置(6時=東の地平, 12時=天頂, 18時=西の地平, 夜=地平下)
   const ang = (h - 6) / 12 * Math.PI, sy = Math.sin(ang);
   moonLight.position.set(Math.cos(ang) * 900, sy * 1000 + (sy < 0 ? -150 : 200), 300);
-  const night = a.star + (b.star - a.star) * t; // 1=夜, 0=昼
+  const night = a.star + (b.star - a.star) * t; // 1=夜, 0=昼(星の見え方用)
   if (starMesh) starMesh.material.opacity = night;
   // 松明は夜だけ灯す(昼間に暖色の点光源が浮くのを防ぐ)
   torchLights.forEach(l => { l.intensity = 0.1 + night * 1.1; });
-  // 【2026-07-23追加・24追加で増光】ビルの窓明かり(夜景)を時間帯に連動させる。従来は
-  // 常に一定のemissiveIntensityで焼き込んでいたため昼夜を問わず窓が光って見えていた。
-  // ここでは新規テクスチャ/ジオメトリを一切増やさず、既存の共有マテリアル
+  // 【2026-07-23追加・24追加で増光・24再修正で夕方/夜限定に】ビルの窓明かり(夜景)を
+  // 時間帯に連動させる。新規テクスチャ/ジオメトリは一切増やさず、既存の共有マテリアル
   // (facadeCache、part2.js)のemissiveIntensityだけを毎分(このapplyTimeOfDay呼び出し
   // タイミング)まとめて書き換える — 過去のGPUクラッシュ対策(テクスチャ増加NG)と両立する。
-  // ユーザー要望「もっと明るく・遠景でも」を受けて、夜の上限を1.15倍→3.2倍まで大幅増光。
-  // あわせて、夜だけフォグ密度を基準値から4割ほど薄くし(下記WORLD_FOG.density)、
-  // 遠くの窓明かりがフォグに霞んで見えなくなるのを防ぐ(昼のフォグは従来どおり)。
+  // ユーザー要望「明かりをつけるのは夕方と夜だけ」により、star(朝夕もうっすら1のカーブ)
+  // ではなくwinLit(夜=1・朝=0・昼=0・夕方=1で定義したDAY_KFの専用係数)を使う。
+  // 昼(winLit=0)は完全消灯、夕方に向けて自然に点灯していく。
+  const winLit = a.winLit + (b.winLit - a.winLit) * t; // 1=点灯(夕方・夜), 0=消灯(朝・昼)
+  // フォグは従来どおり星と同じnightカーブで薄める(遠景の窓明かりが霞まないように)。
   WORLD_FOG.density = BASE_FOG_DENSITY * (1 - night * 0.4);
   if (typeof facadeCache !== 'undefined') {
-    const winGlow = 0.2 + night * 3.0;
+    const winGlow = winLit * 3.0;
     facadeCache.forEach((mat) => {
       const base = mat.userData && mat.userData.baseEmi != null ? mat.userData.baseEmi : 0.85;
       mat.emissiveIntensity = base * winGlow;
