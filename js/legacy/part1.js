@@ -506,6 +506,20 @@ function applyTimeOfDay() {
   if (starMesh) starMesh.material.opacity = night;
   // 松明は夜だけ灯す(昼間に暖色の点光源が浮くのを防ぐ)
   torchLights.forEach(l => { l.intensity = 0.1 + night * 1.1; });
+  // 【2026-07-23追加】ビルの窓明かり(夜景)を時間帯に連動させる。従来は常に一定の
+  // emissiveIntensityで焼き込んでいたため昼夜を問わず窓が光って見えていた。
+  // ここでは新規テクスチャ/ジオメトリを一切増やさず、既存の共有マテリアル
+  // (facadeCache、part2.js)のemissiveIntensityだけを毎分(このapplyTimeOfDay呼び出し
+  // タイミング)まとめて書き換える — 過去のGPUクラッシュ対策(テクスチャ増加NG)と両立する。
+  // 昼は控えめ(0.15倍)、夜は元の設計値よりやや強め(最大1.15倍)にして
+  // 「暗くなるほど窓明かりが際立つ」夜景らしいコントラストを出す。
+  if (typeof facadeCache !== 'undefined') {
+    const winGlow = 0.15 + night * 1.0;
+    facadeCache.forEach((mat) => {
+      const base = mat.userData && mat.userData.baseEmi != null ? mat.userData.baseEmi : 0.85;
+      mat.emissiveIntensity = base * winGlow;
+    });
+  }
 }
 applyTimeOfDay();
 setInterval(applyTimeOfDay, 60000); // 1分ごとに時間帯を更新

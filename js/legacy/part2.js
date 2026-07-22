@@ -298,6 +298,10 @@ function facadeMat(kind, color, variant) {
   const emi = MODE === 'space' ? 1.2 : MODE === 'edo' ? 0.9 : IS_MEIJI ? 0.55 : 0.85;
   const m = new THREE.MeshLambertMaterial({ map: tex, emissive: 0xffffff, emissiveMap: etex, emissiveIntensity: emi });
   m.userData.cacheKey = key; m.userData.refCount = 1; // releaseFacadeMat参照
+  // 【2026-07-23追加】窓明かりの夜景演出用。baseEmiを保持しておき、part1.js
+  // applyTimeOfDay()が時間帯に応じてemissiveIntensityをこの値からスケールする
+  // (新規テクスチャ・新規ジオメトリは一切増やさない=過去のGPUクラッシュ対策と両立)。
+  m.userData.baseEmi = emi;
   facadeCache.set(key, m);
   return m;
 }
