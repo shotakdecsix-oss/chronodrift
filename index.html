@@ -74,6 +74,12 @@ body {
   display:flex; flex-direction:column; gap:10px; z-index:30;
   will-change:transform; /* 画面回転時の表示/タップ判定ズレ対策(2026-07-23) */
 }
+/* 【2026-07-23追加】横向き(landscape)は画面が縦方向に狭く、縦中央寄せのアイコンレールが
+   左下のスティック(#joystick)と重なってしまうユーザー報告のため、横向き時だけ
+   左上隅にアンカーし直して両者の間隔を確保する(縦向きは従来どおり縦中央寄せのまま)。 */
+@media (orientation: landscape) {
+  #hudRail { top:var(--safe-top); transform:none; }
+}
 .railBtn {
   width:48px; height:48px; border-radius:50%;
   font-size:20px; cursor:pointer; color:var(--text);
