@@ -184,10 +184,11 @@ function facadeMat(kind, color, variant) {
     }
     g.fillStyle = 'rgba(255,255,255,0.16)';
     for (let p = 16; p < S; p += 24) for (let q = 20; q < S; q += 24) g.fillRect(p - 1, q + 3, 2, 2);
-    win(20, 36, 88, 22, rnd() < 0.65, { glass: '#0a141e', frame: _shadeCss(color, 0.4) });
+    // 【2026-07-24】ユーザー要望「すべてのビルは明かりをつける」により、点灯抽選を廃止し常時点灯に。
+    win(20, 36, 88, 22, true, { glass: '#0a141e', frame: _shadeCss(color, 0.4) });
     if (variant === 1) {
-      win(28, 76, 30, 26, rnd() < 0.5, { glass: '#0a141e' });
-      win(72, 76, 30, 26, rnd() < 0.5, { glass: '#0a141e' });
+      win(28, 76, 30, 26, true, { glass: '#0a141e' });
+      win(72, 76, 30, 26, true, { glass: '#0a141e' });
     }
     g.fillStyle = wc; g.fillRect(0, S - 6, S, 2);
     e.fillStyle = wc; e.fillRect(0, S - 6, S, 2);
@@ -198,9 +199,9 @@ function facadeMat(kind, color, variant) {
     g.strokeStyle = 'rgba(0,0,0,0.3)'; g.lineWidth = 1;
     for (let y = S * 0.55 + 6; y < S; y += 7) { g.beginPath(); g.moveTo(0, y); g.lineTo(S, y); g.stroke(); }
     const shoji = { grid: true, glass: '#8a8070', frame: '#403020', gridC: 'rgba(40,28,16,0.8)' };
-    win(14, 26, 40, 26, rnd() < (IS_MEIJI ? 0.4 : 0.65), shoji);
-    win(74, 26, 40, 26, rnd() < (IS_MEIJI ? 0.35 : 0.6), shoji);
-    win(14, 82, 44, 30, rnd() < 0.5, { grid: true, glass: '#4a4034', frame: '#332618' });
+    win(14, 26, 40, 26, true, shoji);
+    win(74, 26, 40, 26, true, shoji);
+    win(14, 82, 44, 30, true, { grid: true, glass: '#4a4034', frame: '#332618' });
     g.fillStyle = '#3a2c1c'; g.fillRect(72, 78, 42, 40); // 引き戸
     g.fillStyle = '#8a7050';
     for (let vx = 75; vx < 112; vx += 6) g.fillRect(vx, 80, 2, 36);
@@ -220,8 +221,8 @@ function facadeMat(kind, color, variant) {
       const fcols = ['#ff70a0', '#ffd050', '#ff5060'];
       for (let fx = x + 2; fx < x + ww; fx += 7) { g.fillStyle = fcols[(fx | 0) % 3]; g.fillRect(fx, y + wh, 3, 3); }
     };
-    cute(16, 30, 28, 34, rnd() < 0.55);
-    cute(84, 30, 28, 34, rnd() < 0.55);
+    cute(16, 30, 28, 34, true);
+    cute(84, 30, 28, 34, true);
     if (kind === 'house') { // 丸屋根のドア(白縁+屋根色+金のノブ)
       g.fillStyle = '#ffffff';
       g.beginPath(); g.arc(64, 92, 17, Math.PI, 0); g.rect(47, 92, 34, 26); g.fill();
@@ -229,7 +230,7 @@ function facadeMat(kind, color, variant) {
       g.beginPath(); g.arc(64, 92, 13, Math.PI, 0); g.rect(51, 92, 26, 24); g.fill();
       g.fillStyle = '#fff0a0'; g.beginPath(); g.arc(72, 102, 2, 0, 7); g.fill();
     } else {
-      cute(50, 76, 28, 34, rnd() < 0.5);
+      cute(50, 76, 28, 34, true);
     }
   } else if (kind === 'house') {
     // ===== 現実: 一戸建て(2階窓・掃き出し窓・戸袋・玄関・幕板・基礎の帯) =====
@@ -239,9 +240,9 @@ function facadeMat(kind, color, variant) {
     g.fillStyle = 'rgba(0,0,0,0.06)'; g.fillRect(0, 64, S, 64); // 1階をわずかに濃く
     g.fillStyle = _shadeCss(color, 0.7); g.fillRect(0, 62, S, 3); // 幕板
     g.fillStyle = '#7a7468'; g.fillRect(0, S - 10, S, 10); // 基礎
-    win(16, 26, 30, 24, rnd() < 0.5);
-    win(64, 26, 30, 24, rnd() < 0.5);
-    win(14, 76, 40, 34, rnd() < 0.6); // 掃き出し窓
+    win(16, 26, 30, 24, true);
+    win(64, 26, 30, 24, true);
+    win(14, 76, 40, 34, true); // 掃き出し窓
     g.fillStyle = _shadeCss(color, 0.62); g.fillRect(58, 74, 12, 38); // 雨戸戸袋
     g.fillStyle = '#4a3828'; g.fillRect(82, 78, 24, 40); // 玄関
     g.fillStyle = '#5f4a34'; g.fillRect(85, 81, 18, 34);
@@ -255,7 +256,7 @@ function facadeMat(kind, color, variant) {
       const gr = g.createLinearGradient(0, 4, 0, 18);
       gr.addColorStop(0, 'rgba(0,0,0,0.14)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
       g.fillStyle = gr; g.fillRect(0, 4, S, 14);
-      win(24, 30, 80, 44, rnd() < 0.45);
+      win(24, 30, 80, 44, true);
       g.fillStyle = 'rgba(15,18,24,0.35)'; g.fillRect(10, 80, 108, 6); // ベランダ奥の影
       g.fillStyle = _shadeCss(color, 0.82); g.fillRect(8, 86, 112, 30); // 手すり壁
       g.fillStyle = _shadeCss(color, 0.66); g.fillRect(8, 86, 112, 3);  // 笠木
@@ -268,7 +269,7 @@ function facadeMat(kind, color, variant) {
     g.fillStyle = 'rgba(0,0,0,0.06)';
     for (let vx = 0; vx < S; vx += 6) g.fillRect(vx, 13, 2, S - 13);
     g.fillStyle = _shadeCss(color, 0.75); g.fillRect(0, S - 8, S, 8);
-    win(18, 22, 92, 16, rnd() < 0.25, { glass: '#1d242e' });
+    win(18, 22, 92, 16, true, { glass: '#1d242e' });
     if (variant === 1) {
       g.fillStyle = _shadeCss(color, 0.6); g.fillRect(40, 62, 48, 58); // シャッター
       g.strokeStyle = 'rgba(255,255,255,0.1)'; g.lineWidth = 1;
@@ -284,8 +285,8 @@ function facadeMat(kind, color, variant) {
       gr.addColorStop(0, 'rgba(0,0,0,0.12)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
       g.fillStyle = gr; g.fillRect(0, 4, S, 12);
       g.fillStyle = 'rgba(0,0,0,0.15)'; g.fillRect(0, 13, 2, S - 13); g.fillRect(S - 2, 13, 2, S - 13); // 目地
-      win(16, 34, 42, 56, rnd() < 0.45);
-      win(70, 34, 42, 56, rnd() < 0.45);
+      win(16, 34, 42, 56, true);
+      win(70, 34, 42, 56, true);
       g.fillStyle = _shadeCss(color, 0.86); g.fillRect(10, 102, 108, 16); // スパンドレル
       g.restore(); e.restore();
     }
