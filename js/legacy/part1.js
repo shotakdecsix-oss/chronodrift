@@ -1137,10 +1137,41 @@ function unloadFarBuildings(force) {
   removeBuildingsByIds(removeIds);
 }
 
-// (2026-07-16: ここにあった高度LOD(updateAltitudeLOD)は撤去。上空で遠くの低層を非表示に
+// (2026-07-16: ここにあった旧・高度LOD(updateAltitudeLOD)は撤去。上空で遠くの低層を非表示に
 //  する対策だったが、条件を40m/300mまで絞ってもクラッシュ防止に効かないことが実測で判明。
 //  真因は建物+道路メッシュの総量で、建物総数キャップ(PERF.bMax)+細街路メッシュ距離制限が
 //  実際に効いた対策。経緯はDEBUG_SESSION_20260716_BUILDINGS.md参照)
+//
+// 【2026-07-24再導入】上記とは別の症状(みなとみらいでユーザー報告)への対策として、
+// 「上空にいる時、遠くの低層建物だけ」を間引く仕組みを再導入する。旧版との違い:
+// ・旧版は"クラッシュ"(GPUメモリ超過)対策で、対象が地上密集地(東京駅)だった。
+//   密集地では近くの建物ばかりで、300m半径では対象がほとんど無く効果が薄かった。
+// ・今回はスマホでの"処理落ち"(ドローコール数過多)対策。診断ログ(renderer.info)で
+//   建物・道路の個別メッシュが1.7〜2万ドローコールに達しており、上空へ浮上すると
+//   地上では隠れていた分まで一気にカメラに入ることが直接の原因と判明した。
+// ・ユーザー要望により、間引くのは「遠景の低層」だけ(近くの建物・高層ビルは常に表示、
+//   スカイライン自体は維持する)。disposeはせずvisibleの切り替えのみ行う(復帰コスト0、
+//   ポップインちらつきも無い)。
+const LOWRISE_CULL_ALT_M = 70;   // 実メートル。これより高く浮上している時だけ発動
+const LOWRISE_CULL_H_MAX = 20;   // 実メートル。これ未満の高さの建物だけ対象(低層)
+const LOWRISE_CULL_NEAR_M = 400; // 実メートル。これより近い建物は常に表示(遠景のみ間引く)
+let _lowriseCullFrame = 0;
+function updateFarLowriseCull() {
+  _lowriseCullFrame++;
+  if (_lowriseCullFrame % 30 !== 0) return; // 0.5秒ごとで十分(見た目上ほぼ気づかない頻度)
+  if (buildingRecords.length === 0) return;
+  const altM = (player.position.y - getGroundY(player.position.x, player.position.z)) / ELEV_SCALE;
+  const cullOn = altM > LOWRISE_CULL_ALT_M;
+  const px = player.position.x, pz = player.position.z;
+  const nearD2 = LOWRISE_CULL_NEAR_M * LOWRISE_CULL_NEAR_M;
+  for (const rec of buildingRecords) {
+    if (rec.h >= LOWRISE_CULL_H_MAX) continue; // 高層ビルは対象外(常に表示・スカイライン維持)
+    const dx = rec.x - px, dz = rec.z - pz;
+    const hide = cullOn && (dx * dx + dz * dz) > nearD2;
+    rec._lowriseHidden = hide;
+    for (const p of rec.parts) { if (p) p.visible = !hide; }
+  }
+}
 
 // dormantBuildings(遠すぎて未生成、または遠方で解放済みの実建物)を低頻度でスキャンし、
 // プレイヤーがBUILDING_GEN_DIST以内に近づいたものだけpendingBuildingsへ戻して
