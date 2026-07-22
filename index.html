@@ -146,6 +146,12 @@ body {
   width:120px; height:120px; border-radius:50%;
   pointer-events:all; z-index:30; touch-action:none; user-select:none;
 }
+/* 【2026-07-23追加】横向きはアイコンレール(左端・縦に長い)とスティックが同じ左側の
+   横幅帯にいるため、上下位置をずらすだけでは避けきれない。ユーザー提案どおり、
+   横向き時はスティックをレールの右側まで離す(中央寄り)ことで確実に間隔を作る。 */
+@media (orientation: landscape) {
+  #joystick { left:calc(var(--safe-left) + 100px); }
+}
 #joystickKnob {
   position:absolute; top:50%; left:50%; width:48px; height:48px;
   background:rgba(139,123,255,0.55); border:1px solid var(--accent);
