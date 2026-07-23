@@ -492,6 +492,7 @@ function scatterTreesIn(poly, sqmPerTree, cap) {
     const z = poly.minZ + Math.random() * (poly.maxZ - poly.minZ);
     if (!pointInPolygon(x, z, poly.pts)) continue;
     if (isOnRoad(x, z, 2.5, 2.5)) continue; // 公園・森を横切る道路の上に木が生えないように
+    if (isNearWater(x, z, 2)) continue; // 森・公園に隣接/内包する池・川の上に木が生えないように
     addTree(x, z, 0.7 + Math.random() * 0.9);
   }
 }
@@ -546,7 +547,9 @@ async function loadMeijiMesh(lat, lon) {
       // 森林・竹は読み込み時に低密度で木を散布(恒久インスタンス。プール上限で頭打ち)
       if ((code === 4 || code === 11) && Math.random() < 0.4) {
         const tx = p.x + (Math.random() - 0.5) * 80, tz = p.z + (Math.random() - 0.5) * 80;
-        if (!isOnRoad(tx, tz, 2.5, 2.5)) // 街道の上に木が生えないように
+        // 街道の上、隣接セルが水面(code10)だった場合のオフセットのはみ出しで池・川の上に
+        // 木が生えないように(森林セルの隣が水面セルというケースは山間部の川沿いで頻発)
+        if (!isOnRoad(tx, tz, 2.5, 2.5) && !isNearWater(tx, tz, 2))
           addTree(tx, tz, code === 11 ? 0.55 : 0.8 + Math.random() * 0.8);
       }
     }

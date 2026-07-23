@@ -81,6 +81,7 @@ function rebuildForest() {
         if (dx * dx + dz * dz > R2) continue;   // 円形範囲に収める
         if (roadNear(x, z, 2)) continue;        // 道路の上には生やさない(空間グリッドで高速判定)
         if (boxNear(x, z, 5)) continue;         // 建物の上には生やさない(空間グリッドで高速判定)
+        if (isNearWater(x, z, 2)) continue;     // 山中の池・ダム湖・川の上には生やさない
         plantTree(x, z);
       }
     }
