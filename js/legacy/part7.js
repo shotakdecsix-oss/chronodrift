@@ -206,7 +206,7 @@ function openMapJump() {
   }
 }
 
-document.getElementById('jumpBtn').addEventListener('click', openMapJump);
+bindTapButton(document.getElementById('jumpBtn'), openMapJump);
 document.getElementById('mapCloseBtn').addEventListener('click', () => {
   mapOverlay.classList.remove('active');
 });
@@ -395,7 +395,7 @@ function setViewMode(mode) {
   girlHairTop.visible = girlPonyL.visible = girlPonyR.visible = showBody && charSex === 'girl';
 }
 
-document.getElementById('viewBtn').addEventListener('click', () => setViewMode(viewMode + 1));
+bindTapButton(document.getElementById('viewBtn'), () => setViewMode(viewMode + 1));
 // 起動直後(viewMode=0)のラベル・キャラ表示状態をここで確定させる。以前はsetViewModeが
 // ボタン操作時にしか呼ばれず、index.html側に決め打ちで書いた初期ラベル文字列と実際の
 // viewMode初期値が食い違うリスクがあった(実際に上の並び順バグとして顕在化していた)。
@@ -564,7 +564,7 @@ function applyUIHidden() {
   document.body.classList.toggle('uiHidden', uiHidden);
   uiToggleBtn.textContent = uiHidden ? '👁' : '🙈';
 }
-uiToggleBtn.addEventListener('click', () => {
+bindTapButton(uiToggleBtn, () => {
   uiHidden = !uiHidden;
   try { localStorage.setItem('iseharaUIHidden', uiHidden ? '1' : '0'); } catch (e) {}
   applyUIHidden();
@@ -649,7 +649,7 @@ if (perfBtn && perfCtrlEl) {
       location.reload();
     });
   });
-  perfBtn.addEventListener('click', (e) => {
+  bindTapButton(perfBtn, (e) => {
     e.stopPropagation();
     perfCtrlEl.classList.toggle('open');
     perfBtn.classList.toggle('active', perfCtrlEl.classList.contains('open'));
@@ -737,7 +737,7 @@ const helpBtn = document.getElementById('helpBtn');
 const infoCloseBtn = document.getElementById('infoCloseBtn');
 function openHelp() { helpModal.classList.add('active'); }
 function closeHelp() { helpModal.classList.remove('active'); }
-if (helpBtn) helpBtn.addEventListener('click', (e) => { e.stopPropagation(); openHelp(); });
+if (helpBtn) bindTapButton(helpBtn, (e) => { e.stopPropagation(); openHelp(); });
 if (infoCloseBtn) infoCloseBtn.addEventListener('click', (e) => { e.stopPropagation(); closeHelp(); });
 
 // デプロイ日時の表示。server.js が index.html 配信時に window.__DEPLOY_INFO__ を注入する

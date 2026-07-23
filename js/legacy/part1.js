@@ -268,7 +268,7 @@ function refreshModeLabel() {
 (function initModeBtn() {
   const btn = document.getElementById('modeBtn');
   refreshModeLabel();
-  btn.addEventListener('click', () => {
+  bindTapButton(btn, () => {
     const curIdx = VISUAL_MODES.findIndex(v => v.id === MODE);
     const next = VISUAL_MODES[(curIdx + 1) % VISUAL_MODES.length].id;
     try {
@@ -1616,3 +1616,30 @@ function setCharacterSex(sex) {
   try { savedSex = localStorage.getItem('iseharaCharacterSex') || 'boy'; } catch (e) {}
   setCharacterSex(savedSex === 'girl' ? 'girl' : 'boy');
 })();
+
+// ======= タップ反応(横向き回転後のclickヒットテストずれ対策) =======
+// 【2026-07-25】ユーザー報告: 横向き時、hudRail内アイコンと右上UI非表示ボタンの
+// タップ反応が悪い(スティック・ジャンプは問題ない)。前者はclickイベントで、
+// 後者(joystick/hopBtn)はtouchstart/touchendで動いている。orientationchange直後は
+// 「見た目の位置」と「clickのヒットテストが参照するレイアウト」が一瞬ズレる既知の
+// ブラウザ挙動(主にiOS Safari)があり、touchstart起点で動く要素は影響を受けないが、
+// touchend→click合成に頼る要素はズレの影響をもろに受けていたと考えられる。
+// clickを置き換えるのではなく、touchendでも同じ処理を先に済ませ、それにより
+// 発火しなくなる後続のclickは何もしない(二重発火防止)、という形でjoystick/hopBtnと
+// 同じ土俵(touch起点)に揃える。
+function bindTapButton(el, handler) {
+  if (!el) return;
+  let touched = false;
+  el.addEventListener('touchstart', () => { touched = true; }, { passive: true });
+  el.addEventListener('touchend', (e) => {
+    if (!touched) return;
+    touched = false;
+    e.preventDefault(); // 後続のclick合成を止める(タップ処理はここで完結させる)
+    handler(e);
+  }, { passive: false });
+  el.addEventListener('touchcancel', () => { touched = false; }, { passive: true });
+  el.addEventListener('click', (e) => {
+    if (touched) { touched = false; return; } // 万一touchend側が効かなかった場合の保険
+    handler(e);
+  });
+}
