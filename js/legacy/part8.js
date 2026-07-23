@@ -1379,6 +1379,23 @@ function generateTownRow(cx, cz, inAvoid) {
   }
 }
 
+// 【2026-07-25追加】実測「江戸切絵図」町家領域ポリゴンの内側を、現代道路の有無に関係なく
+// 直接埋める。generateTownRowは現代の主要道路(trunk/primary/secondary/tertiary)沿いにしか
+// 反応しないが、日本橋のような実測データがある密集地でも、その細かい街路網は現代では
+// ただの生活道路(残念ながら明治・江戸モードではtype='road'として除外済み)になっている
+// ことが多く、結果として実測ポリゴンがあるのに「近くに現代の主要道路が無い」と判定され
+// スカスカな散布フォールバックにしか落ちない、という取りこぼしが起きていた。
+// ここでは現代道路を一切参照せず、ポリゴンの内側かどうかだけで候補点を採否するため、
+// 実測データのある場所は必ずその輪郭どおりに密集した町並みになる。
+function fillRealMachiyaCell(cx, cz, inAvoid) {
+  const N = 50; // 100m四方あたりの候補点数(ポリゴン外・当たり判定で多くが弾かれる前提)
+  for (let i = 0; i < N; i++) {
+    const hx = cx + (Math.random() - 0.5) * 98, hz = cz + (Math.random() - 0.5) * 98;
+    if (!isInEdoMachiyaArea(hx, hz)) continue; // 実測ポリゴンの外には建てない(輪郭に忠実)
+    placeMachiya(hx, hz, inAvoid);
+  }
+}
+
 function generateMeijiCells(x0, z0, x1, z1, inAvoid) {
   const groundGroups = new Map(); // material → セル中心座標列(後で1メッシュにマージ)
   for (let gx = Math.floor(x0 / 100); gx <= Math.floor(x1 / 100) + 1; gx++) {
@@ -1407,8 +1424,11 @@ function generateMeijiCells(x0, z0, x1, z1, inAvoid) {
         arr.push(cx, cz);
       }
       if (code === 6) { // 集落
-        if (isTown) {
-          generateTownRow(cx, cz, inAvoid); // 町場: 街道沿いに町家を連ねる
+        const isRealMachiya = edoRealDataReady && isInEdoMachiyaArea(cx, cz);
+        if (isRealMachiya) {
+          fillRealMachiyaCell(cx, cz, inAvoid); // 実測町家ポリゴンの内側を輪郭どおりに高密度充填
+        } else if (isTown) {
+          generateTownRow(cx, cz, inAvoid); // 町場: 街道沿いに町家を連ねる(現代道路ヒント)
         } else {
           // 農村: 茅葺き民家の集落(江戸は明治より開発途上のため、集落あたりの軒数を減らす)
           // 【2026-07-24】実際の江戸期の村は1村平均40-50軒/人口約400人・耕地50町歩程度
