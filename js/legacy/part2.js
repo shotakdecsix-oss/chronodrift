@@ -296,7 +296,9 @@ function facadeMat(kind, color, variant) {
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   const etex = new THREE.CanvasTexture(ec);
   etex.wrapS = etex.wrapT = THREE.RepeatWrapping;
-  const emi = MODE === 'space' ? 1.2 : MODE === 'edo' ? 0.9 : IS_MEIJI ? 0.55 : 0.85;
+  // 【2026-07-25】江戸・明治は行灯・蝋燭程度の弱い明かりが史実に近いため大幅に下げる
+  // (旧: edo 0.9 / meiji 0.55。現実モードの電灯的な明るさと差別化する)。
+  const emi = MODE === 'space' ? 1.2 : MODE === 'edo' ? 0.32 : IS_MEIJI ? 0.28 : 0.85;
   const m = new THREE.MeshLambertMaterial({ map: tex, emissive: 0xffffff, emissiveMap: etex, emissiveIntensity: emi });
   m.userData.cacheKey = key; m.userData.refCount = 1; // releaseFacadeMat参照
   // 【2026-07-23追加】窓明かりの夜景演出用。baseEmiを保持しておき、part1.js

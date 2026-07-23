@@ -326,12 +326,12 @@ const MODE_CONF = {
   meiji: { // 明治(迅速測図)— 落ち着いた自然色・薄暮
     fog: 0x8a9a88, ambient: 0xb8b8a0, ambInt: 2.4, moon: 0xe8dcc0,
     sky: ['#1a2a3a', '#3a5a6a', '#7a9a8a', '#d8c8a0'], glow: 'rgba(220,170,90,0.45)',
-    water: 0x3a6a8a, lawn: 0x5a7a3a, roadMinor: 0x907a55, windowC: 0xffcc77,
+    water: 0x3a6a8a, lawn: 0x5a7a3a, roadMinor: 0x907a55, windowC: 0xffb066, // 【2026-07-25】行灯・蝋燭風の暖色に変更(旧0xffcc77)
   },
   edo: { // セピア・和
     fog: 0x8a7a5a, ambient: 0xc0a878, ambInt: 2.3, moon: 0xffe8c0,
     sky: ['#2a2018', '#4a3a28', '#7a6040', '#c8a870'], glow: 'rgba(255,180,80,0.5)',
-    water: 0x4a7a8a, lawn: 0x6a7a40, roadMinor: 0xcabc9a, windowC: 0xffd890,
+    water: 0x4a7a8a, lawn: 0x6a7a40, roadMinor: 0xcabc9a, windowC: 0xff9944, // 【2026-07-25】蝋燭風の深い橙色に変更(旧0xffd890)
   },
   marchen: { // 明るいパステル
     fog: 0x88c8e8, ambient: 0xd0c0f0, ambInt: 3.2, moon: 0xfff0d0,
@@ -570,7 +570,11 @@ function applyTimeOfDay() {
   // フォグは従来どおり星と同じnightカーブで薄める(遠景の窓明かりが霞まないように)。
   WORLD_FOG.density = BASE_FOG_DENSITY * (1 - night * 0.4);
   if (typeof facadeCache !== 'undefined') {
-    const winGlow = winLit * 3.0;
+    // 【2026-07-25追加】史実では江戸・明治の夜は行灯・蝋燭程度の弱い明かりで、現代の
+    // 電灯のように窓が煌々と光ることはなかった(ユーザーへの回答参照)。倍率自体も
+    // 現実モードの3.0より大きく下げ、色味(windowC)・base強度(part2.js facadeMat)と
+    // 合わせてろうそく風の弱い暖色の点灯にする。
+    const winGlow = winLit * (USES_MEIJI_LANDUSE ? 1.1 : 3.0);
     facadeCache.forEach((mat) => {
       const base = mat.userData && mat.userData.baseEmi != null ? mat.userData.baseEmi : 0.85;
       mat.emissiveIntensity = base * winGlow;
@@ -1380,9 +1384,25 @@ const CHUNK_SIZE = 120;  // meters per chunk side
 // 重すぎる場合は6(720m)あたりに戻す候補。
 // 【2026-07-25】以前は明治・江戸だけ「低密度だから」という理由でPERF.chunkRを無視し
 // 固定4(480m)にしていたが、江戸切絵図の実データ統合や村落密度の引き上げで明治・江戸の
-// 密度は現実モードに近づいた。ユーザー要望により、他モード(現実・宇宙・お伽噺)と同様
-// PERF.chunkRへ統一し、選択したプリセット(軽量/標準/高品質)がそのまま反映されるようにする。
-const CHUNK_RADIUS = PERF.chunkR; // パフォーマンス設定に連動(全モード共通)
+// 密度は現実モードに近づいたため、一旦PERF.chunkRへ統一した。
+// 【2026-07-25再修正】ただしユーザーとの相談の結果、明治・江戸は実測建物なし・
+// ファサードは共有キャッシュのみで中身自体は今も現実モードより軽いため、「フォグで
+// どのみち霞んで見えなくなる距離」までは専用に伸ばしてよいことになった。フォグ密度
+// (edo=0.00056, meiji=0.0004。WORLD_FOG定義参照)から「これ以上先は生成しても白く
+// 霞むだけで意味がない」視認限界を逆算すると、edo≈2.7km・meiji≈3.8km。少し余裕を
+// 持たせてedo 2.6km・meiji 3.4kmを上限とする。軽量プリセットは低スペック機向けの
+// 安全策として現実モードと揃えたまま(勝手に重くしない)、標準・高品質だけ拡張する。
+// 総建物数はPERF.bMaxで別途頭打ちになるため、範囲を広げても建物が際限なく増えはしない
+// (広い範囲に薄く配置されるだけ)。チャンク数(=地面メッシュ生成コスト)は増えるが、
+// 生成はフレーム分割キュー(chunkGenQueue)で徐々に埋まるため急な処理落ちにはなりにくい。
+const EDO_MEIJI_CHUNK_DIST = {
+  lite: { edo: 480,  meiji: 480  }, // 現実モード(lite)と同じ距離のまま
+  std:  { edo: 1500, meiji: 1500 },
+  high: { edo: 2600, meiji: 3400 },
+};
+const CHUNK_RADIUS = USES_MEIJI_LANDUSE
+  ? Math.round(EDO_MEIJI_CHUNK_DIST[PERF_PRESET][MODE === 'edo' ? 'edo' : 'meiji'] / CHUNK_SIZE)
+  : PERF.chunkR; // パフォーマンス設定に連動
 
 // 【2026-07-17】pointInPolygonはjs/lib/pure.jsへ移動(CODE_REVIEW_20260717 P13-1)。
 
