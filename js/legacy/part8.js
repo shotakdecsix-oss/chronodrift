@@ -49,6 +49,15 @@ const osmTileQueue = [];
 // 2に戻す。
 const OSM_TILE_CONCURRENCY = 3;
 let osmTileActiveCount = 0;
+// 【2026-07-25・ユーザー報告】近傍タイルが5分以上fetchingのまま進まない不具合の診断用。
+// これまでのwaitMs(=キュー投入からの経過)だけでは「まだ順番待ちなだけ」と「実際に
+// fetchが開始されたのに終わらない(タイムアウトが機能していない/サーバー側ハング)」を
+// 区別できなかった。実際にfetchOSMTileBatchへ入ってからの経過時間を別途記録し、
+// [fetch]ログでmaxActiveAgeMsとして出す。これがtileTimeoutMs(現在地70秒/他34-54秒)を
+// 大きく超えているなら、AbortControllerのタイムアウトが機能せず本当にハングしている
+// ことの直接証拠になる。
+const _activeFetchStarts = new Map(); // 一意キー → fetchOSMTileBatch開始時刻(Date.now())
+let _activeFetchSeq = 0;
 let _osmMoveUx = 0, _osmMoveUz = 0; // プレイヤーの進行方向(単位ベクトル)。取得順の前方優先に使う
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
 // 【2026-07-21・ユーザー要望】道路生成の遅延診断用: タイルが新規キュー投入された時刻。
@@ -671,6 +680,10 @@ async function fetchOSMTileBatch() {
   batchSize = Math.max(1, Math.min(batchSize, eligibleRun));
   const batch = osmTileQueue.splice(0, batchSize); // 近い順(backoff中は後回し)
   const keys = batch.map(({tx, tz}) => `${tx},${tz}`);
+  // 【2026-07-25・診断計器】このバッチの処理に実際どれだけ時間がかかっているかを追跡する
+  // (finally節で必ず削除。ハング診断用なのでtry本体より前、失敗しうる処理より先に置く)
+  const _fetchStartKey = (++_activeFetchSeq) + ':' + keys.join('|');
+  _activeFetchStarts.set(_fetchStartKey, Date.now());
   const bboxes = batch.map(({tx, tz}) => {
     const worldX0 = tx * OSM_TILE_M, worldZ0 = tz * OSM_TILE_M;
     const ll00 = xzToLatLon(worldX0, worldZ0);
@@ -903,6 +916,7 @@ async function fetchOSMTileBatch() {
     }
   } finally {
     clearTimeout(timeoutId); // 成功時に残ったタイマー自体の掃除(abort()は既に完了済みのfetchには無害)
+    _activeFetchStarts.delete(_fetchStartKey); // 診断計器の後片付け(成功・失敗いずれでも必ず消す)
   }
   // 【2026-07-17・Fable5診断】以前は失敗時、待ち時間(最大30秒)をこのワーカーが
   // concurrency枠(OSM_TILE_CONCURRENCY=3)を握ったままsleepしていたため、密集地で

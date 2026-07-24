@@ -277,8 +277,15 @@ function updateDebugTileOverlay(force) {
     // 【2026-07-21・修正7(a)】全面赤(fetching)で停止するケースの切り分け用計器。
     // 仮説A(グローバル・クールダウンが429継続で実質恒久化)なら cooldown(ms) が常に正の値になる。
     // 仮説B(ワーカー枠のリーク)なら active=3 に張り付いたまま cooldown=0 で queue が減らない。
+    // 【2026-07-25・ユーザー報告(足元タイルが5分以上fetchingのまま)】上のwaitMs(キュー投入
+    // からの経過)だけでは「まだ順番待ち」と「実際にfetchが動いているのに終わらない」を
+    // 区別できないため、実際にfetchOSMTileBatchへ入ってからの経過(maxActiveAgeMs)を追加。
+    // これがtileTimeoutMs(現在地70秒/他34-54秒)を大きく超えているなら、AbortControllerの
+    // タイムアウトが機能せず本当にハングしている証拠になる。
+    let _maxActiveAge = 0;
+    for (const t of _activeFetchStarts.values()) _maxActiveAge = Math.max(_maxActiveAge, Date.now() - t);
     console.log('[fetch] active', osmTileActiveCount, 'queue', osmTileQueue.length,
-      'cooldown(ms)', Math.max(0, osmGlobalCooldownUntil - Date.now()),
+      'cooldown(ms)', Math.max(0, osmGlobalCooldownUntil - Date.now()), 'maxActiveAgeMs', _maxActiveAge,
       'streak', _osm429Streak, 'records', buildingRecords.length, '/', PERF.bMax,
       'dormant', dormantCount);
     // 【2026-07-21・ユーザー要望】データ取得(上の[fetch]行)とは別に、取得後の生成処理側の
