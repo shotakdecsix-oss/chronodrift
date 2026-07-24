@@ -236,6 +236,64 @@ function cachePath(apiDir, upstreamUrl) {
   return path.join(CACHE_DIR, apiDir, h + '.json');
 }
 
+/* ---------- ディスクキャッシュの有効期限・容量上限 ---------- */
+// 【2026-07-26・IMPL_PROMPT_20260724 Phase4】
+// 【実態確認・本書との差分】本書は「現状Overpass14日/標高30日のTTLがある」前提で
+// 「延長する」よう指示していたが、実際のコード(下のhandleApi「1) キャッシュヒット」節)は
+// キャッシュファイルの有効期限を一切見ておらず、書き込み時にcachedAtを記録してはいたものの
+// 読み込み時に一度も参照していなかった(=ファイルが存在する限り無期限にHIT扱い)。
+// Renderの無料プランはディスクがエフェメラル(再デプロイ・再起動のたびに消える)ため、
+// 実質的には「今のデプロイが生きている間はキャッシュ無期限」という、本書が目指す状態を
+// 既に上回る形で達成できていた。「延長する」対象の期限が実在しないため、代わりに
+// 「非常に長時間デプロイし続けた場合に現実の地図変化に対してデータが古くなりすぎない」
+// ための上限として、本書が挙げていた値をそのまま採用し明示的なチェックを新設する
+// (無料プランの実情ではほぼ発火しない保険的な意味合いが強い)。
+const CACHE_TTL_MS_BY_DIR = {
+  overpass: 14 * 86400e3,   // 14日
+  elevation: 30 * 86400e3,  // 30日(地形はほぼ不変)
+  nominatim: 30 * 86400e3,  // 本書に記載無し。住所も変化が非常に稀なので同じ扱い
+};
+// 【実態確認】ディスク容量上限(LRU削除)も同様に現状は無い。本書は「永続ディスクの場合は
+// 実装」という条件付きだったが、Renderがどこかのタイミングでプラン変更される可能性や
+// ローカル開発での長時間起動も考慮し、低リスクな保険として常時有効にしておく
+// (小さいJSON主体のキャッシュなので、通常の使用量ではまず発火しない)。
+const CACHE_MAX_BYTES = 500 * 1024 * 1024; // 500MB
+const CACHE_SWEEP_INTERVAL_MS = 30 * 60 * 1000; // 30分ごとにバックグラウンドで確認(リクエスト経路には絡めない)
+async function sweepCacheDir() {
+  try {
+    let dirents;
+    try { dirents = await fsp.readdir(CACHE_DIR, { withFileTypes: true }); } catch (e) { return; } // 未作成なら何もしない
+    const files = [];
+    for (const d of dirents) {
+      if (!d.isDirectory()) continue;
+      const sub = path.join(CACHE_DIR, d.name);
+      let names;
+      try { names = await fsp.readdir(sub); } catch (e) { continue; }
+      for (const name of names) {
+        if (!name.endsWith('.json')) continue; // 書き込み中の.tmpは対象外
+        const fp = path.join(sub, name);
+        try {
+          const st = await fsp.stat(fp);
+          files.push({ fp, size: st.size, mtime: st.mtimeMs });
+        } catch (e) { /* 削除競合等は無視 */ }
+      }
+    }
+    let total = files.reduce((s, f) => s + f.size, 0);
+    if (total <= CACHE_MAX_BYTES) return;
+    files.sort((a, b) => a.mtime - b.mtime); // 更新日時が古い順に削除(簡易LRU)
+    let pruned = 0;
+    for (const f of files) {
+      if (total <= CACHE_MAX_BYTES) break;
+      try { await fsp.unlink(f.fp); total -= f.size; pruned++; } catch (e) { /* 既に消えている等 */ }
+    }
+    log(`cache sweep: pruned ${pruned} files, now ~${Math.round(total / 1024 / 1024)}MB`);
+  } catch (e) {
+    log(`cache sweep failed: ${e.message}`);
+  }
+}
+setInterval(sweepCacheDir, CACHE_SWEEP_INTERVAL_MS);
+sweepCacheDir(); // 起動直後にも一度実行(前回デプロイの残骸が万一あっても早期に整理する)
+
 /* ---------- 上流レート制限 (ホスト別・弾力レーン方式) ---------- */
 // 【2026-07-25・ユーザー報告対応】以前はホスト単位で完全直列(1本のチェーン)だった。
 // これだと、1件のリクエストが上流(Overpass)側で数分〜十数分かかるケース(下のコメント
@@ -511,13 +569,19 @@ async function handleApi(req, res, apiKey) {
   );
 
   // 1) キャッシュヒット → 即応答
+  // 【2026-07-26・Phase4】期限切れなら例外を投げてmiss扱いに落とす(下の(2)で上書き取得)。
   try {
     const cached = JSON.parse(await fsp.readFile(file, 'utf8'));
+    const ttlMs = CACHE_TTL_MS_BY_DIR[api.dir];
+    const cachedAtMs = Date.parse(cached.cachedAt);
+    if (ttlMs && Number.isFinite(cachedAtMs) && (Date.now() - cachedAtMs) > ttlMs) {
+      throw new Error('cache expired');
+    }
     res.writeHead(200, { 'Content-Type': cached.contentType, 'X-Cache': 'HIT' });
     res.end(cached.body);
     log(`HIT  ${apiKey} ${(reqBody || rest).slice(0, 60)}...`);
     return;
-  } catch (_) { /* miss */ }
+  } catch (_) { /* miss (期限切れ含む) */ }
 
   // このリクエストを「待ち人数」として登録する(同一キーへの合流分もそれぞれ+1する)。
   // reqの接続が切れたら(ブラウザのreload・タブ閉じ等)必ず1つ減らす。
