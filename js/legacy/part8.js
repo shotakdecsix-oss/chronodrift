@@ -76,6 +76,18 @@ const _activeFetchAborts = new Map(); // 一意キー → AbortController
 function abortAllOSMFetches() {
   for (const ctl of _activeFetchAborts.values()) { try { ctl.abort(); } catch (e) {} }
 }
+// 【2026-07-26・IMPL_PROMPT_20260724 Phase2】マップジャンプ(近距離、location.reloadしない方)
+// のたびに+1する世代番号。abortAllOSMFetches()+resetOSMTileQueueForJump()で進行中fetch・
+// 待ち行列は通常きちんと処理されるはずだが、(1)AbortControllerのabort()はブラウザの実装上
+// 「必ず即座にネットワークを切断する」保証までは無く、応答が既に到達しかけていた場合は
+// レスポンス自体は届いてしまうことがある、(2)Promiseの解決順序によっては「中断したはずの
+// フェッチのthenコールバック」が新しい場所の処理より後に実行される、といったabort漏れ・
+// レースの可能性がゼロではない。世代番号はその保険で、フェッチ開始時点の世代を憶えておき、
+// 完了時に現在の世代と食い違っていたら(=その間にジャンプがあった)結果を静かに捨てる。
+// 【遠距離ジャンプ(location.reload)について】reloadはJS実行コンテキスト自体を丸ごと
+// 破棄するため、進行中のPromiseコールバックがreload後に生き残ることは無い(ブラウザが
+// ページ全体を作り直す)。よってosmEpochのインクリメントは近距離ジャンプ側だけで十分。
+let osmEpoch = 0;
 // 【2026-07-25・ユーザー報告(300km未満の近距離ジャンプでも同じ詰まりが出る)対応】
 // 遠距離ジャンプ(location.reload)はクライアント側の状態が丸ごと作り直されるが、
 // 近距離ジャンプ(location.reloadしない方の分岐、jumpToLatLon)は同じJS実行環境の
@@ -86,6 +98,7 @@ function abortAllOSMFetches() {
 // roadReadyTiles(既に取得済みの記録)は消さない(誤って再取得させる必要は無く、
 // 実害も無いキャッシュのため)。
 function resetOSMTileQueueForJump() {
+  osmEpoch++; // 【Phase2】これより前に発行されたfetchの結果は、完了時に世代不一致で捨てられる
   abortAllOSMFetches(); // 前の場所を追いかけている進行中のfetchを中断
   osmTileQueue.length = 0; // 未処理の待ち行列を空に(新しい場所はcheckOSMTilesが積み直す)
   queuedTiles.clear();
@@ -765,6 +778,10 @@ async function fetchOSMTileBatch() {
   const batchKind = batch[0] && batch[0].kind; // 'road'|'building'|undefined(=combined)
   const keys = batch.map(({tx, tz}) => `${tx},${tz}`); // 位置キー(roadReadyTiles等、道路/建物で共有する状態用)
   const stateKeys = batch.map(({tx, tz}) => tileStateKey(tx, tz, batchKind)); // 失敗回数・backoff等、kind別に独立させる状態用
+  // 【2026-07-26・Phase2】このフェッチを発行した時点の世代を記録しておく。完了(成功/
+  // キャッシュヒット)時にosmEpochと食い違っていたら、その間にマップジャンプがあった
+  // ということなので、結果はワールドに反映せず静かに捨てる(abort漏れ・レースの保険)。
+  const myEpoch = osmEpoch;
   // 【2026-07-25・診断計器】このバッチの処理に実際どれだけ時間がかかっているかを追跡する
   // (finally節で必ず削除。ハング診断用なのでtry本体より前、失敗しうる処理より先に置く)
   const _fetchStartKey = (++_activeFetchSeq) + ':' + stateKeys.join('|');
@@ -872,16 +889,20 @@ async function fetchOSMTileBatch() {
       // キーにすると別都市のタイルと衝突していた(詳細はOSM_TILE_CACHE_VER宣言部参照)。
       const cached = await osmCacheGet(cacheKeyFor(bboxes[0]));
       if (cached) {
-        processTileData(cached, 1);
-        markTileSuccess(keys[0], stateKeys[0], batchKind);
-        // 【2026-07-19】以前はkeys.includes(ptKey)=自タイル1枚が届いた時点で「表示しました」に
-        // 差し替えていたが、建物はosmTilesReadyAround(64m)で隣接タイルも待つため、トーストが
-        // 消えた後も建物だけしばらく生成されない「表示は完了なのに実際は空」の乖離があった
-        // (体感の悪化として報告された逆ドーナツ症状の一因)。建物が実際に生成可能になる条件と
-        // 揃え、隣接ブロックタイルも含めて揃ってから完了表示にする。
-        if (awaitingDestinationLoad && osmTilesReadyAround(player.position.x, player.position.z, 64)) {
-          awaitingDestinationLoad = false;
-          showToast(t('mapShownToast'), { duration: 3000 });
+        // 【2026-07-26・Phase2】await の間にマップジャンプが起きていたら(=世代が変わって
+        // いたら)、このタイルはもう関係ない場所の話。ワールドには反映せず静かに捨てる。
+        if (myEpoch === osmEpoch) {
+          processTileData(cached, 1);
+          markTileSuccess(keys[0], stateKeys[0], batchKind);
+          // 【2026-07-19】以前はkeys.includes(ptKey)=自タイル1枚が届いた時点で「表示しました」に
+          // 差し替えていたが、建物はosmTilesReadyAround(64m)で隣接タイルも待つため、トーストが
+          // 消えた後も建物だけしばらく生成されない「表示は完了なのに実際は空」の乖離があった
+          // (体感の悪化として報告された逆ドーナツ症状の一因)。建物が実際に生成可能になる条件と
+          // 揃え、隣接ブロックタイルも含めて揃ってから完了表示にする。
+          if (awaitingDestinationLoad && osmTilesReadyAround(player.position.x, player.position.z, 64)) {
+            awaitingDestinationLoad = false;
+            showToast(t('mapShownToast'), { duration: 3000 });
+          }
         }
         clearTimeout(timeoutId);
         osmTileActiveCount--;
@@ -964,20 +985,29 @@ async function fetchOSMTileBatch() {
     const declared = countEl ? parseInt(countEl.tags && countEl.tags.total, 10) : NaN;
     if (!Number.isFinite(declared)) throw new Error('incomplete: count element missing');
     if (received < declared) throw new Error(`incomplete: ${received}/${declared} elements`);
-    // count検証を通過した完全な1タイル応答だけをIndexedDBへ保存(部分応答の汚染を防ぐ)
+    // count検証を通過した完全な1タイル応答だけをIndexedDBへ保存(部分応答の汚染を防ぐ)。
+    // 【2026-07-26・Phase2】キャッシュ保存はワールドへの反映ではなく「正しく取得できた
+    // データを無駄にしない」ための処理なので、世代が変わっていても行ってよい(むしろ
+    // 行うべき。再訪時に活きる)。
     if (batch.length === 1) osmCachePut(cacheKeyFor(bboxes[0]), data); // 保存キーもbboxes[0](絶対座標)ベース+kindサフィックス
     _osm429Streak = 0; // 【2026-07-21】完全な応答を受け取れた=不調から回復したとみなし、次回のbackoffを短くリセット
-    // 複数タイル分の要素が1つの配列で混ざって届くが、seenOSMWaysでway ID重複排除される
-    // ので、1タイルの時と同じ processTileData にそのまま渡してよい。密度計算用にタイル枚数も渡す。
-    processTileData(data, batch.length);
-    keys.forEach((k, i) => markTileSuccess(k, stateKeys[i], batchKind));
-    // loadOSM()(part6.js)は起動直後に「🗺 マップを読み込み中...」のstickyトーストを
-    // 出したまま抜ける(道路・建物の実際の生成はここが担当するため)。
-    // 【2026-07-19】完了表示は自タイルだけでなく、建物生成の実際のゲート
-    // (osmTilesReadyAround・上のキャッシュヒット分岐と同じ)が揃った時点に揃える。
-    if (awaitingDestinationLoad && osmTilesReadyAround(player.position.x, player.position.z, 64)) {
-      awaitingDestinationLoad = false;
-      showToast(t('mapShownToast'), { duration: 3000 });
+    // 【2026-07-26・Phase2】ここから先はワールド状態(pendingBuildings/roadReadyTiles等)への
+    // 反映。fetch開始後にマップジャンプがあった(世代が変わった)場合は、abort漏れ・レースで
+    // ここまで来てしまった古い場所の結果ということなので、静かに捨てる(ワールドには一切
+    // 反映しない)。
+    if (myEpoch === osmEpoch) {
+      // 複数タイル分の要素が1つの配列で混ざって届くが、seenOSMWaysでway ID重複排除される
+      // ので、1タイルの時と同じ processTileData にそのまま渡してよい。密度計算用にタイル枚数も渡す。
+      processTileData(data, batch.length);
+      keys.forEach((k, i) => markTileSuccess(k, stateKeys[i], batchKind));
+      // loadOSM()(part6.js)は起動直後に「🗺 マップを読み込み中...」のstickyトーストを
+      // 出したまま抜ける(道路・建物の実際の生成はここが担当するため)。
+      // 【2026-07-19】完了表示は自タイルだけでなく、建物生成の実際のゲート
+      // (osmTilesReadyAround・上のキャッシュヒット分岐と同じ)が揃った時点に揃える。
+      if (awaitingDestinationLoad && osmTilesReadyAround(player.position.x, player.position.z, 64)) {
+        awaitingDestinationLoad = false;
+        showToast(t('mapShownToast'), { duration: 3000 });
+      }
     }
   } catch(e) {
     // 以前は3回失敗すると完全に諦めて二度と再試行しなかったため、Overpassが一時的に
@@ -998,6 +1028,12 @@ async function fetchOSMTileBatch() {
     // 再試行する時だけ従来の長いtimeout宣言に戻す。同じ理由の失敗を短いtimeoutのまま
     // 何度も繰り返させないための一時的な措置(成功したら上のkeys.forEachで解除)。
     const isTimeout = !!(e && e.wasTimeout);
+    // 【2026-07-26・Phase2】fetch開始後にマップジャンプがあった(世代が変わった)場合、この
+    // 失敗はabortAllOSMFetches()による意図的な中断が原因である可能性が高く、Overpass側の
+    // 実際の不調ではない。古い場所のタイルの失敗カウント・backoffを汚さないよう、状態の
+    // 更新自体を丸ごとスキップする(queuedTiles解放も不要。resetOSMTileQueueForJumpで
+    // 既にクリア済みのはずで、二重に触る必要が無い)。
+    if (myEpoch === osmEpoch) {
     // 【2026-07-26・Phase1】失敗カウント・backoff・timeoutBoost・gaveUp判定はstateKeys(kind別)で
     // 管理する。queuedTiles/buildingQueuedTilesからの削除(再投入対象に戻す)だけは位置キー(keys)
     // かつジョブ種別(batchKind)ごとに別のSetを使う(道路ジョブと建物ジョブは投入経路が違うため)。
@@ -1036,6 +1072,7 @@ async function fetchOSMTileBatch() {
     if (awaitingDestinationLoad && roadReadyTiles.has(ptKey)) {
       awaitingDestinationLoad = false;
       showToast(t('mapPartialFailToast'), { duration: 4000 });
+    }
     }
   } finally {
     clearTimeout(timeoutId); // 成功時に残ったタイマー自体の掃除(abort()は既に完了済みのfetchには無害)
