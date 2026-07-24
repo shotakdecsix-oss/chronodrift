@@ -1063,13 +1063,20 @@ function checkCurrentTileRush() {
   // 取得をやり直す。roadReadyTilesからは外さない(生成済みの建物ゲートを巻き戻さない。
   // 再取得が成功すればremoveBuildingsOverlappingRoadが道路と被る建物を自然に掃除する)。
   const ptk = tx + ',' + tz;
-  if (gaveUpTiles.has(ptk)) {
-    gaveUpTiles.delete(ptk);
-    osmTileFailCount.delete(ptk);
-    osmTileHardFailCount.delete(ptk);
-    osmTileNextRetryAt.delete(ptk); // 即時再試行可
-  }
-  let rush = !roadReadyTiles.has(tx + ',' + tz);
+  // 【2026-07-26・Phase1】近傍分離ジョブのgaveUpは"tx,tz|road"/"tx,tz|building"のstateKeyで
+  // 記録されている(tier3以遠・複合クエリは従来通り"tx,tz"のまま)。3種とも対象にする。
+  [ptk, tileStateKey(tx, tz, 'road'), tileStateKey(tx, tz, 'building')].forEach(k => {
+    if (gaveUpTiles.has(k)) {
+      gaveUpTiles.delete(k);
+      osmTileFailCount.delete(k);
+      osmTileHardFailCount.delete(k);
+      osmTileNextRetryAt.delete(k); // 即時再試行可
+    }
+  });
+  // 【2026-07-26・Phase1】近傍分離ジョブでは道路確定後も建物クエリがまだ進行中のことがある。
+  // 建物データ未到達もrush(優先ブースト)対象にする(道路だけ見ると「もう終わった」扱いに
+  // なってしまい、後追い建物クエリの優先度が上がらないため)。
+  let rush = !roadReadyTiles.has(tx + ',' + tz) || !buildingReadyTiles.has(tx + ',' + tz);
   if (!rush) {
     for (const r of pendingRoadMeshes) {
       if (Math.floor((r.x1 + r.x2) / 2 / T) === tx && Math.floor((r.z1 + r.z2) / 2 / T) === tz) { rush = true; break; }
@@ -1725,7 +1732,18 @@ function osmTilesReadyAround(x, z, pad) {
   const t0x = Math.floor((x - pad) / OSM_TILE_M), t1x = Math.floor((x + pad) / OSM_TILE_M);
   const t0z = Math.floor((z - pad) / OSM_TILE_M), t1z = Math.floor((z + pad) / OSM_TILE_M);
   for (let tx = t0x; tx <= t1x; tx++) for (let tz = t0z; tz <= t1z; tz++) {
-    if (!roadReadyTiles.has(`${tx},${tz}`)) return false;
+    const k = `${tx},${tz}`;
+    if (!roadReadyTiles.has(k)) return false;
+    // 【2026-07-26・Phase1回帰修正】近傍(tier1+2)は道路確定(roadReadyTiles)と建物データ到達
+    // (buildingReadyTiles)が別々のクエリ・別タイミングになった。以前はroadReadyTilesが
+    // 「道路も建物も揃った」ことを兼ねる唯一の合図で、それを前提にチャンク生成
+    // (generateChunk、1チャンク1回きりで再生成の仕組みが無い)がここをゲートにしていた。
+    // road確定だけでgenerateChunkを走らせると、後から届く実建物データに対して
+    // 生成済みチャンクは二度と手続き生成をやり直さないため、実建物が完全に無視され
+    // 「建物が手続き生成だけになる」退行を起こす(2026-07-26実機報告で確認)。
+    // 建物データの到達も必ず待つ(tier3以遠・従来の複合クエリはroad/building同時に
+    // trueになるので、この一行を足しても挙動は変わらない)。
+    if (!buildingReadyTiles.has(k)) return false;
   }
   return true;
 }
