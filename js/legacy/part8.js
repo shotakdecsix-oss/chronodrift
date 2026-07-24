@@ -683,7 +683,17 @@ async function fetchOSMTileBatch() {
     const waitedMs = Date.now() - (osmTileQueuedAt.get(tileStateKey(t.tx, t.tz, t.kind)) || Date.now());
     const agingTiebreak = Math.min(100, waitedMs / 600); // 60秒で頭打ち、最大100(階層間ギャップ10000より十分小さい)
     if (_blockingTiles.has(_posKey(t))) return base - agingTiebreak - 100000; // 建物生成を直接ブロックしている分は最優先
-    if (Math.abs(t.tx - _pTileX) <= NEAR_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_TIER_R) return base - agingTiebreak - 10000; // 近傍3x3は外側より先
+    if (Math.abs(t.tx - _pTileX) <= NEAR_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_TIER_R) {
+      // 【2026-07-26・実機報告「建物生成が遅い、緑緑赤が多い」への対応】近傍分離ジョブ
+      // (kind='road'/'building')はリクエスト数が実質2倍になるため、新しく近傍圏内に
+      // 入ってくる別タイルの道路ジョブが、既に道路確定済みで建物クエリだけ残っている
+      // タイルより先に処理され続けると、そのタイルの建物がいつまでも埋まらない。
+      // building後追いジョブ(=道路は既に確定済みで、あと1回の軽量クエリで完結する)は、
+      // 同じ近傍階層内でも常に先に処理する(階層間ギャップ10000に対して十分小さい50を
+      // 追加で引くだけなので、階層自体を跨いだ逆転は起きない)。
+      const buildingFollowupBonus = (t.kind === 'building') ? 50 : 0;
+      return base - agingTiebreak - 10000 - buildingFollowupBonus;
+    }
     return base - agingTiebreak;
   };
   // 【2026-07-17・Fable5診断】距離だけでなく、backoff中(osmTileNextRetryAtが未来)の
