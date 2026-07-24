@@ -218,24 +218,43 @@ function cachePath(apiDir, upstreamUrl) {
   return path.join(CACHE_DIR, apiDir, h + '.json');
 }
 
-/* ---------- 上流レート制限 (ホスト別・直列キュー) ---------- */
-const lastStartAt = new Map();
-const chains = new Map();
+/* ---------- 上流レート制限 (ホスト別・並列レーン方式) ---------- */
+// 【2026-07-25・ユーザー報告対応】以前はホスト単位で完全直列(1本のチェーン)だった。
+// これだと、1件のリクエストが上流(Overpass)側で数分〜十数分かかるケース(下のコメント
+// 参照: 実測881秒)に当たると、同じホストへの以降の全リクエスト(他タイル・他プレイヤー
+// 全員分)がその1件の裏で完全に止まる。実機報告(近傍タイルの道路生成が5分以上
+// fetchingのまま停滞し、しばらくすると溜まっていた分がいっぺんに解放される)は、
+// この「1本の直列キューが1件の長時間リクエストに握られる」構造と一致する。
+// Overpass公開インスタンスは1IPあたり2接続まで通る実測があるため(direct()側の
+// コメント参照)、完全直列(1レーン)から2レーンの並列キューに変え、1件が長引いても
+// もう1レーンで別のリクエストを進められるようにする。
+const HOST_LANES = 2;
+const laneChains = new Map();      // host -> [Promise, Promise](レーンごとの直列チェーン)
+const laneLastStartAt = new Map(); // host -> [ts, ts](レーンごとの最終開始時刻。ペース配分用)
 function scheduleUpstream(host, task) {
-  const prev = chains.get(host) || Promise.resolve();
+  if (!laneChains.has(host)) {
+    laneChains.set(host, new Array(HOST_LANES).fill(null).map(() => Promise.resolve()));
+    laneLastStartAt.set(host, new Array(HOST_LANES).fill(0));
+  }
+  const lanes = laneChains.get(host);
+  const starts = laneLastStartAt.get(host);
+  // 一番長く空いている(=最終開始時刻が一番過去の)レーンに割り当てる簡易ラウンドロビン
+  let laneIdx = 0;
+  for (let i = 1; i < HOST_LANES; i++) if (starts[i] < starts[laneIdx]) laneIdx = i;
+  const prev = lanes[laneIdx];
   const p = prev.then(async () => {
-    const wait = (lastStartAt.get(host) || 0) + MIN_INTERVAL_MS - Date.now();
+    const wait = starts[laneIdx] + MIN_INTERVAL_MS - Date.now();
     if (wait > 0) await sleep(wait);
-    lastStartAt.set(host, Date.now());
+    starts[laneIdx] = Date.now();
     return task();
   });
-  // 【重要・2026-07-15】ここでchainsに繋ぐpがもし永遠に確定(resolve/reject)しなければ、
-  // 同じhostへの以降の全リクエスト(=全プレイヤー分)がこのpromiseの後ろに並んだまま
-  // 永久に開始すらされなくなる(1件のハングでサーバ全体のOverpass取得が詰まる)。
+  // 【重要・2026-07-15】ここでlanesに繋ぐpがもし永遠に確定(resolve/reject)しなければ、
+  // 同じレーンへの以降のリクエストがこのpromiseの後ろに並んだまま永久に開始すらされなく
+  // なる(1件のハングでそのレーンが詰まる。もう1レーンは生きているので全滅はしない)。
   // 「道路・建物の生成が途中で止まる」がサーバー再起動(=デプロイのたび)まで直らず
   // 再発していたのは、httpsGetOnce側に必ず確定させる保証が無かったことが一因と推測される
   // (下記httpsGetOnceのハードタイムアウト参照)。
-  chains.set(host, p.then(() => {}, () => {})); // 失敗してもキューは継続
+  lanes[laneIdx] = p.then(() => {}, () => {}); // 失敗してもレーンは継続
   return p;
 }
 
