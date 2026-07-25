@@ -1105,9 +1105,20 @@ async function fetchOSMTileBatch() {
         // 明記している通り、指数バックオフの推測値より短くても採用してよい。
         // 【2026-07-27】この分岐は上のifで既に429限定になったため、内側の重複した
         // status===429チェックは削除した。
-        fetchOverpassSlotWaitMs().then(ms => {
-          if (ms != null) osmGlobalCooldownUntil = Date.now() + ms;
-        });
+        // 【2026-07-27・レビュー指摘の穴を塞ぐ】ただしこのプローブは
+        // overpass-api.de/api/status をブラウザから直接叩くので、返ってくるのは
+        // 【ユーザー自身のIP】のスロット状況。一方、プロキシ経由で中継された429
+        // (X-Proxy-Health付き)は【RenderのIP】に対するレート制限なので、両者は別物。
+        // 混同すると「ユーザーのIPは空いている」→ ms≒0 でクールダウンを不当に短縮 →
+        // 即再試行 → またRenderのIPで429、という高速ループになりうる。
+        // 中継された429の場合はプローブをスキップし、上の指数バックオフ(10/20/30秒)に
+        // 委ねる(Render側の実際の待ち時間はクライアントからは観測できないため)。
+        const relayedByProxy = !!res.headers.get('X-Proxy-Health');
+        if (!relayedByProxy) {
+          fetchOverpassSlotWaitMs().then(ms => {
+            if (ms != null) osmGlobalCooldownUntil = Date.now() + ms;
+          });
+        }
       }
       // 【2026-07-21・修正5】429/502/504はタイル固有のデータ問題ではなくインフラ側の
       // 一時障害なので、下のcatchブロックでgaveUp判定(osmTileHardFailCount)に算入しない
