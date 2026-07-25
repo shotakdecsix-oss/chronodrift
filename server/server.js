@@ -186,6 +186,26 @@ const INJECT = `<script>
     directChains[chainKey] = myTurn.catch(() => {}); // 1件失敗してもチェーンは継続
     await myTurn;
   };
+  // 【2026-07-27・実測に基づく追加】直接モードのpaceThroughは「開始を1.1秒ずつ離す」だけで
+  // 同時本数を絞っていなかった。1本が4〜9秒(密集地は10〜30秒)かかるため、part8側の
+  // OSM_TILE_CONCURRENCY=3で常に3本が重なり、Overpassの「1IPあたり2スロット」を構造的に
+  // 超えて429を踏み続けていた(実測: 200が4.5秒/8.6秒で返る一方、3本目が429。
+  // かつ /api/status が rate limit=2, available now=0 を報告)。
+  // ホストごとに同時2本までのゲートを設ける。paceThrough(開始間隔)とは別の制約で、
+  // 「同時に走る本数」を上流の実態に合わせる。
+  const DIRECT_MAX_CONCURRENT = 2;
+  const directActive = {};   // ホスト(chainKey) -> 実行中の本数
+  const directWaiters = {};  // ホスト(chainKey) -> 解放待ちのresolve配列
+  const acquireSlot = async (key) => {
+    if ((directActive[key] || 0) < DIRECT_MAX_CONCURRENT) { directActive[key] = (directActive[key] || 0) + 1; return; }
+    await new Promise((r) => { (directWaiters[key] = directWaiters[key] || []).push(r); });
+    directActive[key] = (directActive[key] || 0) + 1;
+  };
+  const releaseSlot = (key) => {
+    directActive[key] = Math.max(0, (directActive[key] || 1) - 1);
+    const w = directWaiters[key];
+    if (w && w.length) w.shift()();
+  };
   const origFetch = window.fetch.bind(window);
   window.fetch = function(input, init) {
     let url = (typeof input === 'string') ? input : (input && input.url) || '';
@@ -216,6 +236,8 @@ const INJECT = `<script>
                 (mirrorBackoffUntil[cand] || 0) < (mirrorBackoffUntil[best] || 0) ? cand : best,
                 OVERPASS_DIRECT_MIRRORS[0]);
             }
+            await acquireSlot(mirror); // 上流の同時スロット数(2)を超えないようにする
+            try {
             await paceThrough(mirror);
             try {
               const res = await origFetch(mirror + url.slice(prefix.length), init);
@@ -227,6 +249,7 @@ const INJECT = `<script>
               mirrorBackoffUntil[mirror] = Date.now() + 30000;
               throw e;
             }
+            } finally { releaseSlot(mirror); } // 成功・失敗どちらでも必ず枠を返す
           }
           await paceThrough(prefix);
           return origFetch(url, init);
