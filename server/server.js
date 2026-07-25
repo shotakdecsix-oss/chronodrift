@@ -33,7 +33,12 @@ const MAX_ATTEMPTS = 3;
 // 1回のリクエストの持ち時間そのものを短くし、強制的に見切りをつけてレーンを早く手放す。
 // 平常時は従来どおり寛容な45秒(密集地の正常な低速応答を誤って打ち切らない)を維持し、
 // 詰まっている時だけ短縮する。
-const CONGESTION_BACKLOG = 6;      // このホスト宛ての待ち件数がこれを超えたら「詰まり」とみなす
+// 【2026-07-27・IMPL_PROMPT_20260727 Step A-1】Phase1(近傍クエリ分離)導入後、通常のエリア
+// 充填だけで約34本(3x3分離18+5x5外周ソロ16)のリクエストが発生するようになり、旧値6だと
+// 平常時から常時「詰まり」判定になってしまっていた(=正常な密集地の応答2〜10秒を
+// 5秒打ち切りで潰し、失敗→バックオフ→再試行が渋滞を自己維持する自己渋滞)。平常のエリア
+// 充填(30本超)を詰まりと誤認しない値まで引き上げる。
+const CONGESTION_BACKLOG = 20;      // このホスト宛ての待ち件数がこれを超えたら「詰まり」とみなす
 // 【2026-07-25(2)・ユーザー相談】当初は一律20秒にしていたが、3タイルまとめクエリは正常時
 // でも10〜30秒かかる実測があり、一律20秒だと詰まり中はまとめクエリのほとんどが正常応答でも
 // 間に合わず失敗→即リトライになり、Overpassへのリクエスト数がかえって増えて詰まりを悪化
@@ -41,7 +46,9 @@ const CONGESTION_BACKLOG = 6;      // このホスト宛ての待ち件数がこ
 // 3タイルまとめ(正常時10〜30秒)とでは許容できる打ち切りの短さが全く違うため、
 // クエリが自己申告しているOverpass側timeout([timeout:N]、1タイル=20/26秒・3タイルまとめ=
 // 30/38秒。buildOSMBatchQuery(part8.js)参照)を見て使い分ける。
-const CONGESTED_TIMEOUT_MS_SOLO = 5000;   // 詰まり中・1タイル単体クエリの持ち時間
+// 【2026-07-27・IMPL_PROMPT_20260727 Step A-1】5000だと密集地のソロクエリの正常応答
+// (2〜10秒)まで打ち切ってしまい、失敗→再試行が渋滞を悪化させていた。12秒まで緩和。
+const CONGESTED_TIMEOUT_MS_SOLO = 12000;  // 詰まり中・1タイル単体クエリの持ち時間
 const CONGESTED_TIMEOUT_MS_BATCH = 20000; // 詰まり中・複数タイルまとめクエリの持ち時間(従来値のまま)
 const SOLO_QUERY_TIMEOUT_SEC_MAX = 28; // これ以下ならクエリ自己申告timeoutから「1タイル単体」とみなす
 
@@ -326,7 +333,11 @@ sweepCacheDir(); // 起動直後にも一度実行(前回デプロイの残骸�
 // 優しい)のまま、バックログが積んだ時だけMAX_LANESまで一時的に広げ、解消すれば
 // 自然と使うレーン数も減る(レーン自体は使い回すため縮小処理は不要)。
 const BASE_LANES = 2;
-const MAX_LANES = 4; // Overpass1IPあたりの実測上限(2)にはやや踏み込むが、詰まり解消を優先
+// 【2026-07-27・IMPL_PROMPT_20260727 Step A-2】4本(旧値)はOverpass1IPあたりの実測上限(2)へ
+// 踏み込みすぎで、pending増加時に3〜4本目が429を誘発 → クライアント全体のグローバル
+// クールダウン(30〜120秒・全タイル凍結)を招くだけだった。上流の実態(2スロット)に合わせる。
+// BASE_LANES=MAX_LANES=2なので弾力拡張ロジック自体は残るが実質固定2本になる。
+const MAX_LANES = 2;
 const BACKLOG_PER_EXTRA_LANE = 4; // このペースでバックログ(待ち件数)が積むごとにレーンを1本追加
 const pendingByHost = new Map();   // host -> 現在scheduleUpstreamで処理待ち/処理中の件数(詰まり検出用)
 const laneChains = new Map();      // host -> [Promise, ...](レーンごとの直列チェーン。必要に応じて伸びる)
@@ -486,8 +497,13 @@ async function fetchUpstream(upstreamUrl, opts) {
         // 1タイル単体は正常時1〜2秒で返るので5秒まで攻めても実害が少ないが、3タイル
         // まとめは正常時でも10〜30秒かかるため、20秒(従来値)より短くすると正常応答まで
         // 打ち切ってリトライを増やし、かえって詰まりを悪化させる。
+        // 【2026-07-27・IMPL_PROMPT_20260727 Step A-1】詰まり中でも、プレイヤーが直接
+        // 待っているblocking/near優先度のリクエストは短縮タイムアウトの対象から除外する。
+        // 詰まり時に率先してこれらを打ち切ると、体感に直結するクエリほど失敗→再試行に
+        // 回されてしまい逆効果(詰まりで削るべきは体感に響きにくいfar=まとめクエリ側)。
         const congested = (pendingByHost.get(host) || 0) > CONGESTION_BACKLOG;
-        const timeoutMs = !congested ? UPSTREAM_TIMEOUT_MS
+        const exemptFromCongestion = opts.priority === 'blocking' || opts.priority === 'near';
+        const timeoutMs = (!congested || exemptFromCongestion) ? UPSTREAM_TIMEOUT_MS
           : (opts.isSoloTile ? CONGESTED_TIMEOUT_MS_SOLO : CONGESTED_TIMEOUT_MS_BATCH);
         return httpsRequestOnce(upstreamUrl, Object.assign({}, opts, { timeoutMs }));
       }, opts.priority); // 【Phase3】blocking/near優先度ヒントをレーン選択まで運ぶ
