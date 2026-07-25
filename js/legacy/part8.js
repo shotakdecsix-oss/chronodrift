@@ -187,6 +187,10 @@ const osmTileNextRetryAt = new Map();
 // 「プロキシも502」という観測は、この直接モードへのフォールバックが常態化していた
 // 時間帯を見ていた可能性があるが、配線ミスではなく設計通りの挙動。
 let osmGlobalCooldownUntil = 0;
+// 【2026-07-27】グローバルクールダウンの「世代」。429を受けて設定するたびに繰り上げ、
+// 成功で解除するたびにも繰り上げる。非同期の/api/statusプローブが、解除済みの凍結を
+// 後から復活させてしまう競合を防ぐためのガード(詳細は設定箇所のコメント参照)。
+let _osmCooldownGen = 0;
 let _osm429Streak = 0;
 // 【2026-07-21・Fable5相談】宣言timeoutを短縮した(下記buildOSMBatchQuery)ことで、
 // 通常はスロット占有時間(≒クールダウン)を縮められる。ただしOverpass側の実処理が
@@ -1139,8 +1143,14 @@ async function fetchOSMTileBatch(opts) {
         // 委ねる(Render側の実際の待ち時間はクライアントからは観測できないため)。
         const relayedByProxy = !!res.headers.get('X-Proxy-Health');
         if (!relayedByProxy) {
+          // 【2026-07-27・実測で判明した競合】このプローブは非同期なので、待っている間に
+          // 別のリクエストが成功して osmGlobalCooldownUntil = 0(クールダウン解除)を
+          // 実行していることがある。そこへ後から書き戻すと、解除済みの凍結が復活する
+          // (実機で「429連続=0 なのに 42秒 残り ★発動中」= 上限30秒を超える値として観測)。
+          // 世代番号で「自分が設定したクールダウンがまだ有効か」を確認してから上書きする。
+          const _gen = ++_osmCooldownGen;
           fetchOverpassSlotWaitMs().then(ms => {
-            if (ms != null) osmGlobalCooldownUntil = Date.now() + ms;
+            if (ms != null && _gen === _osmCooldownGen) osmGlobalCooldownUntil = Date.now() + ms;
           });
         }
       }
@@ -1192,6 +1202,7 @@ async function fetchOSMTileBatch(opts) {
     // 残り続ける状態が日常的に起きていた(実測ログの署名: `429連続=0 なのにクールダウン
     // 60秒残り ★発動中` + `実行中 0/3` + `キュー79件`)。完全応答を受け取れたら凍結も解く。
     osmGlobalCooldownUntil = 0;
+    _osmCooldownGen++; // 進行中の非同期プローブに「この凍結はもう無効」と伝える
     // 【2026-07-26・Phase2】ここから先はワールド状態(pendingBuildings/roadReadyTiles等)への
     // 反映。fetch開始後にマップジャンプがあった(世代が変わった)場合は、abort漏れ・レースで
     // ここまで来てしまった古い場所の結果ということなので、静かに捨てる(ワールドには一切

@@ -649,8 +649,7 @@ const CONN_FAIL_CODES = /ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|E
 // 区別できない。連続して規定回数失敗し、かつ一度も成功していない場合に限って到達不能と
 // 見なす。接続レベルのエラー(AggregateError・ECONNREFUSED等)は経路の問題が確定するので
 // 従来どおり即断してよい。
-const TIMEOUT_STREAK_FOR_UNREACHABLE = 3;
-const hostTimeoutStreak = new Map(); // host -> 連続タイムアウト回数(成功でリセット)
+const hostTimeoutStreak = new Map(); // host -> 連続タイムアウト回数(現在は診断目的のみ)
 function isUnreachableError(e, host) {
   if (!e) return false;
   const msg = String(e.message || '');
@@ -658,11 +657,15 @@ function isUnreachableError(e, host) {
   if (e.code && CONN_FAIL_CODES.test(String(e.code))) return true;
   if (Array.isArray(e.errors) && e.errors.some((x) => x && x.code && CONN_FAIL_CODES.test(String(x.code)))) return true;
   if (CONN_FAIL_CODES.test(msg)) return true;
-  if (/timeout/i.test(msg) && host && !hostEverSucceeded.has(host)) {
-    const n = (hostTimeoutStreak.get(host) || 0) + 1;
-    hostTimeoutStreak.set(host, n);
-    return n >= TIMEOUT_STREAK_FOR_UNREACHABLE;
-  }
+  // 【2026-07-27・2度目の修正で撤去】当初は「一度も成功していないホストのタイムアウト」を
+  // 到達不能と見なし、次に「3連続なら」と緩めたが、それでも誤爆が止まらなかった:
+  // 密集地の起動直後は最初の数本が正当にタイムアウトし、かつhostEverSucceededは空のまま
+  // (ソフトデッドラインの504は自前生成なので到達の証拠にならない)。結局3ストライクに
+  // 到達して直接モードへ落ちる(実機で 504→502→502→direct として観測)。
+  // タイムアウトは「上流が重い」と「経路が死んでいる」を原理的に区別できない。本物の遮断は
+  // 接続レベルのエラー(AggregateError・ECONNREFUSED等)として現れ、それは上で検出済み
+  // なので、タイムアウトを到達不能の材料にするのをやめる。誤って直接モード(縮退経路)へ
+  // 落とす代償の方が、遮断の検出が少し遅れる代償より大きい。
   return false;
 }
 function markHostCooldown(host, unreachable) {
@@ -783,14 +786,21 @@ async function fetchUpstreamMulti(upstreamUrls, opts) {
   const primary = upstreamUrls[0];
   const rest = upstreamUrls.slice(1).filter((u) => (hostCooldownUntil.get(new URL(u).host) || 0) < _now);
   upstreamUrls = [primary].concat(rest);
-  // 【2026-07-27】全ミラーが到達不能クールダウン中(=Renderのegressから誰にも届かない)なら、
-  // 45秒級のタイムアウトを積み上げる前に即座に「到達不能」を返す。クライアント側は
-  // X-Upstream-Unreachable を見てブラウザ直アクセスへ倒せるので、ここで粘る意味がない。
-  if (upstreamUrls.every((u) => (hostCooldownUntil.get(new URL(u).host) || 0) > _now)) {
-    const e = new Error('all upstream hosts unreachable (cooldown)');
-    e.unreachable = true;
-    throw e;
-  }
+  // 【2026-07-27・撤去】ここには「全ミラーがクールダウン中なら即座に到達不能を返す」早期
+  // リターンがあったが、2つの意味で誤りだった。
+  //  (1) hostCooldownUntil は markHostCooldown(host) が【タイムアウト・5xx・429の全部】で
+  //      立てる45秒の汎用クールダウンで、「到達不能」の証拠ではない。上のrestフィルタで
+  //      非プライマリは既に除外されるため、この every は実質「プライマリが冷えているか」の
+  //      1条件になり、overpass-api.deが1回タイムアウトしただけで e.unreachable が立ち、
+  //      X-Upstream-Unreachable 経由でクライアントが10分間DIRECTへ落ちていた
+  //      (実機の 504→502→502→direct と一致)。isUnreachableErrorからタイムアウトを
+  //      外してもこの経路は残る。
+  //  (2) そもそも「先頭(本命)ミラーはクールダウン中でも必ず先頭に残して試す」という直前の
+  //      修正と矛盾している。候補に残しながら試す前に打ち切っていた。
+  // 仮にフラグだけ外しても、45秒のクールダウン中は全リクエストが即502で失敗し、密集地では
+  // プライマリが常時冷えて「DIRECTには落ちないが何も取れない」停滞に変わるだけなので、
+  // 早期リターンごと撤去する。本物の遮断(接続レベルのエラー)は下のcatchで
+  // isUnreachableErrorが捉え、そちらは即座に短絡するので粘りすぎることもない。
   for (let idx = 0; idx < upstreamUrls.length; idx++) {
     if (opts && opts.isAbandoned && opts.isAbandoned()) throw new Error('abandoned (no waiters left)');
     const url = upstreamUrls[idx];

@@ -27,6 +27,13 @@ window.TP = (() => {
   // Overpassの2スロットを取り合う縮退状態になる。その状態で測ったレイテンシは
   // 「通常運転の性能」ではないので、経由を常に記録し、report()で警告を出す。
   const net = { PROXY: 0, DIRECT: 0, ok: 0, ng: 0, statuses: {} };
+  // 【2026-07-27・レビュー指摘の反映】R が改善しなかった時、原因が「1クエリが重い」のか
+  // 「発行枠(OSM_TILE_CONCURRENCY)が律速」なのかで打つ手が逆になる(前者=道路ジョブ分割、
+  // 後者=concurrencyの見直し)。瞬間値のsnapを目視するのでは判断が主観的になるので、
+  // tickのたびに稼働枠をサンプリングして占有率の分布として出す。
+  //   ・ずっと満杯(2/2に張り付く) -> 枠が律速。concurrencyを上げる話
+  //   ・空きが出る時間が相応にある -> 枠は余っている。クエリのコストかbackoffが律速
+  const occ = { samples: 0, byActive: {}, queueSum: 0, farSum: 0, coolSamples: 0 };
   (() => {
     const f = window.fetch;
     window.fetch = async function (input) {
@@ -55,6 +62,12 @@ window.TP = (() => {
 
   const tick = () => {
     const now = Date.now();
+    // 稼働枠のサンプリング(250msごと)
+    occ.samples++;
+    occ.byActive[osmTileActiveCount] = (occ.byActive[osmTileActiveCount] || 0) + 1;
+    occ.queueSum += osmTileQueue.length;
+    occ.farSum += osmTileActiveFarCount;
+    if (osmGlobalCooldownUntil > now) occ.coolSamples++;
     // (1) キュー投入時刻を退避(成功時にosmTileQueuedAtから削除されてしまうため)
     // 【2026-07-27・重大な計測バグの修正】以前は初回tickでosmTileQueuedAtの既存エントリを
     // 全部取り込んでいた。計測開始よりずっと前(ページ読み込み直後など)からキューに滞留して
@@ -121,6 +134,20 @@ window.TP = (() => {
           (net.PROXY === 0 ? ' 全リクエストがDIRECTです。この結果で性能判断をしないでください。'
                            : ' DIRECT混入率 ' + Math.round(net.DIRECT / tot * 100) + '%。'),
           'color:#c00;font-weight:bold');
+      }
+      // 稼働枠の占有率(枠が律速かクエリが律速かの切り分け)
+      if (occ.samples) {
+        const pct = (n) => Math.round((occ.byActive[n] || 0) / occ.samples * 100);
+        const parts = [];
+        for (let i = 0; i <= OSM_TILE_CONCURRENCY; i++) parts.push(`${i}本=${pct(i)}%`);
+        const full = pct(OSM_TILE_CONCURRENCY);
+        console.log(`--- 稼働枠の占有率(上限${OSM_TILE_CONCURRENCY}): ${parts.join('  ')}` +
+          `   平均キュー長=${Math.round(occ.queueSum / occ.samples)}  平均far=${(occ.farSum / occ.samples).toFixed(2)}` +
+          `  クールダウン中=${Math.round(occ.coolSamples / occ.samples * 100)}%`);
+        console.log(`    判定の目安: 満杯${full}% -> ` + (full >= 80
+          ? '★ 枠が律速。発行側(OSM_TILE_CONCURRENCY)を上げる検討へ'
+          : full >= 40 ? '枠とクエリコストが拮抗。両方の数字を見て判断'
+                       : '★ 枠は余っている。クエリのコストかbackoffが律速(道路ジョブ分割の検討へ)'));
       }
       console.log('--- R: 緑赤灰→緑緑赤(道路クエリ往復) ---');
       for (const t of [1, 2, 3, 4]) console.log(`  tier${t}: ${fmt(stats(collect(roadRec, t)))}`);
