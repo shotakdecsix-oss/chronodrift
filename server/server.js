@@ -705,7 +705,22 @@ async function handleApi(req, res, apiKey) {
     const n = (inflightWaiters.get(cacheKeySource) || 1) - 1;
     if (n <= 0) inflightWaiters.delete(cacheKeySource); else inflightWaiters.set(cacheKeySource, n);
   };
-  req.on('close', removeWaiter);
+  // 【2026-07-27・実測で判明した不具合】以前は req.on('close', removeWaiter) だった。
+  // これはNode 16以降では機能しない: IncomingMessageの'close'は「接続が切れた時」ではなく
+  // 「リクエストの読み取りが完了した時」に発火する仕様に変わっており、POSTでは
+  // readRequestBody(この関数の冒頭)が本文を読み切った時点で既に発火し req.destroyed=true に
+  // なっている。その後(ここ)でリスナを張っても二度と呼ばれない。
+  // Node v22で実測確認: 本文読み切り後は req.destroyed=true / readableEnded=true で、
+  // クライアントがabortしても req の'close'は発火しない。
+  // 影響は2つ:
+  //  (1) inflightWaitersが減らず単調増加する(メモリリーク)
+  //  (2) isAbandoned()が永久にfalseのまま = マップジャンプ・クライアントabort後の
+  //      「もう誰も待っていないリクエストを上流に投げない」最適化(2026-07-21実装)が
+  //      POST経路では一度も動いていなかった。無駄なOverpassスロット消費が出続けていた。
+  // 正しい検知先はres(ServerResponse)の'close'。実測: 応答を待っている間は未発火、
+  // クライアントがabortした瞬間(1005ms)に発火する。応答を返し終えた時にも発火するが、
+  // その時はもう待ち人数の意味がないので害はない。
+  res.on('close', removeWaiter);
 
   // 2) ミス → 上流 (同一キーの同時リクエストは1本に合流)
   let p = inflight.get(cacheKeySource);
