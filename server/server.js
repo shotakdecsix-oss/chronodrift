@@ -265,7 +265,14 @@ const INJECT = `<script>
   // =起動中、と断定でき、ステータスを問わず安全に判定できる。
   const isColdStartResponse = (res) => {
     if (res.headers.get('X-Proxy-Health')) return false; // 自前で組み立てた応答=プロセスは生きている
-    return /text\/html/i.test(res.headers.get('Content-Type') || '');
+    // 【注意・2026-07-27に実際に踏んだ罠】ここで正規表現リテラルを使ってはいけない。
+    // INJECTはテンプレートリテラルなので、ソースの \/ は配信時に / へ潰れ、
+    // /text\/html/i が /text/html/i として出力されて "Invalid regular expression flags" で
+    // INJECT全体がパースエラーになる(=URL書き換えも暖機も全部死に、全リクエストが
+    // 素のoverpass-api.deへ飛ぶ。実機で PROXY=0 / DIRECT=11 として観測された)。
+    // 素の文字列判定にしておけばエスケープの数え間違いが構造的に起こらない。
+    const ct = (res.headers.get('Content-Type') || '').toLowerCase();
+    return ct.indexOf('text/html') >= 0;
   };
   const origFetch = window.fetch.bind(window);
   window.fetch = function(input, init) {
