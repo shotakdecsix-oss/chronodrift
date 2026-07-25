@@ -854,6 +854,42 @@ async function handleStatic(req, res) {
 
 /* ---------- サーバ ---------- */
 const server = http.createServer((req, res) => {
+  // 【2026-07-27・診断用】Renderの「サーバー自身のIP」から見たOverpassのスロット状況と、
+  // このプロセス内のスケジューラ状態をまとめて返す読み取り専用エンドポイント。
+  // 実測で /api/overpass の失敗が全て "upstream timeout"(ソケット無通信タイムアウト)だと
+  // 判明したが、これはOverpassが「スロットが空くまで無言で接続を保持する」挙動と一致する。
+  // つまり原因は「RenderのIPに割り当てられるスロットが空いていない」可能性が高い。ただし
+  // それが (a) Renderの共有IPが他利用者と競合して恒常的に枯れている のか
+  //        (b) 自分のワーカー2本+見捨てられた古いリクエストが自分で2スロットを埋めている のか
+  // はクライアント側からは区別できない(ブラウザの/api/statusはユーザー自身のIPを見るため)。
+  // /api/statusはスロット消費対象外の軽量エンドポイントなので、ここから直接叩いてよい
+  // (scheduleUpstreamを通さない=レーンもペーシングも消費しない)。
+  if (req.url === '/api/upstream-status') {
+    (async () => {
+      const out = { deploy: { time: DEPLOY_TIME.toISOString(), commit: DEPLOY_COMMIT }, scheduler: {}, upstream: {} };
+      for (const [host, n] of pendingByHost) out.scheduler[host] = {
+        pending: n, // 待ち行列+実行中
+        running: hostRunning.get(host) || 0,
+        farRunning: hostFarRunning.get(host) || 0,
+        queue: (hostQueues.get(host) || []).reduce((a, e) => {
+          const k = ['blocking', 'near', 'far'][e.prio]; a[k] = (a[k] || 0) + 1; return a;
+        }, {}),
+      };
+      out.scheduler.inflightKeys = inflight.size;
+      out.scheduler.inflightWaiters = inflightWaiters.size;
+      out.scheduler.hostCooldown = [...hostCooldownUntil].map(([h, t]) => h + ':' + Math.max(0, Math.round((t - Date.now()) / 1000)) + 's');
+      for (const m of OVERPASS_MIRRORS) {
+        const h = new URL(m).host;
+        try {
+          const r = await httpsRequestOnce('https://' + h + '/api/status', { timeoutMs: 8000 });
+          out.upstream[h] = { status: r.status, body: r.body.toString('utf8').slice(0, 500) };
+        } catch (e) { out.upstream[h] = { error: (e && e.message) || String(e) }; }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(out, null, 2));
+    })().catch((e) => { try { res.writeHead(500); res.end(String(e && e.message)); } catch (_) {} });
+    return;
+  }
   const apiKey = Object.keys(APIS).find((k) => req.url === k || req.url.startsWith(k + '/') || req.url.startsWith(k + '?'));
   // 【2026-07-27】ここの500はhandleApi自身が例外で落ちた場合の最後の受け皿。以前はヘッダを
   // 一切付けていなかったため、INJECT側の判定(X-Proxy-Healthが無い5xx = プロキシ故障)で
