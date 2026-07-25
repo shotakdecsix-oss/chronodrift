@@ -164,9 +164,21 @@ const osmTileNextRetryAt = new Map();
 // バックオフだが、429はサーバー側のレート制限(IP単位)なので、他のタイルを叩き続けても
 // 429が続くだけで429ストームを自ら維持してしまう。タイル単位とは別に、全タイル共通の
 // 「今は一切叩かない」グローバル・クールダウンを設ける。
-// 【注】このfetchはブラウザからoverpass-api.deへ直接飛んでおり、サーバー経由のプロキシは
-// 介在しない(server/server.jsのpaceThrough/ミラー輪番はこの呼び出しには使われていない、
-// 別チャットの分析メモにあった「プロキシも502」という記述はこの経路には該当しない)。
+// 【注・2026-07-27に全面修正】この注釈は長らく「このfetchはoverpass-api.deへ直接飛び、
+// プロキシは介在しない」と書かれていたが、実態と逆で誤りだった(この記述を根拠に
+// 「server.jsのプロキシはデッドコード」と誤診したAIレビューが実際に発生している)。
+// 正しい実態:
+//   - part8.jsが書くURL 'https://overpass-api.de/api/interpreter' は【書き換え対象の目印】。
+//     server.jsがindex.htmlを配信する際に注入するINJECTスクリプト(server.js内のINJECT定数)
+//     がwindow.fetchをパッチし、このURLで始まるリクエストを同一オリジンの /api/overpass へ
+//     実行時に書き換える。よってソースをgrepしても /api/overpass は見つからない(仕組み上当然)。
+//   - 通常はプロキシ経由(server.jsの優先度付き待ち行列・1.1秒ペーシング・ディスクキャッシュ・
+//     inflight合流・ミラー輪番がすべて効く)。
+//   - プロキシが5xxを返した時だけproxyDownが立ち、そのプレフィックスは以後120秒
+//     (PROXY_RETRY_MS)ブラウザ→上流の直接モードにフォールバックする。直接モードにも
+//     ミラー別のpaceThrough(1.1秒直列)・mirrorBackoffUntilがあり、無制限の連投はしない。
+// 「プロキシも502」という観測は、この直接モードへのフォールバックが常態化していた
+// 時間帯を見ていた可能性があるが、配線ミスではなく設計通りの挙動。
 let osmGlobalCooldownUntil = 0;
 let _osm429Streak = 0;
 // 【2026-07-21・Fable5相談】宣言timeoutを短縮した(下記buildOSMBatchQuery)ことで、
@@ -467,8 +479,27 @@ function processOSMTileQueue() {
   // 【2026-07-21】429/502/504のグローバル・クールダウン中は新規リクエストを一切出さない
   // (osmGlobalCooldownUntil参照。fetchOSMTileBatch側で設定)。クールダウン明けはcheckOSMTiles
   // の周期呼び出し(最大0.5秒後)で自然に再開する。
-  if (Date.now() < osmGlobalCooldownUntil) return;
-  while (osmTileActiveCount < OSM_TILE_CONCURRENCY && osmTileQueue.length > 0) {
+  // 【2026-07-27・実測診断(修正4)】全停止は429ストームを止めるための措置だが、体感上
+  // いちばん痛いのは「足元(現在地)が最大30秒なにも出ない」こと。クールダウン中でも
+  // blockingタイル(現在地から64m以内=建物生成を直接ブロックしている分)がキューに居る
+  // 場合だけ、同時1本に限って通す。1本なら上流の同時上限(1IPあたり2スロット)に対して
+  // 余裕があり、429の再誘発リスクは小さい。
+  // 判定はfetchOSMTileBatch内の_blockingTiles(同じ64mパッド)と同じ規則をここで再計算する
+  // (あちらは関数ローカルのため参照できない)。実際にどのタイルが選ばれるかは
+  // fetchOSMTileBatch側のソート任せだが、_tileScoreがblockingを-100000で最優先にするため、
+  // この条件下で起動される1本は実質そのblockingタイルになる(全てbackoff中なら
+  // 下のhasEligible判定で何も起動せずに抜けるので無害)。
+  const _cooling = Date.now() < osmGlobalCooldownUntil;
+  if (_cooling) {
+    if (osmTileActiveCount > 0) return; // 免除は1本だけ
+    const _bp = 64;
+    const _bx0 = Math.floor((player.position.x - _bp) / OSM_TILE_M), _bx1 = Math.floor((player.position.x + _bp) / OSM_TILE_M);
+    const _bz0 = Math.floor((player.position.z - _bp) / OSM_TILE_M), _bz1 = Math.floor((player.position.z + _bp) / OSM_TILE_M);
+    const isBlocking = (t) => t.tx >= _bx0 && t.tx <= _bx1 && t.tz >= _bz0 && t.tz <= _bz1;
+    if (!osmTileQueue.some(isBlocking)) return;
+  }
+  const _concLimit = _cooling ? 1 : OSM_TILE_CONCURRENCY;
+  while (osmTileActiveCount < _concLimit && osmTileQueue.length > 0) {
     // 【2026-07-17・Fable5診断】backoff中(osmTileNextRetryAtが未来)のタイルしか
     // 残っていない場合はここでbreakする。以前は失敗時にワーカー自身が枠を握ったまま
     // 最大30秒sleepしていたが、それを撤去して即座に枠解放するようにしたため、
@@ -1046,11 +1077,23 @@ async function fetchOSMTileBatch() {
       // あちらは「このタイルを次いつ叩けるか」、こちらは「今は誰も何も叩かない」というブレーキ。
       // これが無いと、429を受けている間も他のタイルが3並列で叩き続けて429ストームを
       // 自ら維持してしまっていた(実機ログで確認)。
-      if (res.status === 429 || res.status === 502 || res.status === 504) {
+      // 【2026-07-27・実測診断(修正1)】以前は429/502/504の3つとも全タイル停止の対象に
+      // していた。しかし502/504は「このリクエスト(重いタイル・重いまとめクエリ)が上流や
+      // リバースプロキシでこけた」個別の事象であって、IP単位のレート制限ではない。全停止を
+      // かける根拠が無いうえ、_osm429Streakを429と共有していたため504が3回出るだけで120秒の
+      // 全タイル凍結に達していた。実測(2026-07-27、TP計測): 232秒で取得できたタイルが4枚・
+      // キュー79件・実行中0本・「429連続=0なのにクールダウン60秒残り」= ほぼ全時間が凍結。
+      // 502/504はタイル別backoff(osmTileNextRetryAt)とミラー別cooldown(INJECT内の
+      // mirrorBackoffUntil)で既に守られているので、そちらに任せる。グローバル停止は本来の
+      // 対象である429(IP単位のレート制限。他タイルを叩いても429が続くだけ)だけに限定する。
+      if (res.status === 429) {
         _osm429Streak++;
         const ra = parseInt(res.headers.get('Retry-After'), 10); // 429にはRetry-Afterが付くことがある
-        const backoff = Number.isFinite(ra) ? ra * 1000
-          : Math.min(120000, 30000 * Math.pow(2, _osm429Streak - 1)); // 30s→60s→120s上限
+        // 【2026-07-27・修正3】上限120秒は過剰(Overpass公式ドキュメントは「429なら15秒
+        // 待って再送」)。推測値の上限を30秒へ下げる。Retry-Afterは上流が明示している
+        // 正確な値なので優先するが、異常値で長時間凍結しないよう60秒で頭打ちにする。
+        const backoff = Number.isFinite(ra) ? Math.min(60000, ra * 1000)
+          : Math.min(30000, 10000 * Math.pow(2, _osm429Streak - 1)); // 10s→20s→30s上限
         osmGlobalCooldownUntil = Date.now() + backoff;
         // 【2026-07-21・Fable5相談】429の場合、上の指数バックオフは推測値でしかない。
         // /api/statusは自分のスロット消費対象外の軽量エンドポイントで、"Slot available
@@ -1059,12 +1102,12 @@ async function fetchOSMTileBatch() {
         // 推測バックオフのままなので無害)。overpass-api.deはDNSラウンドロビンで複数の
         // バックエンドを持ち、statusと直前のPOSTが別ホストに当たっている可能性があるため
         // 精度は完全ではない前提だが、公式ドキュメントが「429なら15秒待って再送」と
-        // 明記している通り、現行の指数バックオフ(最大120秒)より短くても採用してよい。
-        if (res.status === 429) {
-          fetchOverpassSlotWaitMs().then(ms => {
-            if (ms != null) osmGlobalCooldownUntil = Date.now() + ms;
-          });
-        }
+        // 明記している通り、指数バックオフの推測値より短くても採用してよい。
+        // 【2026-07-27】この分岐は上のifで既に429限定になったため、内側の重複した
+        // status===429チェックは削除した。
+        fetchOverpassSlotWaitMs().then(ms => {
+          if (ms != null) osmGlobalCooldownUntil = Date.now() + ms;
+        });
       }
       // 【2026-07-21・修正5】429/502/504はタイル固有のデータ問題ではなくインフラ側の
       // 一時障害なので、下のcatchブロックでgaveUp判定(osmTileHardFailCount)に算入しない
@@ -1107,6 +1150,13 @@ async function fetchOSMTileBatch() {
     // 行うべき。再訪時に活きる)。
     if (batch.length === 1) osmCachePut(cacheKeyFor(bboxes[0]), data); // 保存キーもbboxes[0](絶対座標)ベース+kindサフィックス
     _osm429Streak = 0; // 【2026-07-21】完全な応答を受け取れた=不調から回復したとみなし、次回のbackoffを短くリセット
+    // 【2026-07-27・実測診断(修正2)】以前はstreakだけリセットしてosmGlobalCooldownUntilを
+    // 放置していた。グローバル凍結は「新規fetchの開始」だけを止めるので、凍結中でも
+    // (a)凍結前に開始済みのin-flightリクエスト (b)IndexedDBキャッシュヒット は普通に成功する。
+    // つまり「上流は生きているという証拠が今まさに届いた」のに、全タイル停止が最大120秒
+    // 残り続ける状態が日常的に起きていた(実測ログの署名: `429連続=0 なのにクールダウン
+    // 60秒残り ★発動中` + `実行中 0/3` + `キュー79件`)。完全応答を受け取れたら凍結も解く。
+    osmGlobalCooldownUntil = 0;
     // 【2026-07-26・Phase2】ここから先はワールド状態(pendingBuildings/roadReadyTiles等)への
     // 反映。fetch開始後にマップジャンプがあった(世代が変わった)場合は、abort漏れ・レースで
     // ここまで来てしまった古い場所の結果ということなので、静かに捨てる(ワールドには一切
