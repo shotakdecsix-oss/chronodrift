@@ -52,6 +52,11 @@ const CONGESTION_BACKLOG = 20;      // このホスト宛ての待ち件数が�
 const CONGESTED_TIMEOUT_MS_SOLO = 12000;  // 詰まり中・1タイル単体クエリの持ち時間
 const CONGESTED_TIMEOUT_MS_BATCH = 20000; // 詰まり中・複数タイルまとめクエリの持ち時間(従来値のまま)
 const SOLO_QUERY_TIMEOUT_SEC_MAX = 28; // これ以下ならクエリ自己申告timeoutから「1タイル単体」とみなす
+// 【2026-07-27】1リクエストがクライアントへ応答を返すまでの自主的な上限。Renderのエッジが
+// 長すぎるリクエストを502にしてしまう前に、自分で504(+X-Proxy-Health)を返して切り上げる。
+// UPSTREAM_TIMEOUT_MS(45秒)×MAX_ATTEMPTS+ミラー巡回を全部足すと100秒を超え得るため必須。
+// 進行中の上流取得は打ち切らない(完了すればキャッシュに入り、次の再試行がHITになる)。
+const PROXY_SOFT_DEADLINE_MS = 60000;
 
 // ---------- デプロイ日時 ----------
 // Renderはデプロイのたびにこのプロセスを新しく起動し直すため、プロセス起動時刻が
@@ -224,7 +229,24 @@ const INJECT = `<script>
         const downSince = proxyDown[prefix];
         if (downSince && (Date.now() - downSince) < PROXY_RETRY_MS) return direct();
         return origFetch(local + url.slice(prefix.length), init).then(res => {
-          if (res.status >= 500) { proxyDown[prefix] = Date.now(); return direct(); }
+          // 【2026-07-27・実測診断で判明した主因】以前の条件は res.status >= 500 だった。
+          // しかしプロキシは上流(Overpass)のステータスをそのまま中継する設計なので、
+          // 密集地で日常的に起きる上流の504 Gateway Timeoutも「プロキシが壊れた」と誤判定し、
+          // そのプレフィックスを120秒(PROXY_RETRY_MS)まるごと直接モードに落としていた。
+          // 直接モードは各プレイヤー自身のIPでOverpassの2スロットを取り合うため、3並列で
+          // 走るクライアントは即座に429を踏み、グローバルクールダウン→復帰→また504→また
+          // 直接モード…という循環に入る。実測(2026-07-27)のコンソールがまさにこれ:
+          //   /api/overpass 502 → overpass-api.de直で429/504連発 → status: available now=0
+          //   → R(道路)tier2の中央値200秒、キュー101件。
+          // 「プロキシ自身が壊れている」のか「プロキシは健全で上流のエラーを中継しただけ」
+          // なのかを区別する必要がある。server.js側は自分が正常に応答を組み立てられた場合
+          // (キャッシュヒット・上流結果の中継・自前のデッドラインによる504)には必ず
+          // X-Proxy-Health: ok を付ける。このヘッダが有る限り、ステータスが5xxでも
+          // プロキシ自体は生きているのでproxyDownにはしない(タイル別backoffに任せる)。
+          // ヘッダが無い5xx = Renderのエッジが返した502や、プロキシの内部例外(handleApiの
+          // catch)なので、従来どおり直接モードへ退避する。
+          const proxyAlive = !!res.headers.get('X-Proxy-Health');
+          if (res.status >= 500 && !proxyAlive) { proxyDown[prefix] = Date.now(); return direct(); }
           proxyDown[prefix] = null; // プロキシ復帰確認
           return res;
         }, (e) => {
@@ -645,7 +667,7 @@ async function handleApi(req, res, apiKey) {
     if (ttlMs && Number.isFinite(cachedAtMs) && (Date.now() - cachedAtMs) > ttlMs) {
       throw new Error('cache expired');
     }
-    res.writeHead(200, { 'Content-Type': cached.contentType, 'X-Cache': 'HIT' });
+    res.writeHead(200, { 'Content-Type': cached.contentType, 'X-Cache': 'HIT', 'X-Proxy-Health': 'ok' });
     res.end(cached.body);
     log(`HIT  ${apiKey} ${(reqBody || rest).slice(0, 60)}...`);
     return;
@@ -713,10 +735,28 @@ async function handleApi(req, res, apiKey) {
   }
 
   try {
-    const out = await p;
-    res.writeHead(out.status, { 'Content-Type': out.contentType, 'X-Cache': 'MISS' });
+    // 【2026-07-27・Render 502の回避】上流のリトライ・ミラー巡回を全部足すと1リクエストが
+    // 100秒を超えることがあり、その場合Renderのエッジ側がクライアントへ502を返してしまう
+    // (=プロキシ自身は正常に動いているのに、クライアントからは「プロキシが落ちた」に見え、
+    // 上のINJECT側でproxyDown→120秒の直接モードに落ちる引き金になっていた)。
+    // Renderに殺される前に自分の判断で見切りをつけ、「上流が間に合わなかった」ことを
+    // 504として、かつX-Proxy-Health付き(=プロキシは健全)で返す。
+    // 進行中のp(inflight)は打ち切らずそのまま走らせ続ける: 完了すればディスクキャッシュに
+    // 入るので、クライアントの次の再試行がHITで即座に取れる(既存のinflight設計と同じ狙い)。
+    let timer;
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({
+        status: 504, contentType: 'application/json',
+        body: JSON.stringify({ error: 'proxy_deadline', message: 'upstream still running; retry to pick up the cached result' }),
+      }), PROXY_SOFT_DEADLINE_MS);
+    });
+    const out = await Promise.race([p, deadline]);
+    clearTimeout(timer);
+    res.writeHead(out.status, { 'Content-Type': out.contentType, 'X-Cache': 'MISS', 'X-Proxy-Health': 'ok' });
     res.end(out.body);
   } catch (e) {
+    // ここは「プロキシ内部で例外が起きた」= 本当にプロキシ側の問題。X-Proxy-Healthは付けない
+    // (クライアントに直接モードへの退避を許す唯一の経路)。
     log(`FAIL ${apiKey}: ${e.message}`);
     res.writeHead(502, { 'Content-Type': 'application/json', 'X-Cache': 'MISS' });
     res.end(JSON.stringify({ error: 'proxy_failed', message: e.message }));
