@@ -26,10 +26,11 @@ const CACHE_DIR = path.join(__dirname, 'cache');
 const MIN_INTERVAL_MS = 1100;                     // 上流レート制限 (1req/秒 + 余裕)
 const UPSTREAM_TIMEOUT_MS = 45000;
 const MAX_ATTEMPTS = 3;
-// 【2026-07-25・詰まり検出→強制打ち切り】レーンを弾力化(BASE_LANES→MAX_LANES)しても、
-// 全レーンが同時に「遅いが最終的には応答する」リクエストで埋まってしまえば、レーン数が
-// 増えただけで根本的には同じ「詰まり」が起きる(ユーザー指摘のとおり)。レーン数を
-// 際限なく増やす代わりに、このホスト宛ての待ち件数(詰まりの兆候)が閾値を超えている間は
+// 【2026-07-25・詰まり検出→強制打ち切り】(当時はレーン方式。現在は優先度付き待ち行列+
+// ワーカー2本。下のscheduleUpstream参照)並列度を上げても、全ワーカーが同時に「遅いが
+// 最終的には応答する」リクエストで埋まってしまえば根本的には同じ「詰まり」が起きる
+// (ユーザー指摘のとおり)。並列度を際限なく上げる代わりに、このホスト宛ての待ち件数
+// (詰まりの兆候)が閾値を超えている間は
 // 1回のリクエストの持ち時間そのものを短くし、強制的に見切りをつけてレーンを早く手放す。
 // 平常時は従来どおり寛容な45秒(密集地の正常な低速応答を誤って打ち切らない)を維持し、
 // 詰まっている時だけ短縮する。
@@ -318,99 +319,101 @@ async function sweepCacheDir() {
 setInterval(sweepCacheDir, CACHE_SWEEP_INTERVAL_MS);
 sweepCacheDir(); // 起動直後にも一度実行(前回デプロイの残骸が万一あっても早期に整理する)
 
-/* ---------- 上流レート制限 (ホスト別・弾力レーン方式) ---------- */
-// 【2026-07-25・ユーザー報告対応】以前はホスト単位で完全直列(1本のチェーン)だった。
-// これだと、1件のリクエストが上流(Overpass)側で数分〜十数分かかるケース(下のコメント
-// 参照: 実測881秒)に当たると、同じホストへの以降の全リクエスト(他タイル・他プレイヤー
-// 全員分)がその1件の裏で完全に止まる。実機報告(近傍タイルの道路生成が5分以上
-// fetchingのまま停滞し、しばらくすると溜まっていた分がいっぺんに解放される)は、
-// この「1本の直列キューが1件の長時間リクエストに握られる」構造と一致する。
-// 【2026-07-25(2)・ユーザー報告】固定2レーン化後も改善はしたが、Overpassが混雑している
-// 時間帯は2レーンとも長時間(1試行あたり最大60秒×リトライ)埋まり、後ろで待つリクエストが
-// 数分単位で足止めされる「詰まり」が引き続き確認された。ユーザー提案どおり、詰まり
-// (=このホスト宛ての処理待ち件数が多い状態)を検出したら一時的にレーン数を増やして
-// 強制的に処理を前へ進める弾力運用にする。平常時はBASE_LANES(2、従来どおりOverpassに
-// 優しい)のまま、バックログが積んだ時だけMAX_LANESまで一時的に広げ、解消すれば
-// 自然と使うレーン数も減る(レーン自体は使い回すため縮小処理は不要)。
-const BASE_LANES = 2;
-// 【2026-07-27・IMPL_PROMPT_20260727 Step A-2】4本(旧値)はOverpass1IPあたりの実測上限(2)へ
-// 踏み込みすぎで、pending増加時に3〜4本目が429を誘発 → クライアント全体のグローバル
-// クールダウン(30〜120秒・全タイル凍結)を招くだけだった。上流の実態(2スロット)に合わせる。
-// BASE_LANES=MAX_LANES=2なので弾力拡張ロジック自体は残るが実質固定2本になる。
-const MAX_LANES = 2;
-const BACKLOG_PER_EXTRA_LANE = 4; // このペースでバックログ(待ち件数)が積むごとにレーンを1本追加
-const pendingByHost = new Map();   // host -> 現在scheduleUpstreamで処理待ち/処理中の件数(詰まり検出用)
-const laneChains = new Map();      // host -> [Promise, ...](レーンごとの直列チェーン。必要に応じて伸びる)
-const laneLastStartAt = new Map(); // host -> [ts, ...](レーンごとの最終開始時刻。ペース配分用)
-// 【2026-07-27・IMPL_PROMPT_20260726 修正3】レーンごとの「未完了件数」(depth: 割り当て時+1、
-// 完了[成功/失敗どちらでも]時-1)。starts(最終開始時刻)だけでは「まだ実行中だが開始が古い
-// レーン」と「最近使い終わってすぐ空いたレーン」を区別できず、前者を「一番長く空いている」
-// と誤認して選んでしまうバグがあった(下のscheduleUpstream参照)。depthはその区別を可能にする。
-const laneDepth = new Map(); // host -> [depth, ...]
-function ensureLanes(host, n) {
-  let lanes = laneChains.get(host), starts = laneLastStartAt.get(host), depths = laneDepth.get(host);
-  if (!lanes) { lanes = []; laneChains.set(host, lanes); }
-  if (!starts) { starts = []; laneLastStartAt.set(host, starts); }
-  if (!depths) { depths = []; laneDepth.set(host, depths); }
-  while (lanes.length < n) { lanes.push(Promise.resolve()); starts.push(0); depths.push(0); } // 新設分は「即使える」扱い
-  return { lanes, starts, depths };
-}
-// 【2026-07-26・IMPL_PROMPT_20260724 Phase3】弾力レーン(2〜4本)のうち0番を「現在地
-// ブロッキング/近傍単体クエリ」優先の予約レーンにする。クライアント(part8.js)が
-// POSTボディ末尾に付ける優先度ヒント(&priority=blocking|near|far、handleApi参照)を
-// ここで見て、レーンを選ぶ範囲を変える。
-// - blocking/near(=現在地タイル、または近傍分離ジョブ・近傍1枚クエリ)は0番を含む
-//   全レーンから一番空いているものを選べる(0番が別のblocking/nearで埋まっていれば
-//   汎用レーンにあふれてよい。「他のレーンは従来通り全ジョブを扱う」という指示通り)。
-// - far(それ以外、複数タイルまとめクエリ含む)は0番を除いた1番以降からしか選べない。
-//   これにより0番は重いまとめクエリに握られることが構造的に無くなり、外周で重い
-//   クエリが走っている最中でも現在地タイルの取得が数秒以内に開始される。
-// - BASE_LANES=2なのでnは常に2以上。レーン数が2本に縮退していても「0番=予約・
-//   1番=汎用」の構図は保たれる。
-function scheduleUpstream(host, task, priority) {
-  const pending = (pendingByHost.get(host) || 0) + 1;
-  pendingByHost.set(host, pending);
-  // バックログが積んでいるほどレーンを増やす(詰まり検出→強制的に並列度を上げて進める)
-  const n = Math.min(MAX_LANES, BASE_LANES + Math.floor(Math.max(0, pending - BASE_LANES) / BACKLOG_PER_EXTRA_LANE));
-  const { lanes, starts, depths } = ensureLanes(host, n);
-  const useReserved = priority === 'blocking' || priority === 'near';
-  const startIdx = useReserved ? 0 : 1; // far優先度は0番(予約)を候補から外す
-  // 【2026-07-27・IMPL_PROMPT_20260726 修正3(症状Bの有力因)】以前は「最終開始時刻が最古」
-  // だけでレーンを選んでいたが、これは「まだ実行中だが開始が古いレーン」と「最近使い終わって
-  // すぐ空いたレーン」を区別できない。45秒級のfarクエリを実行中のレーンは開始時刻が
-  // 過去のまま更新されないため、「一番長く空いている」と誤認され続け、その裏でblocking/near
-  // が次々とこの実行中レーンの後ろにチェーンされてしまっていた(予約レーン0がすぐ後に
-  // 空いていても、開始時刻の新しさだけで「使用中」と判定されて避けられてしまうケースがあった)。
-  // 未完了件数(depth)が最小のレーンを最優先で選び、同数の場合だけ従来通り開始時刻最古を
-  // タイブレークに使う。depthが0のレーンは(チェーンの前段が確定済みなので)ほぼ即座に
-  // 開始できる、という保証が得られる。
-  let laneIdx = startIdx;
-  for (let i = startIdx + 1; i < n; i++) {
-    if (depths[i] < depths[laneIdx] || (depths[i] === depths[laneIdx] && starts[i] < starts[laneIdx])) laneIdx = i;
+/* ---------- 上流レート制限 (ホスト別・優先度付き待ち行列 + ワーカー2本) ---------- */
+// 【2026-07-27・レーン方式の廃止】ここは3世代にわたって「レーン(Promiseチェーン)」方式
+// だった: 完全直列1本 → 固定2レーン → 弾力レーン(2〜4本)+0番をblocking/near予約。
+// しかしレーン方式には構造的な欠陥があり、レーンの本数・選び方・役割分担をどう調整しても
+// 詰まりが再発し続けた(実機報告3回)。欠陥の本質は【チェーンに繋いだ時点で順番が固定され、
+// 後から来た高優先度リクエストが割り込めない】こと:
+//   - クライアント(part8.js)は_tileScoreで「現在地→近傍→外周」を厳密に並べているが、
+//     その順位はサーバーのチェーンに繋がれた瞬間に消える。
+//   - 予約レーン0も、blocking/nearが同じ`useReserved`扱いだったため、tier1(現在地)が
+//     tier2の8本の後ろにチェーンされうる = 予約の意味が無かった。
+//   - farは1番以降しか選べない一方クライアントはfarを2本同時に出せるため、レーン1がfarの
+//     重いまとめクエリ(10〜30秒)に占有され、near/blockingは実質レーン0の1本直列だった
+//     (これが「緑赤灰→緑緑赤」「緑緑赤→緑緑黄」が両方とも遅い最大要因)。
+// 方式そのものを「ホストごとの優先度付き待ち行列 + 固定ワーカー2本」に置き換える。
+// ワーカーは空くたびに待ち行列から blocking > near > far の順(同順位内は投入順)で取るので、
+// 後から来た現在地リクエストが待機中のfarを追い越せる = 割り込み問題が消える。
+// レーンの役割分担・予約・弾力拡張はすべて不要になり、far抑制はワーカー側の同時本数上限
+// (FAR_INFLIGHT_MAX)で表現できる。
+const UPSTREAM_WORKERS = 2;   // 上流への同時リクエスト数(overpass-api.deは1IPあたり実質2スロット)
+// farが両ワーカーを同時に握ると、後から来た現在地/近傍リクエストは「待ち行列の先頭」に
+// 居ても最大30秒以上開始できない(実行中のものは追い出せない)。far同時1本までに抑え、
+// 残り1本を必ずblocking/nearが即座に使えるようにする。待ち行列に何も無ければfarは
+// この1本を使い続けられるので、外周の先読みが恒久飢餓することはない。
+const FAR_INFLIGHT_MAX = 1;
+const PRIO_RANK = { blocking: 0, near: 1, far: 2 };
+const pendingByHost = new Map();   // host -> 待ち行列+実行中の合計件数(詰まり検出用。意味は従来と同じ)
+const hostQueues = new Map();      // host -> [{prio, seq, task, resolve, reject}]
+const hostRunning = new Map();     // host -> 実行中のワーカー数
+const hostFarRunning = new Map();  // host -> 実行中のうちfar優先度の件数
+const hostLastStartAt = new Map(); // host -> 最後に上流リクエストを開始した時刻(MIN_INTERVAL_MSのペース配分用)
+const hostPumpTimers = new Map();  // host -> ペース待ちのsetTimeoutハンドル(多重登録防止)
+let _upstreamSeq = 0;
+// 待ち行列から次に実行する1件を選ぶ。優先度が高い順、同優先度なら投入が早い順(FIFO)。
+// far同時上限に達している間はfarのエントリを候補から外す(その分は他が空くまで待つ)。
+function _pickQueueIndex(q, farRunning) {
+  let best = -1;
+  for (let i = 0; i < q.length; i++) {
+    const e = q[i];
+    if (e.prio === PRIO_RANK.far && farRunning >= FAR_INFLIGHT_MAX) continue;
+    if (best < 0 || e.prio < q[best].prio || (e.prio === q[best].prio && e.seq < q[best].seq)) best = i;
   }
-  depths[laneIdx]++;
-  const prev = lanes[laneIdx];
-  const p = prev.then(async () => {
-    const wait = starts[laneIdx] + MIN_INTERVAL_MS - Date.now();
-    if (wait > 0) await sleep(wait);
-    starts[laneIdx] = Date.now();
-    return task();
-  });
-  // 【重要・2026-07-15】ここでlanesに繋ぐpがもし永遠に確定(resolve/reject)しなければ、
-  // 同じレーンへの以降のリクエストがこのpromiseの後ろに並んだまま永久に開始すらされなく
-  // なる(1件のハングでそのレーンが詰まる。他のレーンは生きているので全滅はしない)。
-  // 「道路・建物の生成が途中で止まる」がサーバー再起動(=デプロイのたび)まで直らず
-  // 再発していたのは、httpsGetOnce側に必ず確定させる保証が無かったことが一因と推測される
-  // (下記httpsGetOnceのハードタイムアウト参照)。
-  lanes[laneIdx] = p.then(() => {}, () => {}); // 失敗してもレーンは継続
-  const releaseDepth = () => { depths[laneIdx] = Math.max(0, depths[laneIdx] - 1); };
-  p.then(releaseDepth, releaseDepth);
-  const releasePending = () => {
+  return best;
+}
+// 空きワーカーがある限り待ち行列から取り出して実行する。
+// 【重要】ここは「1件起動 → 自分を再帰呼び出し」で回す。再帰の2周目は直前に更新した
+// hostLastStartAtによってペース待ち(MIN_INTERVAL_MS)に引っかかり、タイマー登録して
+// 必ず抜けるため無限ループにはならない。
+function _pumpHost(host) {
+  const q = hostQueues.get(host);
+  if (!q || q.length === 0) return;
+  const running = hostRunning.get(host) || 0;
+  if (running >= UPSTREAM_WORKERS) return;
+  const farRunning = hostFarRunning.get(host) || 0;
+  const idx = _pickQueueIndex(q, farRunning);
+  // 残っているのがfarだけで同時上限に達している場合。farの完了時(下のfinish)か、
+  // 新たなblocking/nearの投入時(scheduleUpstream)に再評価されるので、ここでは何もしない。
+  if (idx < 0) return;
+  const wait = (hostLastStartAt.get(host) || 0) + MIN_INTERVAL_MS - Date.now();
+  if (wait > 0) {
+    if (!hostPumpTimers.has(host)) {
+      hostPumpTimers.set(host, setTimeout(() => { hostPumpTimers.delete(host); _pumpHost(host); }, wait));
+    }
+    return;
+  }
+  const e = q.splice(idx, 1)[0];
+  hostRunning.set(host, running + 1);
+  if (e.prio === PRIO_RANK.far) hostFarRunning.set(host, farRunning + 1);
+  hostLastStartAt.set(host, Date.now());
+  // 【重要・2026-07-15から継承】task()が永遠に確定しないとワーカーが1本永久に失われる。
+  // httpsRequestOnce側のハードタイムアウトで必ず確定することが前提(下記参照)。
+  // レーン方式と違い、詰まっても「そのワーカー1本」で被害が止まり、待ち行列の順序は
+  // 壊れない(チェーンに積み上がらないため)。
+  const finish = () => {
+    hostRunning.set(host, Math.max(0, (hostRunning.get(host) || 1) - 1));
+    if (e.prio === PRIO_RANK.far) hostFarRunning.set(host, Math.max(0, (hostFarRunning.get(host) || 1) - 1));
     const c = (pendingByHost.get(host) || 1) - 1;
     if (c <= 0) pendingByHost.delete(host); else pendingByHost.set(host, c);
+    _pumpHost(host); // 枠が空いたので次を拾う
   };
-  p.then(releasePending, releasePending);
-  return p;
+  Promise.resolve().then(e.task).then(
+    (v) => { finish(); e.resolve(v); },
+    (err) => { finish(); e.reject(err); }
+  );
+  _pumpHost(host); // もう1本空いていれば続けて起動(ペース配分は上のwaitで自然に効く)
+}
+// クライアント(part8.js)がPOSTボディ末尾に付ける優先度ヒント(&priority=blocking|near|far、
+// handleApi参照)をそのまま待ち行列の順位に使う。
+function scheduleUpstream(host, task, priority) {
+  pendingByHost.set(host, (pendingByHost.get(host) || 0) + 1);
+  let q = hostQueues.get(host);
+  if (!q) { q = []; hostQueues.set(host, q); }
+  return new Promise((resolve, reject) => {
+    q.push({ prio: PRIO_RANK[priority] != null ? PRIO_RANK[priority] : PRIO_RANK.far, seq: ++_upstreamSeq, task, resolve, reject });
+    _pumpHost(host);
+  });
 }
 
 /* ---------- 上流リクエスト (標準 https、GET/POST両対応、リトライ付き) ---------- */
@@ -503,8 +506,11 @@ async function fetchUpstream(upstreamUrl, opts) {
         // 回されてしまい逆効果(詰まりで削るべきは体感に響きにくいfar=まとめクエリ側)。
         const congested = (pendingByHost.get(host) || 0) > CONGESTION_BACKLOG;
         const exemptFromCongestion = opts.priority === 'blocking' || opts.priority === 'near';
-        const timeoutMs = (!congested || exemptFromCongestion) ? UPSTREAM_TIMEOUT_MS
+        let timeoutMs = (!congested || exemptFromCongestion) ? UPSTREAM_TIMEOUT_MS
           : (opts.isSoloTile ? CONGESTED_TIMEOUT_MS_SOLO : CONGESTED_TIMEOUT_MS_BATCH);
+        // 【2026-07-27】フォールバックミラー(fetchUpstreamMultiがidx>0で渡す)は上限を短く
+        // 被せる。実績が悪いホストに45秒を差し出さない。
+        if (opts.maxTimeoutMs) timeoutMs = Math.min(timeoutMs, opts.maxTimeoutMs);
         return httpsRequestOnce(upstreamUrl, Object.assign({}, opts, { timeoutMs }));
       }, opts.priority); // 【Phase3】blocking/near優先度ヒントをレーン選択まで運ぶ
       if (res.status === 200) return res;
@@ -536,17 +542,27 @@ async function fetchUpstream(upstreamUrl, opts) {
 // 判明し、本命(先頭)に辿り着く前にリクエスト全体が数分〜十数分単位で遅延する原因になって
 // いた。2番目以降(フォールバック)のミラーは1回だけ試して見切りをつけ、生きている
 // 可能性が高い先頭ミラーへ早く戻れるようにする。
+// 【2026-07-27・重大な罠の修正】以前はクールダウン中のホストを一律で候補から外していたが、
+// markHostCooldownは429/5xx/タイムアウト/詰まり時の短縮打ち切りの「全部」で発火し45秒続く。
+// つまり本家(overpass-api.de)が1回504を返しただけで、45秒間はこのフィルタが本家を候補から
+// 削除し、上のコメント自身が「毎回タイムアウトする」と明記しているkumi/private.coffeeが
+// 先頭(=maxAttempts:2)に昇格していた。1リクエストで最悪 60秒×2 + 60秒 ≒ 3分を溶かし、
+// その間クライアントは28秒でabort→失敗→バックオフ、という「本家が生きていても全滅」状態に
+// なる。先頭(本命)ミラーはクールダウン中でも必ず先頭に残し、フィルタは2番目以降にだけ
+// 適用する(=「本家がダメな時に代わりを試す」という本来の意図に戻す)。
 async function fetchUpstreamMulti(upstreamUrls, opts) {
   let lastRes = null, lastErr = null;
-  // クールダウン中のホストを外し、健全なミラーから先に試す(全滅時は従来どおり全部試す)
   const _now = Date.now();
-  const healthy = upstreamUrls.filter((u) => (hostCooldownUntil.get(new URL(u).host) || 0) < _now);
-  if (healthy.length) upstreamUrls = healthy;
+  const primary = upstreamUrls[0];
+  const rest = upstreamUrls.slice(1).filter((u) => (hostCooldownUntil.get(new URL(u).host) || 0) < _now);
+  upstreamUrls = [primary].concat(rest);
   for (let idx = 0; idx < upstreamUrls.length; idx++) {
     if (opts && opts.isAbandoned && opts.isAbandoned()) throw new Error('abandoned (no waiters left)');
     const url = upstreamUrls[idx];
     try {
-      const res = await fetchUpstream(url, Object.assign({}, opts, { maxAttempts: idx === 0 ? 2 : 1 }));
+      // フォールバックミラーは実績が悪い(毎回タイムアウト)ため、1回だけ・かつ短い持ち時間で
+      // 見切る。死んでいる場合の損失を45秒×3から10秒程度に抑え、本家の再試行へ早く戻す。
+      const res = await fetchUpstream(url, Object.assign({}, opts, { maxAttempts: idx === 0 ? 2 : 1, maxTimeoutMs: idx === 0 ? null : 10000 }));
       if (res.status === 200) return res;
       lastRes = res;
     } catch (e) {
