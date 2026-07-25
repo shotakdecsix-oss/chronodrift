@@ -245,8 +245,13 @@ const INJECT = `<script>
           // プロキシ自体は生きているのでproxyDownにはしない(タイル別backoffに任せる)。
           // ヘッダが無い5xx = Renderのエッジが返した502や、プロキシの内部例外(handleApiの
           // catch)なので、従来どおり直接モードへ退避する。
+          // 【2026-07-27追記】X-Upstream-Unreachable は「Renderのネットワーク経路から上流に
+          // そもそも到達できない」印(DNS不能・接続拒否等。handleApi参照)。この場合だけは
+          // ブラウザ直接アクセスの方が通る可能性があるため、直接モードへの退避を許す。
+          // 上流の429/504/タイムアウトはこの印が付かないので直接モードには落ちない。
           const proxyAlive = !!res.headers.get('X-Proxy-Health');
-          if (res.status >= 500 && !proxyAlive) { proxyDown[prefix] = Date.now(); return direct(); }
+          const unreachable = !!res.headers.get('X-Upstream-Unreachable');
+          if (res.status >= 500 && (!proxyAlive || unreachable)) { proxyDown[prefix] = Date.now(); return direct(); }
           proxyDown[prefix] = null; // プロキシ復帰確認
           return res;
         }, (e) => {
@@ -508,6 +513,7 @@ async function fetchUpstream(upstreamUrl, opts) {
   const maxAttempts = opts.maxAttempts || MAX_ATTEMPTS;
   const host = new URL(upstreamUrl).host;
   let lastErr = null;
+  let lastRes = null; // 【2026-07-27】実際に受け取った最後のHTTPレスポンス(429/5xx含む)
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (opts.isAbandoned && opts.isAbandoned()) throw new Error('abandoned (no waiters left)');
     try {
@@ -537,6 +543,17 @@ async function fetchUpstream(upstreamUrl, opts) {
       }, opts.priority); // 【Phase3】blocking/near優先度ヒントをレーン選択まで運ぶ
       if (res.status === 200) return res;
       lastErr = new Error('upstream HTTP ' + res.status);
+      // 【2026-07-27・実測診断(直接モードが残っていた真因)】以前はここで受け取った
+      // 429/5xxのレスポンス自体を捨てて、リトライを使い切ったあと throw lastErr していた。
+      // その結果 fetchUpstreamMulti の lastRes も null のままになり、handleApi の catch へ
+      // 落ちて【X-Proxy-Healthの付かない502】を返していた。つまり「Overpassが Render の IP を
+      // 429でレート制限した」という上流の事情が、クライアントには「プロキシが故障した」
+      // として届き、120秒の直接モードに落ちていた(実測: /api/overpass 502 → 直接POSTで
+      // 429連発 → 429連続=3)。直接モードに逃げてもレート制限がユーザー自身のIPに移るだけで
+      // 何も改善しないため、これは最も避けたい誤誘導。実際に受け取ったレスポンスを保持し、
+      // リトライを使い切ったら「上流のステータスそのまま」を返す(=handleApiが中継し、
+      // X-Proxy-Health付きで届くのでproxyDownは立たない)。
+      lastRes = res;
       if (res.status === 429 || res.status >= 500) {
         markHostCooldown(host);
         log(`  retry ${attempt}/${maxAttempts} (HTTP ${res.status}) ${host}`);
@@ -552,6 +569,11 @@ async function fetchUpstream(upstreamUrl, opts) {
       await sleep(1500 * attempt);
     }
   }
+  // 【2026-07-27】HTTPレスポンス自体は受け取れていた(429/5xx)なら、それを返す。
+  // throwにすると呼び出し元でステータスが失われ、handleApiが「プロキシ故障」を意味する
+  // ヘッダ無し502を返してしまい、クライアントを直接モードへ誤誘導する(上のコメント参照)。
+  // レスポンスを1度も受け取れなかった場合(接続不能・タイムアウト等)だけthrowする。
+  if (lastRes) return lastRes;
   throw lastErr;
 }
 
@@ -755,11 +777,23 @@ async function handleApi(req, res, apiKey) {
     res.writeHead(out.status, { 'Content-Type': out.contentType, 'X-Cache': 'MISS', 'X-Proxy-Health': 'ok' });
     res.end(out.body);
   } catch (e) {
-    // ここは「プロキシ内部で例外が起きた」= 本当にプロキシ側の問題。X-Proxy-Healthは付けない
-    // (クライアントに直接モードへの退避を許す唯一の経路)。
-    log(`FAIL ${apiKey}: ${e.message}`);
-    res.writeHead(502, { 'Content-Type': 'application/json', 'X-Cache': 'MISS' });
-    res.end(JSON.stringify({ error: 'proxy_failed', message: e.message }));
+    // ここに来るのは「上流からHTTPレスポンスを1度も受け取れなかった」場合だけ
+    // (429/5xxを受け取れていたなら上のfetchUpstreamがそれを返すので中継される)。
+    // 【2026-07-27】さらに2つを区別する:
+    //  (a) 接続そのものが張れない(DNS不能・接続拒否・切断)= Renderのネットワーク経路から
+            //      上流に到達できない。この場合はブラウザ直接アクセスの方が通る可能性があり、
+    //      直接モードへの退避に意味がある(このフォールバックが作られた本来の動機)。
+    //      → X-Upstream-Unreachable を付け、INJECT側で直接モードへ倒すことを許す。
+    //  (b) タイムアウト(上流が重い・混雑)= 密集地では日常的に起きる。直接モードに逃げても
+    //      ユーザー自身のIPで同じ重いクエリを投げるだけで改善せず、429を誘発するだけ。
+    //      → X-Proxy-Health のみ付け、直接モードには落とさない(タイル別backoffに任せる)。
+    const msg = String((e && e.message) || '');
+    const unreachable = /ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|ETIMEDOUT|socket hang up|getaddrinfo/i.test(msg);
+    log(`FAIL ${apiKey}: ${e.message}${unreachable ? ' [unreachable]' : ' [slow/timeout]'}`);
+    const headers = { 'Content-Type': 'application/json', 'X-Cache': 'MISS', 'X-Proxy-Health': 'ok' };
+    if (unreachable) headers['X-Upstream-Unreachable'] = '1';
+    res.writeHead(502, headers);
+    res.end(JSON.stringify({ error: 'proxy_failed', message: e.message, unreachable }));
   }
 }
 
