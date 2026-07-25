@@ -292,16 +292,28 @@ async function loadNearTerrain(centerX = 0, centerZ = 0) {
   // 新しい地域の高度基準を確定した直後は、松明ライトも新しい地表の高さへ再配置する
   // (固定y=4のままだと丘に埋まる/浮く)。nearElevが入ってgetGroundYが正しい高さを返せる状態で行う。
   if (isNewRegion) torchLights.forEach(l => { l.position.y = getGroundY(l.position.x, l.position.z) + 4; });
+  // 【2026-07-27・PC処理落ち対策】rebuildBuildingsInBounds/rebuildStationsInBoundsは
+  // フレーム分割されておらず(rebuildRoadsInBoundsはqueueRoadMesh経由で分割済みだが、
+  // 建物はrebuildBuildingHeightを範囲内の件数ぶん同期ループで回す)、NEAR更新のたびに
+  // 1回のコールバックで丸ごと処理される。地形tier1-3常時green化(NEAR_HALF_LAT/LON
+  // 0.036→0.06)でNEAR_W×NEAR_Dの面積が約2.78倍になったことで、この同期再スナップの
+  // 対象件数(≒面積に比例)も同じ倍率で増え、密集地でPCブラウザにも処理落ちが出る
+  // ようになった(ユーザー報告)。地形の当たり判定・生成ゲート用の範囲(NEAR_W/NEAR_D、
+  // chunkNearTerrainReady/terrainY)はtier3カバーのため広いままでよいが、Y方向の
+  // 見た目補正(浮き/埋まり解消)は本来プレイヤー至近だけで十分目立つ効果があるため、
+  // 再スナップの対象範囲だけ拡大前とほぼ同水準(半径3600m)に留める。
+  const RESNAP_HALF_M = 3600;
+  const rsHalfW = Math.min(NEAR_W / 2, RESNAP_HALF_M), rsHalfD = Math.min(NEAR_D / 2, RESNAP_HALF_M);
   // NEARグリッドが更新された(=この範囲の地形高さが変わった可能性がある)ので、
   // 範囲にかかる道路・川/公園/田畑ポリゴンをすぐに新しい地形へ合わせ直す(浮き/埋まりを即座に解消する)
-  rebuildRoadsInBounds(centerX - NEAR_W/2, centerX + NEAR_W/2, centerZ - NEAR_D/2, centerZ + NEAR_D/2);
-  rebuildAreaPolysInBounds(centerX - NEAR_W/2, centerX + NEAR_W/2, centerZ - NEAR_D/2, centerZ + NEAR_D/2);
+  rebuildRoadsInBounds(centerX - rsHalfW, centerX + rsHalfW, centerZ - rsHalfD, centerZ + rsHalfD);
+  rebuildAreaPolysInBounds(centerX - rsHalfW, centerX + rsHalfW, centerZ - rsHalfD, centerZ + rsHalfD);
   // 【重要】以前は建物だけここで追従させておらず、道路はNEAR更新のたびに正確な高さへ
   // 追従するのに建物は生成時の高さで固定されたままだったため、進むほど道路と建物の
   // 高さのズレが蓄積して浮く/埋まるが悪化していた。同じ範囲で建物もY方向に追従させる。
-  rebuildBuildingsInBounds(centerX - NEAR_W/2, centerX + NEAR_W/2, centerZ - NEAR_D/2, centerZ + NEAR_D/2);
+  rebuildBuildingsInBounds(centerX - rsHalfW, centerX + rsHalfW, centerZ - rsHalfD, centerZ + rsHalfD);
   // 駅舎も道路・建物と同じタイミングでY方向に追従させる(浮き対策)
-  rebuildStationsInBounds(centerX - NEAR_W/2, centerX + NEAR_W/2, centerZ - NEAR_D/2, centerZ + NEAR_D/2);
+  rebuildStationsInBounds(centerX - rsHalfW, centerX + rsHalfW, centerZ - rsHalfD, centerZ + rsHalfD);
   // 【2026-07-20】森の木(plantTree/rebuildForest)も同じ理由でNEAR更新のたびに追従させる
   // (詳細はloadWideTerrain側の同種コメント参照。マップジャンプ後に木が浮いて見える不具合対策)。
   if (typeof rebuildForest === 'function') rebuildForest();
