@@ -144,9 +144,14 @@ const INJECT = `<script>
   // → (1) 直接モードにも同じ1.1秒間隔のペース配分を追加、(2) proxyDownを恒久フラグではなく
   // タイムスタンプにし、一定時間後にプロキシへの復帰を自動で試みるようにする。
   const proxyDown = {};
+  // 【2026-07-27】プレフィックスごとの「次にプロキシへ復帰を試すまでの待ち時間」。
+  // 通常の不調は120秒(PROXY_RETRY_MS)、上流到達不能(X-Upstream-Unreachable)は
+  // 分単位で続く状態なのでUNREACHABLE_RETRY_MSを使う。
+  const proxyRetryMs = {};
   const lastDirectAt = {};
   const DIRECT_MIN_INTERVAL_MS = 1100; // サーバ側のMIN_INTERVAL_MSと揃える
   const PROXY_RETRY_MS = 120000; // 2分ごとにプロキシへの復帰を試す(一時的な不調で永久固定されないように)
+  const UNREACHABLE_RETRY_MS = 600000; // 上流到達不能時は10分。120秒ごとの再挑戦は毎回3並列×20〜30秒を空費するだけだった
   // 【重要・2026-07-16】direct()の「最終アクセス時刻を見てwait時間を計算→sleep→時刻更新」は
   // 単純な read-modify-write で、呼び出し側(part8.jsはOSM_TILE_CONCURRENCY=2で並行に
   // fetchOSMTileBatchを呼ぶ)が同時に2回direct()を呼ぶと、両方とも更新前の古いlastDirectAtを
@@ -227,7 +232,7 @@ const INJECT = `<script>
           return origFetch(url, init);
         };
         const downSince = proxyDown[prefix];
-        if (downSince && (Date.now() - downSince) < PROXY_RETRY_MS) return direct();
+        if (downSince && (Date.now() - downSince) < (proxyRetryMs[prefix] || PROXY_RETRY_MS)) return direct();
         return origFetch(local + url.slice(prefix.length), init).then(res => {
           // 【2026-07-27・実測診断で判明した主因】以前の条件は res.status >= 500 だった。
           // しかしプロキシは上流(Overpass)のステータスをそのまま中継する設計なので、
@@ -251,7 +256,14 @@ const INJECT = `<script>
           // 上流の429/504/タイムアウトはこの印が付かないので直接モードには落ちない。
           const proxyAlive = !!res.headers.get('X-Proxy-Health');
           const unreachable = !!res.headers.get('X-Upstream-Unreachable');
-          if (res.status >= 500 && (!proxyAlive || unreachable)) { proxyDown[prefix] = Date.now(); return direct(); }
+          if (res.status >= 500 && (!proxyAlive || unreachable)) {
+            // 【2026-07-27】到達不能(サーバーのegressから上流へ届かない)は分単位で続く状態
+            // なので、120秒ごとに再挑戦すると そのたび3並列×20〜30秒のタイムアウトを空費する。
+            // この場合だけ復帰試行の間隔を長くする(proxyRetryMsに個別の待ち時間を記録)。
+            proxyDown[prefix] = Date.now();
+            proxyRetryMs[prefix] = unreachable ? UNREACHABLE_RETRY_MS : PROXY_RETRY_MS;
+            return direct();
+          }
           proxyDown[prefix] = null; // プロキシ復帰確認
           return res;
         }, (e) => {
@@ -270,6 +282,7 @@ const INJECT = `<script>
           // の既存リトライ・バックオフ)にそのまま失敗として返す。
           if (e && e.name === 'AbortError') throw e;
           proxyDown[prefix] = Date.now();
+          proxyRetryMs[prefix] = PROXY_RETRY_MS; // プロキシへのfetch自体が失敗した場合は従来どおり2分で再挑戦
           return direct();
         });
       }
@@ -495,7 +508,37 @@ function httpsRequestOnce(urlStr, opts) {
 // 一律に遅延→クライアント側がプロキシ不調と判断して直接モードへ逃げていた(実機502)。
 const hostCooldownUntil = new Map(); // host -> このtimestampまでスキップ
 const HOST_COOLDOWN_MS = 45000;
-function markHostCooldown(host) { hostCooldownUntil.set(host, Date.now() + HOST_COOLDOWN_MS); }
+// 【2026-07-27・実測で判明】/api/upstream-status(スロットを消費しない軽量GET)が
+// Renderから3ミラーとも失敗した:
+//   overpass-api.de        -> AggregateError(全アドレスへの接続試行が失敗)
+//   overpass.kumi.systems  -> upstream timeout(8秒間1バイトも来ない)
+//   overpass.private.coffee-> upstream timeout
+// 軽量GETすら通らないので、これは「スロット枯渇」でも「自己ブロック」でもなく
+// 【RenderのegressからOverpassへ到達できない】ネットワークレベルの遮断。
+// この状態でプロキシに投げ続けると1タイルあたり45秒×リトライを空費するだけなので、
+// (1) 到達不能を素早く確定させ、(2) クライアントへ X-Upstream-Unreachable を返して
+// ブラウザ直アクセス(ユーザー自身のIP。実測でOverpassに到達できている)へ倒す。
+const HOST_UNREACHABLE_COOLDOWN_MS = 300000; // 接続レベルの失敗は5分スキップ(45秒だと再挑戦の空費が大きい)
+const hostEverSucceeded = new Set(); // 一度でも応答を受け取れたホスト
+const CONN_FAIL_CODES = /ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ECONNABORTED|EPIPE|EPROTO|ERR_TLS/;
+// 「そのホストへ到達できていない」判定。接続レベルのエラーコード、happy-eyeballsで全アドレス
+// 失敗した時のAggregateError(messageが空になることが多い)、および「このプロセスで一度も
+// 応答を受け取れていないホストのタイムアウト」を到達不能として扱う。後者を含めるのは、
+// ファイアウォールの黙殺(silent drop)は無通信タイムアウトとして現れるため。
+// 逆に一度でも成功しているホストのタイムアウトは「上流が重いだけ」なので到達不能にしない。
+function isUnreachableError(e, host) {
+  if (!e) return false;
+  const msg = String(e.message || '');
+  if (e.name === 'AggregateError') return true;
+  if (e.code && CONN_FAIL_CODES.test(String(e.code))) return true;
+  if (Array.isArray(e.errors) && e.errors.some((x) => x && x.code && CONN_FAIL_CODES.test(String(x.code)))) return true;
+  if (CONN_FAIL_CODES.test(msg)) return true;
+  if (/timeout/i.test(msg) && host && !hostEverSucceeded.has(host)) return true;
+  return false;
+}
+function markHostCooldown(host, unreachable) {
+  hostCooldownUntil.set(host, Date.now() + (unreachable ? HOST_UNREACHABLE_COOLDOWN_MS : HOST_COOLDOWN_MS));
+}
 
 // 【2026-07-21・マップジャンプ後の詰まり対策】scheduleUpstreamはホストごとに完全直列
 // (次のリクエストは前の完了を待ってから開始)なので、密集地(東京等)で長時間過ごして
@@ -541,6 +584,7 @@ async function fetchUpstream(upstreamUrl, opts) {
         if (opts.maxTimeoutMs) timeoutMs = Math.min(timeoutMs, opts.maxTimeoutMs);
         return httpsRequestOnce(upstreamUrl, Object.assign({}, opts, { timeoutMs }));
       }, opts.priority); // 【Phase3】blocking/near優先度ヒントをレーン選択まで運ぶ
+      hostEverSucceeded.add(host); // HTTPレスポンスが返った=このホストへは到達できている
       if (res.status === 200) return res;
       lastErr = new Error('upstream HTTP ' + res.status);
       // 【2026-07-27・実測診断(直接モードが残っていた真因)】以前はここで受け取った
@@ -564,6 +608,15 @@ async function fetchUpstream(upstreamUrl, opts) {
     } catch (e) {
       lastErr = e;
       if (/abandoned/.test(e.message)) throw e; // 諦めた場合はリトライせず即座に抜ける
+      // 【2026-07-27】接続レベルの失敗(=そのホストへ到達できない)はリトライしても
+      // 同じ結果にしかならず、1回あたり45秒級を空費してタイル取得の予算を食い潰す。
+      // 長めのクールダウンを立てて即座に抜け、到達不能フラグを付けて呼び出し元へ返す。
+      if (isUnreachableError(e, host)) {
+        markHostCooldown(host, true);
+        log(`  unreachable ${host} (${e.name}${e.message ? ': ' + e.message : ''}) -> skip for ${HOST_UNREACHABLE_COOLDOWN_MS / 1000}s`);
+        e.unreachable = true;
+        throw e;
+      }
       markHostCooldown(host);
       log(`  retry ${attempt}/${maxAttempts} (${e.message}) ${host}`);
       await sleep(1500 * attempt);
@@ -600,6 +653,14 @@ async function fetchUpstreamMulti(upstreamUrls, opts) {
   const primary = upstreamUrls[0];
   const rest = upstreamUrls.slice(1).filter((u) => (hostCooldownUntil.get(new URL(u).host) || 0) < _now);
   upstreamUrls = [primary].concat(rest);
+  // 【2026-07-27】全ミラーが到達不能クールダウン中(=Renderのegressから誰にも届かない)なら、
+  // 45秒級のタイムアウトを積み上げる前に即座に「到達不能」を返す。クライアント側は
+  // X-Upstream-Unreachable を見てブラウザ直アクセスへ倒せるので、ここで粘る意味がない。
+  if (upstreamUrls.every((u) => (hostCooldownUntil.get(new URL(u).host) || 0) > _now)) {
+    const e = new Error('all upstream hosts unreachable (cooldown)');
+    e.unreachable = true;
+    throw e;
+  }
   for (let idx = 0; idx < upstreamUrls.length; idx++) {
     if (opts && opts.isAbandoned && opts.isAbandoned()) throw new Error('abandoned (no waiters left)');
     const url = upstreamUrls[idx];
@@ -802,8 +863,10 @@ async function handleApi(req, res, apiKey) {
     //  (b) タイムアウト(上流が重い・混雑)= 密集地では日常的に起きる。直接モードに逃げても
     //      ユーザー自身のIPで同じ重いクエリを投げるだけで改善せず、429を誘発するだけ。
     //      → X-Proxy-Health のみ付け、直接モードには落とさない(タイル別backoffに任せる)。
-    const msg = String((e && e.message) || '');
-    const unreachable = /ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|ETIMEDOUT|socket hang up|getaddrinfo/i.test(msg);
+    // 【2026-07-27】判定は isUnreachableError に一元化(AggregateError・e.code・e.errors・
+    // 「一度も成功していないホストのタイムアウト」まで拾う。以前の単純なmessage正規表現は
+    // 実測のAggregateError(messageが空)を取りこぼしていた)。
+    const unreachable = !!(e && e.unreachable) || isUnreachableError(e, null);
     log(`FAIL ${apiKey}: ${e.message}${unreachable ? ' [unreachable]' : ' [slow/timeout]'}`);
     const headers = { 'Content-Type': 'application/json', 'X-Cache': 'MISS', 'X-Proxy-Health': 'ok' };
     if (unreachable) headers['X-Upstream-Unreachable'] = '1';
