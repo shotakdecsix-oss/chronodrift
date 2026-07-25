@@ -22,6 +22,24 @@ window.TP = (() => {
   const roadAt = new Map();    // posKey   -> roadReady観測時刻(Bの起点)
   const t0 = Date.now();
   let timer = null;
+  // 【2026-07-27・レビュー指摘の反映】DIRECT(プロキシ障害時のフォールバック)では
+  // ディスクキャッシュ・inflight束ね・優先度レーンが全て無効になり、各プレイヤー自身のIPで
+  // Overpassの2スロットを取り合う縮退状態になる。その状態で測ったレイテンシは
+  // 「通常運転の性能」ではないので、経由を常に記録し、report()で警告を出す。
+  const net = { PROXY: 0, DIRECT: 0, ok: 0, ng: 0, statuses: {} };
+  (() => {
+    const f = window.fetch;
+    window.fetch = async function (input) {
+      const req = typeof input === 'string' ? input : (input && input.url) || '';
+      const r = await f.apply(this, arguments);
+      if (/interpreter|api\/overpass/.test(req)) {
+        net[/onrender|\/api\/overpass/.test(r.url) ? 'PROXY' : 'DIRECT']++;
+        net.statuses[r.status] = (net.statuses[r.status] || 0) + 1;
+        if (r.status === 200) net.ok++; else net.ng++;
+      }
+      return r;
+    };
+  })();
 
   const tierOf = (posKey) => {
     const [tx, tz] = posKey.split(',').map(Number);
@@ -38,8 +56,14 @@ window.TP = (() => {
   const tick = () => {
     const now = Date.now();
     // (1) キュー投入時刻を退避(成功時にosmTileQueuedAtから削除されてしまうため)
+    // 【2026-07-27・重大な計測バグの修正】以前は初回tickでosmTileQueuedAtの既存エントリを
+    // 全部取り込んでいた。計測開始よりずっと前(ページ読み込み直後など)からキューに滞留して
+    // いたタイルの待ち時間がそのままRに混入し、「クエリ往復時間」として177秒などの値が出て
+    // いた(実測で誤読の原因になった)。計測開始後にキュー投入されたものだけを対象にする。
     for (const [sk, t] of osmTileQueuedAt) {
-      if (!qAt.has(sk)) qAt.set(sk, { t, tier: tierOf(posOf(sk)) });
+      if (qAt.has(sk)) continue;
+      if (t < t0) { qAt.set(sk, null); continue; } // 計測開始前からの滞留分は集計対象外として印だけ付ける
+      qAt.set(sk, { t, tier: tierOf(posOf(sk)) });
     }
     // (2) 道路確定を検出
     for (const k of roadReadyTiles) {
@@ -88,6 +112,16 @@ window.TP = (() => {
     },
     report() {
       console.log(`%c[TP] 計測時間 ${((Date.now() - t0) / 1000).toFixed(0)}秒`, 'font-weight:bold');
+      const tot = net.PROXY + net.DIRECT;
+      console.log(`--- 経由: PROXY=${net.PROXY}  DIRECT=${net.DIRECT}  (成功${net.ok}/失敗${net.ng})`, net.statuses);
+      if (net.DIRECT > 0) {
+        console.log('%c⚠ この計測は縮退モード(DIRECT)を含みます。DIRECTではサーバーのディスク' +
+          'キャッシュ・inflight束ね・優先度レーンが全て無効で、ユーザー自身のIPでOverpassの' +
+          '2スロットを奪い合うため、レイテンシは通常運転の値ではありません。' +
+          (net.PROXY === 0 ? ' 全リクエストがDIRECTです。この結果で性能判断をしないでください。'
+                           : ' DIRECT混入率 ' + Math.round(net.DIRECT / tot * 100) + '%。'),
+          'color:#c00;font-weight:bold');
+      }
       console.log('--- R: 緑赤灰→緑緑赤(道路クエリ往復) ---');
       for (const t of [1, 2, 3, 4]) console.log(`  tier${t}: ${fmt(stats(collect(roadRec, t)))}`);
       console.log(`  全体  : ${fmt(stats(collect(roadRec, null)))}`);

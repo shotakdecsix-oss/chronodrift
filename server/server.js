@@ -206,6 +206,67 @@ const INJECT = `<script>
     const w = directWaiters[key];
     if (w && w.length) w.shift()();
   };
+  // ===== コールドスタート(Render無料プランのスピンダウン)対策 =====
+  // 【2026-07-27・実測で判明した最重要の機序】15分無アクセスでインスタンスが停止し、復帰に
+  // 実測39秒かかる。その間 /api/* へのリクエストにはRenderのエッジが "Application loading" の
+  // HTML(5xx・X-Proxy-Healthヘッダ無し)を返す。これは下の proxyDown 判定
+  // 「X-Proxy-Health の無い5xx = プロキシ故障」にそのまま合致するため、
+  //   ゲーム起動 → 最初の1本が loading HTML → proxyDown ラッチ → セッション丸ごとDIRECT
+  // という流れで【毎セッションの冒頭が構造的に縮退経路から始まっていた】。
+  // 直近の計測が全リクエストDIRECTだったのもこれで説明が付く。
+  // 対策は2段構え:
+  //   (1) 暖機: 上流に触らない /api/ping が200を返すまで、プロキシ経路のfetchを保留する。
+  //       起動待ちの間はタイル取得を一切走らせないので、loading HTMLを掴むことがそもそも無い。
+  //   (2) 署名分離: それでも掴んでしまった場合に備え、「5xx かつ X-Proxy-Health 無し かつ
+  //       Content-Typeがtext/html」= 起動中 と見なし、proxyDownを立てずにリトライする。
+  //       単発リトライでは同じloading窓に再着弾するだけなので、間隔を空けて粘る。
+  const SERVER_WAKE_TIMEOUT_MS = 90000; // 起動待ちの上限(実測39秒に十分な余裕)
+  const SERVER_WAKE_POLL_MS = 3000;
+  let _wakeBanner = null;
+  const showWakeBanner = () => {
+    if (_wakeBanner || !document.body) return;
+    _wakeBanner = document.createElement('div');
+    _wakeBanner.textContent = 'サーバー起動中… (最大1分ほどかかります)';
+    _wakeBanner.style.cssText = 'position:fixed;left:50%;top:12px;transform:translateX(-50%);z-index:99999;' +
+      'background:rgba(20,20,28,.88);color:#fff;font:13px/1.6 sans-serif;padding:8px 16px;border-radius:8px;' +
+      'pointer-events:none;box-shadow:0 2px 12px rgba(0,0,0,.4)';
+    document.body.appendChild(_wakeBanner);
+  };
+  const hideWakeBanner = () => { if (_wakeBanner) { _wakeBanner.remove(); _wakeBanner = null; } };
+  // スクリプト読み込み直後に開始する(最初のタイル取得より必ず前になる)
+  const serverReady = (async () => {
+    const started = Date.now();
+    let shownBanner = false;
+    while (Date.now() - started < SERVER_WAKE_TIMEOUT_MS) {
+      try {
+        const r = await fetch('/api/ping', { cache: 'no-store' });
+        // 【重要】r.ok(=2xx)だけで判定してはいけない。Renderのエッジが返す
+        // "Application loading" ページは200で返る可能性があり、その場合ここが即trueになって
+        // 暖機が丸ごと無効化される(そして下のisColdStartResponseもstatus<500で素通りするため、
+        // loading HTMLが正常なOverpass応答としてpart8へ渡り、JSON.parse例外=「原因不明の
+        // タイル取得失敗」に化けて診断が難しくなる)。
+        // /api/pingは自分で組み立てた応答なので必ず X-Proxy-Health を持つ。これを見れば
+        // ステータスが200でも503でも「自分の応答か、エッジが割り込んだか」が確定する
+        // (isColdStartResponseと判定軸が揃う)。
+        if (r.ok && r.headers.get('X-Proxy-Health')) { hideWakeBanner(); return true; }
+      } catch (_) { /* 起動中は接続エラーもあり得る */ }
+      if (!shownBanner && Date.now() - started > 2500) { shownBanner = true; showWakeBanner(); }
+      await new Promise((r) => setTimeout(r, SERVER_WAKE_POLL_MS));
+    }
+    hideWakeBanner();
+    return false; // 上限まで待っても起きない=本当に落ちている。以降は通常判定に委ねる
+  })();
+  // 起動中(loading HTML)かどうかの署名判定。
+  // 【2026-07-27】ステータスの下限は設けない。Renderの "Application loading" が200で返る
+  // 可能性があり、status>=500 を条件にすると素通りしてしまうため。
+  // /api/* に対する自前の応答は【全経路で】X-Proxy-Health を付けている(キャッシュHIT・
+  // 上流結果の中継・ソフトデッドライン504・handleApiのcatch 502・トップレベルの500)。
+  // よって「X-Proxy-Healthが無く、かつHTMLが返ってきた」= Renderのエッジが割り込んだ
+  // =起動中、と断定でき、ステータスを問わず安全に判定できる。
+  const isColdStartResponse = (res) => {
+    if (res.headers.get('X-Proxy-Health')) return false; // 自前で組み立てた応答=プロセスは生きている
+    return /text\/html/i.test(res.headers.get('Content-Type') || '');
+  };
   const origFetch = window.fetch.bind(window);
   window.fetch = function(input, init) {
     let url = (typeof input === 'string') ? input : (input && input.url) || '';
@@ -256,7 +317,28 @@ const INJECT = `<script>
         };
         const downSince = proxyDown[prefix];
         if (downSince && (Date.now() - downSince) < (proxyRetryMs[prefix] || PROXY_RETRY_MS)) return direct();
+        // 【2026-07-27・(1)暖機】プロキシ経路へ出す前にサーバーの起動完了を待つ。
+        // 起動中(スピンダウンからの復帰、実測39秒)にリクエストを投げると
+        // Renderのエッジが返すloading HTMLを掴み、proxyDownがラッチしてしまうため。
+        // serverReadyはスクリプト読み込み直後に解決を開始しており、暖機済みなら即座に通る。
+        return serverReady.then(() => proxied(0));
+        // 【2026-07-27・(2)署名分離】loading HTMLを掴んでしまった場合は「故障」ではなく
+        // 「起動中」なので、proxyDownを立てずに間隔を空けて再試行する(単発リトライだと
+        // 同じ39秒のloading窓に再着弾して2回目も同じHTMLを掴むだけ)。
+        function proxied(attempt) {
         return origFetch(local + url.slice(prefix.length), init).then(res => {
+          if (isColdStartResponse(res)) {
+            if (attempt < 12) { // 5秒×12 = 最大60秒粘る
+              showWakeBanner();
+              return new Promise((r) => setTimeout(r, 5000)).then(() => proxied(attempt + 1));
+            }
+            hideWakeBanner();
+            // 60秒粘っても起動しない=本当に不調。従来どおり直接モードへ退避する。
+            proxyDown[prefix] = Date.now();
+            proxyRetryMs[prefix] = PROXY_RETRY_MS;
+            return direct();
+          }
+          hideWakeBanner();
           // 【2026-07-27・実測診断で判明した主因】以前の条件は res.status >= 500 だった。
           // しかしプロキシは上流(Overpass)のステータスをそのまま中継する設計なので、
           // 密集地で日常的に起きる上流の504 Gateway Timeoutも「プロキシが壊れた」と誤判定し、
@@ -308,6 +390,7 @@ const INJECT = `<script>
           proxyRetryMs[prefix] = PROXY_RETRY_MS; // プロキシへのfetch自体が失敗した場合は従来どおり2分で再挑戦
           return direct();
         });
+        }
       }
     }
     return origFetch(input, init);
@@ -950,6 +1033,18 @@ const server = http.createServer((req, res) => {
   // はクライアント側からは区別できない(ブラウザの/api/statusはユーザー自身のIPを見るため)。
   // /api/statusはスロット消費対象外の軽量エンドポイントなので、ここから直接叩いてよい
   // (scheduleUpstreamを通さない=レーンもペーシングも消費しない)。
+  // 【2026-07-27・コールドスタート対策】上流に一切触らない極軽量の生存確認。
+  // Render無料プランは15分無アクセスでスピンダウンし、復帰に実測39秒かかる。その間
+  // Renderのエッジは "Application loading" のHTML(5xx)を返すため、INJECT側の
+  // 「X-Proxy-Health の無い5xx = プロキシ故障」判定に合致してproxyDownがラッチし、
+  // セッション丸ごとDIRECT(縮退経路)で走っていた。クライアントはまずここを叩いて
+  // 200が返るまでタイル取得を保留する。プロセスが応答できている＝この応答が返せる、なので
+  // 判定として過不足がない。
+  if (req.url === '/api/ping') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Proxy-Health': 'ok' });
+    res.end(JSON.stringify({ ok: true, uptimeSec: Math.round(process.uptime()), deploy: DEPLOY_COMMIT }));
+    return;
+  }
   if (req.url === '/api/upstream-status') {
     (async () => {
       const out = { deploy: { time: DEPLOY_TIME.toISOString(), commit: DEPLOY_COMMIT }, scheduler: {}, upstream: {} };
