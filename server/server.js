@@ -840,7 +840,20 @@ async function handleStatic(req, res) {
 /* ---------- サーバ ---------- */
 const server = http.createServer((req, res) => {
   const apiKey = Object.keys(APIS).find((k) => req.url === k || req.url.startsWith(k + '/') || req.url.startsWith(k + '?'));
-  if (apiKey) { handleApi(req, res, apiKey).catch(() => { try { res.writeHead(500); res.end(); } catch (_) {} }); return; }
+  // 【2026-07-27】ここの500はhandleApi自身が例外で落ちた場合の最後の受け皿。以前はヘッダを
+  // 一切付けていなかったため、INJECT側の判定(X-Proxy-Healthが無い5xx = プロキシ故障)で
+  // 120秒の直接モードに落ちる引き金になっていた。handleApiの中でresを返せた=プロセスは
+  // 生きているので、X-Proxy-Healthを付けて「上流の問題」として扱わせる(直接モードにしない)。
+  if (apiKey) {
+    handleApi(req, res, apiKey).catch((e) => {
+      try {
+        log(`HANDLER-FAIL ${apiKey}: ${(e && e.message) || e}`);
+        res.writeHead(500, { 'Content-Type': 'application/json', 'X-Proxy-Health': 'ok' });
+        res.end(JSON.stringify({ error: 'handler_failed' }));
+      } catch (_) {}
+    });
+    return;
+  }
   handleStatic(req, res).catch(() => { try { res.writeHead(500); res.end(); } catch (_) {} });
 });
 
