@@ -522,15 +522,26 @@ function processOSMTileQueue() {
       if (_isNearOrBlockingCandidate(t)) { hasNearEligible = true; break; } // 見つかり次第打ち切ってよい(存在確認だけなので)
     }
     if (!hasEligible) break;
-    // 【2026-07-27・実機報告対応】予約枠チェック。近傍/足元候補が(たまたま今backoff中等で)
-    // 1件もeligibleに無く、かつfarが既に予約上限まで使っているなら、この空き枠はfarに
-    // 渡さず温存する(=何も起動せずbreak)。次の機会(他の枠の解放時・checkOSMTilesの
-    // 周期呼び出し)に状況が変わっていれば再評価される。ここでの判定は必ずosmTileActiveCount
-    // 増加・fetchOSMTileBatch呼び出しより前に行う(上のbackoffチェックと同じ理由で、
-    // 「即座に判定→枠解放→whileがまた回る」同一フレーム内の無限ループを避けるため)。
-    if (!hasNearEligible && osmTileActiveFarCount >= OSM_TILE_CONCURRENCY_FAR_MAX) break;
+    // 【2026-07-27・条件反転バグの修正】ここは以前こう書かれていた:
+    //     if (!hasNearEligible && osmTileActiveFarCount >= FAR_MAX) break;
+    // 意図は「遠方(まとめクエリ)に全枠を渡さず、常に最低1枠は近傍/足元の到着に備えて
+    // 空けておく」だったが、条件が逆で、実際の挙動は両ケースとも意図の反対になっていた:
+    //   - near候補【あり】: far上限が効かず、farが2枠とも取れる(←予約すべき場面で予約しない)
+    //   - near候補【なし】: far上限が効いて1枠を温存(←やる仕事があるのに枠を遊ばせる)
+    // 実機で `実行中 2/2(うちfar=2/1)` として観測。「nearがある間にfarが2本起動し、その後
+    // nearが枯れた」状態で、ガードは実行中のジョブを退かせないため数十秒戻らない。
+    //
+    // 【修正方針】この関数は「起動するか否か」しか決められず、起動したジョブがfarになるかは
+    // fetchOSMTileBatch側のsplice幅(batchSize)とtilePriority(batch.length===1ならnear)で
+    // 決まる。したがって条件を反転させるだけでは不十分で、「far枠が埋まっているなら
+    // 1枚クエリだけ起動する」を伝える必要がある。単体クエリは定義上nearになるので、
+    // これでfarが上限を超えることが構造的に無くなる。
+    //   - near候補あり + far満杯 → 1枚クエリ(=near)が起動。farは増えない
+    //   - near候補なし + far満杯 → 遠方タイルを1枚ずつ取る。枠が遊ばない
+    //   - far枠に余裕あり       → 従来どおりまとめクエリを許可
+    const _farFull = osmTileActiveFarCount >= OSM_TILE_CONCURRENCY_FAR_MAX;
     osmTileActiveCount++;
-    fetchOSMTileBatch();
+    fetchOSMTileBatch({ soloOnly: _farFull });
   }
 }
 
@@ -721,7 +732,11 @@ async function fetchOverpassSlotWaitMs() {
   }
 }
 
-async function fetchOSMTileBatch() {
+// 【2026-07-27】opts.soloOnly: far枠(まとめクエリ用)が埋まっている時に呼び出し元
+// (processOSMTileQueue)から渡される。trueならbatchSizeを1に固定し、このジョブが
+// far優先度(tilePriority='far'はbatch.length>1の時だけ付く)になるのを防ぐ。
+async function fetchOSMTileBatch(opts) {
+  const _soloOnly = !!(opts && opts.soloOnly);
   // プレイヤーに近いタイルを優先(以前はキュー投入順で、進行方向の
   // タイルが後回しになり目の前で道路が途切れたまま待たされていた)
   const ptx = player.position.x / OSM_TILE_M, ptz = player.position.z / OSM_TILE_M;
@@ -883,7 +898,9 @@ async function fetchOSMTileBatch() {
   // は常に1タイル単体(まとめない。そもそもtier1+2=3x3限定なので数が少なく、まとめる
   // メリットも薄い)。
   const isSplitJob = !!(nextTile && (nextTile.kind === 'road' || nextTile.kind === 'building'));
-  let batchSize = isSplitJob ? 1 : ((!roadReadyTiles.has(ptKey) || nextFailCount >= 2 || nearSolo) ? 1 : OSM_TILE_BATCH);
+  // 【2026-07-27】_soloOnly(far枠が満杯)の時は無条件で1枚。まとめクエリを起動すると
+  // tilePriority='far'になり、上限を超えてfarが走ってしまうため。
+  let batchSize = (isSplitJob || _soloOnly) ? 1 : ((!roadReadyTiles.has(ptKey) || nextFailCount >= 2 || nearSolo) ? 1 : OSM_TILE_BATCH);
   // 【2026-07-17・Fable5診断】上のソートでbackoff中のタイルは後ろへ回しているが、
   // 先頭からbatchSize件がたまたまbackoff中のタイルを含んでしまう(=eligibleが
   // batchSize未満しか無い)場合に備え、先頭からの「再試行可能な連続数」に丸める

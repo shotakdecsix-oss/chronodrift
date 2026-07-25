@@ -639,6 +639,18 @@ const CONN_FAIL_CODES = /ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|E
 // 応答を受け取れていないホストのタイムアウト」を到達不能として扱う。後者を含めるのは、
 // ファイアウォールの黙殺(silent drop)は無通信タイムアウトとして現れるため。
 // 逆に一度でも成功しているホストのタイムアウトは「上流が重いだけ」なので到達不能にしない。
+// 【2026-07-27・実測で判明した自作の罠】当初は「一度も成功していないホストのタイムアウトは
+// 到達不能」としていたが、これはプロセス再起動直後に必ず誤爆する。hostEverSucceededは
+// プロセス内メモリなのでデプロイ・スピンダウン復帰のたびに空になり、その状態で1本目が
+// 密集地の重いクエリでタイムアウトしただけで「到達不能」と断定 → ホスト5分クールダウン＋
+// クライアント10分の直接モード、という具合にセッション冒頭で必ず縮退経路へ落ちていた
+// (実機で PROXY=0 / DIRECT=4 として観測)。
+// タイムアウトは「上流が重い」場合と「経路が死んでいる」場合の両方で起きるので、単発では
+// 区別できない。連続して規定回数失敗し、かつ一度も成功していない場合に限って到達不能と
+// 見なす。接続レベルのエラー(AggregateError・ECONNREFUSED等)は経路の問題が確定するので
+// 従来どおり即断してよい。
+const TIMEOUT_STREAK_FOR_UNREACHABLE = 3;
+const hostTimeoutStreak = new Map(); // host -> 連続タイムアウト回数(成功でリセット)
 function isUnreachableError(e, host) {
   if (!e) return false;
   const msg = String(e.message || '');
@@ -646,7 +658,11 @@ function isUnreachableError(e, host) {
   if (e.code && CONN_FAIL_CODES.test(String(e.code))) return true;
   if (Array.isArray(e.errors) && e.errors.some((x) => x && x.code && CONN_FAIL_CODES.test(String(x.code)))) return true;
   if (CONN_FAIL_CODES.test(msg)) return true;
-  if (/timeout/i.test(msg) && host && !hostEverSucceeded.has(host)) return true;
+  if (/timeout/i.test(msg) && host && !hostEverSucceeded.has(host)) {
+    const n = (hostTimeoutStreak.get(host) || 0) + 1;
+    hostTimeoutStreak.set(host, n);
+    return n >= TIMEOUT_STREAK_FOR_UNREACHABLE;
+  }
   return false;
 }
 function markHostCooldown(host, unreachable) {
@@ -698,6 +714,7 @@ async function fetchUpstream(upstreamUrl, opts) {
         return httpsRequestOnce(upstreamUrl, Object.assign({}, opts, { timeoutMs }));
       }, opts.priority); // 【Phase3】blocking/near優先度ヒントをレーン選択まで運ぶ
       hostEverSucceeded.add(host); // HTTPレスポンスが返った=このホストへは到達できている
+      hostTimeoutStreak.delete(host); // 連続タイムアウトの計数をリセット
       if (res.status === 200) return res;
       lastErr = new Error('upstream HTTP ' + res.status);
       // 【2026-07-27・実測診断(直接モードが残っていた真因)】以前はここで受け取った
@@ -1070,6 +1087,11 @@ const server = http.createServer((req, res) => {
         const h = new URL(m).host;
         try {
           const r = await httpsRequestOnce('https://' + h + '/api/status', { timeoutMs: 8000 });
+          // 【2026-07-27】この軽量GETが通った=そのホストへ到達できている、という事実は
+          // isUnreachableErrorの判定材料として有効なので記録する(以前はfetchUpstream経由の
+          // 成功しか記録しておらず、診断エンドポイントの成功が活かされていなかった)。
+          hostEverSucceeded.add(h);
+          hostTimeoutStreak.delete(h);
           out.upstream[h] = { status: r.status, body: r.body.toString('utf8').slice(0, 500) };
         } catch (e) { out.upstream[h] = { error: (e && e.message) || String(e) }; }
       }
