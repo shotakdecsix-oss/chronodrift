@@ -683,7 +683,22 @@ const HOST_COOLDOWN_MS = 45000;
 // 意味がない。接続失敗はリトライで吸収する(fetchUpstreamのcatch参照)。
 const HOST_UNREACHABLE_COOLDOWN_MS = 45000; // 現在はmarkHostCooldownの引数経由でのみ使用(実質未使用)
 const hostEverSucceeded = new Set(); // 一度でも応答を受け取れたホスト
-const CONN_FAIL_CODES = /ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ECONNABORTED|EPIPE|EPROTO|ERR_TLS/;
+// 【2026-07-28・4度目にしてようやく本丸】「タイムアウトを到達不能の材料にしない」という
+// 方針をisUnreachableErrorの本体からは撤去したのに、この正規表現の中に
+// ETIMEDOUT / ECONNRESET / EPIPE / ECONNABORTED が残っていたため、同じ誤分類が1段下で
+// 生き続けていた。これらは「経路が死んでいる」ではなく「接続が途中で切れた」であり、
+// 重いOverpassクエリでは日常的に起きる。
+// 決定的な反証: /api/upstream-status(同じhttpsRequestOnceを使う軽いGET)はRenderの
+// egressからoverpass-api.deへ200を返し、2スロット空きまで読めていた。経路が遮断されて
+// いるなら軽いGETも通らない。重いPOSTだけが76%失敗していたのは、経路の死ではなく
+// 「重いクエリが途中で切られていた」と考える方が観測と素直に整合する。
+// 本当に「そのホストへ繋げていない」と言えるのは、接続確立そのものが拒否/名前解決失敗/
+// 経路なし/TLSハンドシェイク失敗のときだけ。
+const CONN_FAIL_CODES = /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EPROTO|ERR_TLS/;
+// 「接続はできたが途中で切れた/応答が来ない」系。到達不能の判定には使わない(タイル別の
+// backoff・リトライは従来どおりこれらでも動く。あくまで“ホストごと直接モードへ落とす”
+// という重い判断の材料から外すだけ)。参照用に残す。
+const MIDSTREAM_FAIL_CODES = /ECONNRESET|ETIMEDOUT|ECONNABORTED|EPIPE/;
 // 「そのホストへ到達できていない」判定。接続レベルのエラーコード、happy-eyeballsで全アドレス
 // 失敗した時のAggregateError(messageが空になることが多い)、および「このプロセスで一度も
 // 応答を受け取れていないホストのタイムアウト」を到達不能として扱う。後者を含めるのは、
