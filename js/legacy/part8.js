@@ -579,6 +579,23 @@ const OSM_TILE_CLAUSES_ROAD = OSM_TILE_CLAUSES.filter(c => !OSM_TILE_CLAUSES_BUI
 // 【2026-07-26】近傍の道路/建物分離クエリの対象範囲。tier1(現在地1枚)+tier2(周囲1列8枚)の
 // Chebyshev距離1以内=3x3=9枚。tier3(周囲2列目、距離2)以遠は変更せず従来の複合クエリのまま。
 const NEAR_SPLIT_TIER_R = 1;
+// 【2026-07-26・A/B用スイッチ】道路/建物クエリの分離(2026-07-24 c240b58で導入)を
+// その場で無効化し、導入前と同じ「1タイル=1複合クエリ」に戻すためのフラグ。
+//   window.SPLIT_NEAR_QUERIES = false;  → 分離オフ(導入前と同じ挙動)
+//   window.SPLIT_NEAR_QUERIES = true;   → 分離オン(現行の既定)
+// 切り替えた後、マップジャンプするとキューがクリアされるので綺麗に比較できる。
+//
+// なぜこのスイッチが要るか: 「以前の方が快適だった」という実機報告に対し、素直に
+// js/legacy を旧コミットへ戻すとA/Bが成立しない。旧part8.jsはPOSTボディに
+// &priority= を付けないため、現行server.jsが未指定を PRIO_RANK.far として扱い
+// (scheduleUpstream)、FAR_INFLIGHT_MAX で絞られる。分離の有無とは無関係な理由で
+// 遅くなるので、犯人を取り違える。分離だけを外して比べる必要がある。
+//
+// 分離が重くする理屈: 近傍3x3の9枚が「道路」「建物」の2本に割れて18本になり、さらに
+// 建物ジョブは道路確定後にしか積まれない(queueTile内のroadReadyTiles分岐)ため、
+// 足元タイルの完成が1往復から2往復の直列になる。上流が1IP2スロットしかない状況では
+// 本数が倍になる影響が素直に出る。
+if (typeof window !== 'undefined' && window.SPLIT_NEAR_QUERIES === undefined) window.SPLIT_NEAR_QUERIES = true;
 // 1リクエストにまとめる最大タイル数。スポーン直後・地図ジャンプ直後・急旋回時は
 // 一度に何十枚も新規タイルが必要になるが、Overpassは1ホスト1.1秒間隔の直列制限
 // (server.js)のため「1タイル=1リクエスト」だと平常時の10〜数十倍待たされていた。
@@ -1466,7 +1483,11 @@ function checkOSMTiles() {
       }
       return;
     }
-    const isNearSplit = Math.abs(tx - _qPTileX) <= NEAR_SPLIT_TIER_R && Math.abs(tz - _qPTileZ) <= NEAR_SPLIT_TIER_R;
+    // window.SPLIT_NEAR_QUERIES === false で分離を止め、複合クエリ(下のgeneric分岐)へ流す。
+    // 【注】_tileScoreの優先度帯・nearSoloのソロ化判定はNEAR_SPLIT_TIER_Rのまま触らない。
+    // ここで変えたいのは「クエリを何本に割るか」だけで、優先順位まで動かすと比較が濁る。
+    const isNearSplit = window.SPLIT_NEAR_QUERIES !== false
+      && Math.abs(tx - _qPTileX) <= NEAR_SPLIT_TIER_R && Math.abs(tz - _qPTileZ) <= NEAR_SPLIT_TIER_R;
     if (isNearSplit) {
       if (!queuedTiles.has(key)) {
         queuedTiles.add(key);

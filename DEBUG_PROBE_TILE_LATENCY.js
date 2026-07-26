@@ -76,9 +76,12 @@ window.TP = (() => {
         if (isOv) {
           // 【注】投げた時点ではレスポンスが無いので、どちらの経路で失敗したかを
           // r.url から判定できない。狙った経路はINJECT側の分岐と同じ条件で推定する。
+          // 【2026-07-26・ラベルの訂正】既定がプロキシに戻ったので、__FORCE_PROXY_OVERPASS__
+          // の有無で経路を推定するのは誤り(未設定でもプロキシ経由)。AbortErrorは
+          // part8.js側の自前タイムアウトなので経路とは無関係。誤解を招くので経路名は付けない。
           net.thrown++;
-          const route = window.__FORCE_PROXY_OVERPASS__ ? 'PROXY?' : 'DIRECT?';
-          const nm = route + ':' + ((e && (e.name === 'AbortError' ? 'AbortError' : e.message)) || 'unknown');
+          const nm = (e && (e.name === 'AbortError'
+            ? 'AbortError(クライアント側の我慢時間切れ。経路の故障ではない)' : e.message)) || 'unknown';
           net.errors[nm] = (net.errors[nm] || 0) + 1;
         }
         throw e;
@@ -289,9 +292,13 @@ window.TP = (() => {
           if (!ks.length) return;
           console.log(`    ${label}: ` + ks.map(k => `${nm ? nm(Number(k)) : k}:${fmt(stats(m[k]))}`).join('\n              '));
         };
-        // ここは「発行から完了までの実測」= 純粋なクエリ往復。キュー待ちを含まない。
-        // R tier2 が数十秒でも、この値が10秒前後なら差分はすべてキュー待ちだと確定できる。
-        line('完了時間(キュー待ちを除く純粋な往復)tier別', slot.doneByTier, tierName);
+        // 【2026-07-26・重要な但し書き】ここは fetch発行→レスポンス受領 の実測。
+        // **クライアント側のキュー待ちは除かれるが、サーバー側のキュー待ちは含まれる。**
+        // server.js は host ごとに UPSTREAM_WORKERS=2・MIN_INTERVAL_MS=1100 の待ち行列を
+        // 持っているため、バックログがある間はこの値の大半がサーバー内待ちになりうる。
+        // 「Overpassが1クエリを実行するのに何秒かかるか」はこの値からは分からない。
+        // 分解するには /api/upstream-status の scheduler.pending / running を併読すること。
+        line('完了時間(クライアント側の待ちを除く。サーバー側の待ちは含む)tier別', slot.doneByTier, tierName);
         line('同 バッチ枚数別(枚数×条件節の仮説の検証用)', slot.doneByBatch);
       }
       const tierLines = (rec) => {
