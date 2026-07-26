@@ -101,9 +101,20 @@ try {
 // つまりサービスは健全で、**RenderのIPだけが拒否されている**。無料プランのegressは
 // 共有NATなので、他テナントの行儀の悪さで巻き添えになっている可能性が高い。
 // 自分側のコードをいくら直しても復旧しないので、拒否していない上流を足すしかない。
+// 【2026-07-26・順番の変更】overpass-api.de を先頭から降ろし、VK Maps を主にする。
+// 実測(/api/upstream-status、Renderのegressから):
+//   overpass-api.de   -> Aレコード2台とも ECONNREFUSED(数時間継続。RenderのIPが拒否対象)
+//   maps.mail.ru      -> 200 / "Rate limit: 0"(=上限なし)
+//   private.coffee    -> upstream timeout
+// 先頭が拒否され続けると毎リクエストが1回無駄撃ちしてからミラーへ進む(hostCooldownで
+// 45秒はスキップされるが、明け直すたびに繰り返す)。通る方を先頭に置く。
+// 【戻す条件】overpass-api.de がRenderから200を返すようになったら、利用規約上の行儀
+// (Wikiの目安: 1日1万クエリ・1GB未満)からしても本家を先頭に戻してよい。
+// VK Maps側はWikiに "Feel free to use our services in any project. There are currently
+// no requests limitations" と明記があるため、主として使うこと自体は問題ない。
 const OVERPASS_MIRRORS = [
-  'https://overpass-api.de/api/interpreter',
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+  'https://overpass-api.de/api/interpreter',
   'https://overpass.private.coffee/api/interpreter',
 ];
 
