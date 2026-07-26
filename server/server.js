@@ -671,7 +671,19 @@ function httpsRequestOnce(urlStr, opts) {
     const method = opts.method || 'GET';
     const headers = Object.assign({ 'User-Agent': 'chronodrift-proxy/1.0' }, opts.headers || {});
     if (opts.body) headers['Content-Length'] = Buffer.byteLength(opts.body);
-    const req = https.request(urlStr, { method, headers }, (res) => {
+    // 【2026-07-26・全ミラー同時到達不能への対処】/api/upstream-status が3ミラーとも
+    // 失敗を返した(overpass-api.de=AggregateError、他2つ=upstream timeout)。独立した
+    // 3事業者が同時に落ちる確率は低く、AggregateErrorはNodeが「解決した全アドレスへの
+    // 接続に失敗した」時に出す形なので、出口側の問題と考えるのが自然。
+    // 最有力の仮説はIPv6: Node 18以降はIPv6/IPv4を自動選択するため、コンテナにIPv6経路が
+    // 無い/壊れていると、AAAAを持つホストへの接続が全滅する(SYNが黒穴に落ちる場合は
+    // 接続拒否ではなくタイムアウトになるので、残り2つの症状とも整合する)。今日の途中まで
+    // 動いていたのが再デプロイ後に壊れたのも、コンテナが別ホストへ移ったと考えれば合う。
+    // family=4 でIPv4に固定する。opts.familyで上書きできる(診断用に6を渡すため)。
+    // 【戻し方】この仮説が外れたら family の行を消すだけでよい。Overpassの3ミラーは
+    // いずれもAレコードを持つので、IPv4固定で到達性を失うことはない。
+    const family = opts.family || 4;
+    const req = https.request(urlStr, { method, headers, family }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => settle(resolve, {
@@ -1205,8 +1217,41 @@ const server = http.createServer((req, res) => {
           hostEverSucceeded.add(h);
           hostTimeoutStreak.delete(h);
           out.upstream[h] = { status: r.status, body: r.body.toString('utf8').slice(0, 500) };
-        } catch (e) { out.upstream[h] = { error: (e && e.message) || String(e) }; }
+        } catch (e) {
+          // 【2026-07-26】以前は e.message しか出しておらず、AggregateError が
+          // 「AggregateError」としか読めなかった。実際の原因コード(ECONNREFUSED /
+          // ETIMEDOUT / ENETUNREACH 等)と、どのアドレスで失敗したかが分からないと
+          // 経路の問題かレート制限かを切り分けられない。中身を開いて出す。
+          const d = { error: (e && e.message) || String(e), name: e && e.name, code: e && e.code };
+          if (e && Array.isArray(e.errors)) {
+            d.errors = e.errors.map((x) => ((x && (x.code || x.message)) || '?') + '@' + ((x && x.address) || '?'));
+          }
+          out.upstream[h] = d;
+        }
       }
+      // 【2026-07-26・IPv6仮説の検証】上のプローブはIPv4固定(httpsRequestOnceの既定)。
+      // 同じホストへ family=6 で叩いて対比させる。v4が通ってv6が落ちるなら仮説は当たり
+      // (コンテナにIPv6経路が無い)。両方落ちるなら経路ではなく先方の遮断を疑う。
+      // DNSに何が返っているかも併記する(AAAAが無ければIPv6仮説自体が成立しない)。
+      try {
+        const dnsp = require('dns').promises;
+        const h0 = new URL(OVERPASS_MIRRORS[0]).host;
+        out.dns = {};
+        for (const m of OVERPASS_MIRRORS) {
+          const h = new URL(m).host;
+          const rec = {};
+          try { rec.A = await dnsp.resolve4(h); } catch (e) { rec.A = 'ERR:' + ((e && e.code) || e); }
+          try { rec.AAAA = await dnsp.resolve6(h); } catch (e) { rec.AAAA = 'ERR:' + ((e && e.code) || e); }
+          out.dns[h] = rec;
+        }
+        try {
+          const r6 = await httpsRequestOnce('https://' + h0 + '/api/status', { timeoutMs: 6000, family: 6 });
+          out.ipv6Probe = { host: h0, status: r6.status };
+        } catch (e) {
+          out.ipv6Probe = { host: h0, error: (e && e.message) || String(e), code: e && e.code, name: e && e.name };
+        }
+      } catch (e) { out.dns = 'ERR:' + ((e && e.message) || e); }
+      out.node = process.version;
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify(out, null, 2));
     })().catch((e) => { try { res.writeHead(500); res.end(String(e && e.message)); } catch (_) {} });
