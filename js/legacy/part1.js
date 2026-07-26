@@ -1594,6 +1594,39 @@ const rightArm = leftArm.clone();
 rightArm.position.set(0.42, 1.15, 0);
 player.add(rightArm);
 
+// ======= BIRDモード用の見た目(翼・くちばし) =======
+// 【2026-07-27・ユーザー要望】BIRDモード中は腕の代わりに翼を、顔にくちばしを見せる。
+// 新規モデルは作らず既存パーツと同じ「単純プリミティブ」路線を踏襲する(ConeGeometryを
+// 扁平に潰して翼のシルエットにする)。既定は非表示(visible=false)で、表示切替は
+// refreshCharacterVisibility()(part7.js、setViewMode/setBirdModeの両方から呼ばれる)が
+// 一元管理する。ここではジオメトリの生成のみ。
+const wingMat = new THREE.MeshLambertMaterial({ color: 0x5a4a2a, side: THREE.DoubleSide });
+function _makeWing() {
+  const wing = new THREE.Mesh(new THREE.ConeGeometry(0.55, 0.95, 4), wingMat);
+  wing.scale.set(1, 0.1, 0.55); // Y方向に潰して翼のように平たくする
+  wing.castShadow = true;
+  return wing;
+}
+const leftWing = _makeWing();
+leftWing.position.set(-0.4, 1.2, 0);
+leftWing.rotation.z = Math.PI / 2 + 0.25; // 横へ広げる
+leftWing.rotation.y = 0.1;
+leftWing.visible = false;
+player.add(leftWing);
+const rightWing = _makeWing();
+rightWing.position.set(0.4, 1.2, 0);
+rightWing.rotation.z = -(Math.PI / 2 + 0.25);
+rightWing.rotation.y = -0.1;
+rightWing.visible = false;
+player.add(rightWing);
+
+const beakMat = new THREE.MeshLambertMaterial({ color: 0xf0a020 });
+const beak = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.22, 6), beakMat);
+beak.position.set(0, 1.62, 0.28);
+beak.rotation.x = Math.PI / 2;
+beak.visible = false;
+player.add(beak);
+
 player.position.set(0, 0, 0);
 
 // ======= キャラクター選択(少年/少女) =======

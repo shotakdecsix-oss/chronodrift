@@ -320,6 +320,7 @@ function updateDebugTileOverlay(force) {
 // ======= ANIMATION LOOP =======
 const clock = new THREE.Clock();
 let walkCycle = 0;
+let birdFlapCycle = 0; // BIRDモードの翼の羽ばたき用アキュムレータ(walkCycleと同じ仕組み)
 
 // ======= EXPLORE MODE: 自由移動・ジャンプ・歩行アニメーション・追従カメラ =======
 // 「3D探索」というゲームプレイそのものに属するロジックをここにまとめ、ModeRegistryの
@@ -341,7 +342,7 @@ function exploreOnUpdate(dt) {
   const forward = _moveForward.set(-Math.sin(camYaw), 0, -Math.cos(camYaw));
   const right   = _moveRight.set( Math.cos(camYaw), 0, -Math.sin(camYaw));
 
-  let moveX = 0, moveZ = 0;
+  let moveX = 0, moveZ = 0, moveY = 0;
   let isMoving = false;
 
   // Keyboard
@@ -364,6 +365,23 @@ function exploreOnUpdate(dt) {
   const mLen = Math.sqrt(moveX*moveX + moveZ*moveZ);
   if (mLen > 0) { moveX /= mLen; moveZ /= mLen; }
 
+  // 【2026-07-27・BIRDモード】視界のピッチ(camPitch)を移動方向に反映する。下を向いて
+  // 前進すれば潜行、上を向いて前進すれば上昇するようにしたい、というユーザー要望。
+  // moveX/moveZは正規化済みのforward/right合成なので、forward・right単位ベクトルとの内積
+  // (共に単位ベクトルで直交)で「前後どれだけ」「左右どれだけ」の係数(fAmt/rAmt)を復元
+  // できる。前後成分だけをcos(camPitch)で水平方向に縮め、その分をsin(camPitch)で垂直
+  // (moveY)に振り分ける。左右ストレイフはロールを付けず従来どおり水平のまま(一般的な
+  // フライトカメラの流儀)。ベクトルの大きさ(fAmt²+rAmt²=mLen²=1)は保たれるので、
+  // 見た目の速度(speed)は視線の向きによらず一定。
+  if (birdMode && mLen > 0) {
+    const fAmt = moveX * forward.x + moveZ * forward.z;
+    const rAmt = moveX * right.x + moveZ * right.z;
+    const cp = Math.cos(camPitch), sp = Math.sin(camPitch);
+    moveX = forward.x * cp * fAmt + right.x * rAmt;
+    moveZ = forward.z * cp * fAmt + right.z * rAmt;
+    moveY = -sp * fAmt; // camPitchが大きい(下向き視点)ほど前進(fAmt>0)で降下
+  }
+
   // Apply movement with collision
   const nx = player.position.x + moveX * speed * dt;
   const nz = player.position.z + moveZ * speed * dt;
@@ -379,14 +397,15 @@ function exploreOnUpdate(dt) {
   if (altLocked) {
     velY = 0;
   } else if (birdMode) {
-    // 【2026-07-27・BIRDモード】重力・地形追従・接地判定を無視し、上昇(hopHeld)/
-    // 下降(birdDescendHeld)ボタンだけで高さを直接制御する。常にairborne=trueにして
-    // おくことで、下のJump pose(空中姿勢)が流用され、歩行アニメーションは出ない
-    // (浮遊中は脚を動かさない方が自然なため、新規アニメーションは追加しない)。
-    // 両方同時押しは相殺して静止。OFFに戻すと最後のvelYを引き継いで通常の重力
+    // 【2026-07-27・BIRDモード】重力・地形追従・接地判定を無視し、(1)視界のピッチに連動した
+    // 前後移動分(上のmoveY、下や上を向いて進むことでの潜行/上昇)と(2)上昇(hopHeld)/
+    // 下降(birdDescendHeld)ボタンの2系統を合算して高さを直接制御する。常にairborne=true
+    // にしておくことで、下のJump pose(空中姿勢)が流用され、歩行アニメーションは出ない。
+    // ボタン同士は同時押しで相殺して静止。OFFに戻すと最後のvelYを引き継いで通常の重力
     // 落下(下の「else if (airborne)」)へ自然に合流する。
     airborne = true;
-    velY = hopHeld === birdDescendHeld ? 0 : (hopHeld ? BIRD_VSPEED : -BIRD_VSPEED);
+    const buttonV = hopHeld === birdDescendHeld ? 0 : (hopHeld ? BIRD_VSPEED : -BIRD_VSPEED);
+    velY = buttonV + moveY * speed;
     player.position.y += velY * dt;
   } else if (hopHeld) {
     velY = RISE_SPEED;
@@ -443,6 +462,19 @@ function exploreOnUpdate(dt) {
     leftLeg.rotation.x  =  0.7 * jumpT;
     rightLeg.rotation.x =  0.7 * jumpT;
     player.rotation.x = velY > 0 ? -0.15 * jumpT : 0.1 * jumpT;
+  }
+
+  // 【2026-07-27・BIRDモード】翼の羽ばたきアニメーション。移動速度が速いほど速く羽ばたく
+  // (静止5Hz相当〜全力12Hz相当)。leftWing/rightWingはビジュアル用の新規メッシュ(part1.js)
+  // で、腕とは独立に動かす(表示切替はrefreshCharacterVisibility、part7.js)。
+  // 【注】翼の基準姿勢(position/rotation.y,z)は目視確認なしで決めた値のため、実機で見て
+  // 羽ばたきの向き・角度が不自然なら振幅・基準角を調整すること。
+  if (birdMode) {
+    const flapSpeed = 5 + Math.min(7, speed / 8);
+    birdFlapCycle += dt * flapSpeed;
+    const flap = Math.sin(birdFlapCycle) * 0.5;
+    leftWing.rotation.x = flap;
+    rightWing.rotation.x = flap; // 鳥は左右対称に羽ばたくため同位相
   }
 
   // Camera

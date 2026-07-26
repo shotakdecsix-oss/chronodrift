@@ -372,6 +372,11 @@ function findSpawnNear(x0, z0) {
 let viewMode = 0;
 let camYaw = 0, camPitch = 0.25;
 const camDist = 15, camHeight = 8; // meters
+// 【2026-07-27】BIRDモードのON/OFF状態。setViewMode(下)の初期呼び出し(setViewMode(0))が
+// このファイルの後方にあるBIRD操作系のセクションより先に実行されるため、参照される変数
+// だけをここ(setViewMode定義より前)へ引き上げておく(操作系のイベント登録自体は後方の
+// 元の場所のまま)。
+let birdMode = false;
 // 【2026-07-21修正】以前はここが ['👁 一人称', '👁 三人称', '🗺 上空'] で、上のviewMode
 // コメント(0=三人称, 1=一人称, 2=上空。実際のカメラ分岐(part9.js)もこの並びで判定して
 // いる)と先頭2つの順序が入れ替わっていた。起動直後(viewMode=0=本来は三人称)なのに
@@ -395,16 +400,24 @@ function refreshViewLabel() {
 // 【2026-07-21】上空視点専用の🗺(旧mapBtn)を撤去し、視点切替1ボタンに統合したのに伴い、
 // 「もう一方のボタンをactiveにする」ための分岐も不要になった(常にこのボタン自身が
 // 現在のモードを示す)。
-function setViewMode(mode) {
-  viewMode = mode % 3;
-  refreshViewLabel();
+// 【2026-07-27・BIRDモード対応で切り出し】以前はsetViewMode内に直接書かれていたが、
+// BIRDモードのON/OFF(腕⇔翼の差し替え)でも同じ「一人称では全部隠す」の判定を再利用したい
+// ため、共通関数に分離した。setViewMode・setBirdModeの両方から呼ぶ。
+function refreshCharacterVisibility() {
   const showBody = (viewMode !== 1); // hide body in first-person
-  body.visible = leftArm.visible = rightArm.visible =
-  head.visible = leftLeg.visible = rightLeg.visible =
+  body.visible = head.visible = leftLeg.visible = rightLeg.visible =
   leftShoe.visible = rightShoe.visible = showBody;
+  // BIRDモード中は腕の代わりに翼・くちばしを見せる(いずれも一人称では非表示)
+  leftArm.visible = rightArm.visible = showBody && !birdMode;
+  leftWing.visible = rightWing.visible = beak.visible = showBody && birdMode;
   // 帽子/髪型は表示状態(showBody)と選択中の性別の両方を満たす時だけ見せる
   hatBrim.visible = hatTop.visible = showBody && charSex !== 'girl';
   girlHairTop.visible = girlPonyL.visible = girlPonyR.visible = showBody && charSex === 'girl';
+}
+function setViewMode(mode) {
+  viewMode = mode % 3;
+  refreshViewLabel();
+  refreshCharacterVisibility();
 }
 
 bindTapButton(document.getElementById('viewBtn'), () => setViewMode(viewMode + 1));
@@ -840,16 +853,17 @@ if (altKeepBtn) {
 // PC: Cキーでトグル(押しっぱなし対策にe.repeatで無視)
 document.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'c' && !e.repeat) setAltLocked(!altLocked); });
 
-// ======= BIRDモード(浮遊・水平3倍速・上下自由)=======
-// 【2026-07-27・ユーザー要望】通常の重力・地形追従・接地判定を丸ごと無視し、
-// 上昇(既存のhopHeld/⤴/Space)と下降(新設のbirdDescendHeld/⤵/Ctrl)だけで
-// 高さを直接制御する。水平速度は通常の速度式(joystick加速・Shiftダッシュ込み)の
-// 結果をそのままBIRD_SPEED_MULT倍する(exploreOnUpdate、part9.js側)。
-// 実装はexploreOnUpdate内に分岐を1つ足すだけに留め、既存のジャンプ/重力/着地ロジックは
-// 変更しない(birdMode=falseに戻せば従来どおりに戻る)。
-let birdMode = false, birdDescendHeld = false;
+// ======= BIRDモード(浮遊・水平3倍速・上下自由・視界のピッチに連動)=======
+// 【2026-07-27・ユーザー要望】通常の重力・地形追従・接地判定を丸ごと無視する。
+// 上下移動は2系統を合算する: (1) 視界のピッチ(camPitch)に連動した前後移動分
+// (下を向いて前進すれば降下、上を向いて前進すれば上昇。exploreOnUpdate側でforward/rightの
+// 内積からピッチ付きの移動ベクトルを再合成する)、(2) 従来どおりの上昇(hopHeld/⤴/Space)・
+// 下降(birdDescendHeld/⤵/Ctrl)ボタン(視線を変えずに真上/真下へ動きたい時のため残す)。
+// 水平速度は通常の速度式(joystick加速・Shiftダッシュ込み)の結果をそのままBIRD_SPEED_MULT
+// 倍する(exploreOnUpdate、part9.js側)。birdMode=falseに戻せば従来どおりに戻る。
+let birdDescendHeld = false;
 const BIRD_SPEED_MULT = 3;         // 水平速度の倍率(ユーザー要望どおり3倍)
-const BIRD_VSPEED = RISE_SPEED * 3; // 上昇/下降速度。通常のホバー上昇(RISE_SPEED)と同じ倍率で揃える
+const BIRD_VSPEED = RISE_SPEED * 3; // ボタンでの上昇/下降速度。通常のホバー上昇(RISE_SPEED)と同じ倍率で揃える
 const birdBtn = document.getElementById('birdBtn');
 function updateBirdBtn() {
   if (!birdBtn) return;
@@ -860,6 +874,7 @@ function setBirdMode(v) {
   if (birdMode === v) return;
   birdMode = v;
   updateBirdBtn();
+  refreshCharacterVisibility(); // 腕⇔翼・くちばしの表示切替(見た目も鳥っぽくする)
   if (birdDownBtn) birdDownBtn.style.display = birdMode ? '' : 'none';
   if (!birdMode) birdDescendHeld = false; // OFFにした瞬間に下降キー押しっぱなしが残らないように
 }
