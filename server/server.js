@@ -118,6 +118,25 @@ const OVERPASS_MIRRORS = [
   'https://overpass.private.coffee/api/interpreter',
 ];
 
+// 【2026-07-29・前提の変更】UPSTREAM_WORKERS=2 / MIN_INTERVAL_MS=1100 / FAR_INFLIGHT_MAX=1 は
+// すべて overpass-api.de の実測上限(1IPあたり2スロット)に合わせた自己制限だった。今の先頭
+// ミラーは VK Maps(maps.mail.ru)で、/api/status 相当が "Rate limit: 0"(無制限)を公称して
+// いる。この制限をそのまま流用するのは的外れなので、ホストごとに上限を変えられるようにし、
+// VK Mapsだけ緩める。overpass-api.de/private.coffee はフォールバックに回った時のための
+// 従来値のまま残す(万一これらが先頭に戻ってもレート制限を踏まない安全側)。
+// 数値の選び方: 「無制限」を都合よく信じすぎず、Renderの無料インスタンス自身のCPU/帯域
+// (対向のTLSハンドシェイクを同時に何十本も張れるほどの余裕は無い)を上限にする。429/5xxの
+// 自動クールダウン(osmGlobalCooldownUntil/hostCooldownUntil)は引き続き有効なので、この
+// 見積もりが外れてVK Maps側が実際にはレート制限を掛けてきても、既存の仕組みが自動的に
+// ブレーキを掛ける(=強気の数値にしても安全側に壊れる)。
+// far予約(FAR_INFLIGHT_MAX相当)は「workers - blockingReserve」で、ワーカー数が増えても
+// near/blocking用に最低限の枠を必ず残す考え方はそのまま踏襲する。
+const HOST_LIMITS = {
+  'maps.mail.ru': { workers: 8, minIntervalMs: 150, farMax: 5 }, // blocking/near用に3枠を確保
+};
+const DEFAULT_HOST_LIMITS = { workers: 2, minIntervalMs: MIN_INTERVAL_MS, farMax: 1 };
+function hostLimits(host) { return HOST_LIMITS[host] || DEFAULT_HOST_LIMITS; }
+
 const APIS = {
   '/api/elevation': { upstream: 'https://api.opentopodata.org', dir: 'elevation' },
   '/api/overpass':  { upstream: OVERPASS_MIRRORS[0], dir: 'overpass', mirrors: OVERPASS_MIRRORS },
@@ -593,13 +612,13 @@ sweepCacheDir(); // 起動直後にも一度実行(前回デプロイの残骸�
 // ワーカーは空くたびに待ち行列から blocking > near > far の順(同順位内は投入順)で取るので、
 // 後から来た現在地リクエストが待機中のfarを追い越せる = 割り込み問題が消える。
 // レーンの役割分担・予約・弾力拡張はすべて不要になり、far抑制はワーカー側の同時本数上限
-// (FAR_INFLIGHT_MAX)で表現できる。
-const UPSTREAM_WORKERS = 2;   // 上流への同時リクエスト数(overpass-api.deは1IPあたり実質2スロット)
-// farが両ワーカーを同時に握ると、後から来た現在地/近傍リクエストは「待ち行列の先頭」に
-// 居ても最大30秒以上開始できない(実行中のものは追い出せない)。far同時1本までに抑え、
-// 残り1本を必ずblocking/nearが即座に使えるようにする。待ち行列に何も無ければfarは
-// この1本を使い続けられるので、外周の先読みが恒久飢餓することはない。
-const FAR_INFLIGHT_MAX = 1;
+// (旧FAR_INFLIGHT_MAX)で表現できる。
+// 【2026-07-29】ワーカー数・ペース間隔・far同時上限はホストごとに変わるようになったため、
+// 固定値ではなく hostLimits(host) から引く(定義は OVERPASS_MIRRORS の直後を参照)。
+// farが全ワーカーを同時に握ると、後から来た現在地/近傍リクエストは「待ち行列の先頭」に
+// 居ても長時間開始できない(実行中のものは追い出せない)ため、hostLimits().farMax で
+// 必ずいくらか(blocking/near用)を空けておく。待ち行列に何も無ければfarはその枠を
+// 使い続けられるので、外周の先読みが恒久飢餓することはない。
 const PRIO_RANK = { blocking: 0, near: 1, far: 2 };
 const pendingByHost = new Map();   // host -> 待ち行列+実行中の合計件数(詰まり検出用。意味は従来と同じ)
 const hostQueues = new Map();      // host -> [{prio, seq, task, resolve, reject}]
@@ -609,31 +628,32 @@ const hostLastStartAt = new Map(); // host -> 最後に上流リクエストを�
 const hostPumpTimers = new Map();  // host -> ペース待ちのsetTimeoutハンドル(多重登録防止)
 let _upstreamSeq = 0;
 // 待ち行列から次に実行する1件を選ぶ。優先度が高い順、同優先度なら投入が早い順(FIFO)。
-// far同時上限に達している間はfarのエントリを候補から外す(その分は他が空くまで待つ)。
-function _pickQueueIndex(q, farRunning) {
+// far同時上限(ホストごと)に達している間はfarのエントリを候補から外す(その分は他が空くまで待つ)。
+function _pickQueueIndex(q, farRunning, farMax) {
   let best = -1;
   for (let i = 0; i < q.length; i++) {
     const e = q[i];
-    if (e.prio === PRIO_RANK.far && farRunning >= FAR_INFLIGHT_MAX) continue;
+    if (e.prio === PRIO_RANK.far && farRunning >= farMax) continue;
     if (best < 0 || e.prio < q[best].prio || (e.prio === q[best].prio && e.seq < q[best].seq)) best = i;
   }
   return best;
 }
 // 空きワーカーがある限り待ち行列から取り出して実行する。
 // 【重要】ここは「1件起動 → 自分を再帰呼び出し」で回す。再帰の2周目は直前に更新した
-// hostLastStartAtによってペース待ち(MIN_INTERVAL_MS)に引っかかり、タイマー登録して
-// 必ず抜けるため無限ループにはならない。
+// hostLastStartAtによってペース待ち(hostLimits().minIntervalMs)に引っかかり、タイマー登録
+// して必ず抜けるため無限ループにはならない。
 function _pumpHost(host) {
   const q = hostQueues.get(host);
   if (!q || q.length === 0) return;
+  const lim = hostLimits(host);
   const running = hostRunning.get(host) || 0;
-  if (running >= UPSTREAM_WORKERS) return;
+  if (running >= lim.workers) return;
   const farRunning = hostFarRunning.get(host) || 0;
-  const idx = _pickQueueIndex(q, farRunning);
+  const idx = _pickQueueIndex(q, farRunning, lim.farMax);
   // 残っているのがfarだけで同時上限に達している場合。farの完了時(下のfinish)か、
   // 新たなblocking/nearの投入時(scheduleUpstream)に再評価されるので、ここでは何もしない。
   if (idx < 0) return;
-  const wait = (hostLastStartAt.get(host) || 0) + MIN_INTERVAL_MS - Date.now();
+  const wait = (hostLastStartAt.get(host) || 0) + lim.minIntervalMs - Date.now();
   if (wait > 0) {
     if (!hostPumpTimers.has(host)) {
       hostPumpTimers.set(host, setTimeout(() => { hostPumpTimers.delete(host); _pumpHost(host); }, wait));

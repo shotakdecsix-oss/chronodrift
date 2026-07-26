@@ -64,7 +64,14 @@ const osmTileQueue = [];
 // INJECT側(server.js)にもホストごと同時2本のゲートを入れたが、そこで待たせると
 // part8側のabort猶予(近傍28秒)をキュー待ちで食い潰すので、発行側もそもそも2本に揃える。
 // プロキシが復活した場合もサーバーのワーカーは2本なので、2は過小にならない。
-const OSM_TILE_CONCURRENCY = 2;
+// 【2026-07-29・前提の変更】上のすべての調整はoverpass-api.de(1IPあたり2スロット固定)を
+// 前提にしていた。今の先頭ミラーはVK Maps(maps.mail.ru、"Rate limit: 0"=無制限公称)で、
+// Overpassはserver.js側のNO_DIRECT_FALLBACKにより常にプロキシ経由(直接モードへは絶対に
+// 落ちない)。つまりこの値を上げても「ユーザー自身のIPで2スロットを取り合う」という
+// 直接モードの危険は発生せず、上限はサーバー側 server.js の hostLimits('maps.mail.ru')
+// (現在 workers:8)と揃えればよい。429/5xxのグローバルクールダウン(osmGlobalCooldownUntil)
+// は引き続き有効なので、見積もりが外れても自動的にブレーキが掛かる。
+const OSM_TILE_CONCURRENCY = 8;
 let osmTileActiveCount = 0;
 // 【2026-07-27・実機報告「tier1/2の建物生成、全体的に時間がかかりすぎ」対応】優先度スコア
 // (_tileScore)は「次に始める仕事」の順番しか制御できず、既にOSM_TILE_CONCURRENCY(3)の
