@@ -82,9 +82,28 @@ try {
 // (この間/api/overpassの応答が最大881秒=約15分にまで悪化)。「レート制限なし」という
 // サードパーティの説明は少なくとも今この瞬間のRenderの環境からは成立しておらず、むしろ
 // 常に失敗する2本を毎回律儀に試す分だけ確実に遅くなっていた。overpass-api.deを先頭へ戻す。
+// 【2026-07-26・ミラー一覧の見直し。OSM Wiki (Overpass API) の公式表で裏取り済み】
+// 判明したこと:
+//  (1) overpass.kumi.systems と overpass.private.coffee は **同一サービス**。
+//      Wikiに "Previously known as overpass.kumi.systems" と明記があり、DNSも
+//      A/AAAAとも同一(193.219.97.30 / 2a0d:f302:126:78ea::1)。2枠あるつもりで
+//      1枠しか無かった。重複を削る。
+//  (2) VK Maps(maps.mail.ru)はグローバルカバレッジで、Wikiに
+//      "There are currently no requests limitations" と明記。上流2スロット制約の
+//      外にある可能性があるため追加する。※ロシアのサービスなので、経路や運用方針が
+//      気になる場合はこの1行を消せば従来どおりに戻る。
+//  (3) Geofabrik は有料+APIキー必須。安定性を金で買う選択肢として存在は記録しておく:
+//      https://overpass.geofabrik.de/YOUR_API_KEY/api/interpreter
+//
+// なぜ今これが要るか: 2026-07-26、Renderのegressから overpass-api.de の
+// **Aレコード2台とも ECONNREFUSED**、private.coffee系は timeout。一方で同時刻に
+// ユーザーのPC・モバイル回線からは /api/status が200を返し「2 slots available now」。
+// つまりサービスは健全で、**RenderのIPだけが拒否されている**。無料プランのegressは
+// 共有NATなので、他テナントの行儀の悪さで巻き添えになっている可能性が高い。
+// 自分側のコードをいくら直しても復旧しないので、拒否していない上流を足すしかない。
 const OVERPASS_MIRRORS = [
   'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
   'https://overpass.private.coffee/api/interpreter',
 ];
 
@@ -718,7 +737,12 @@ function _httpsRequestToAddress(urlStr, opts, address) {
       settle(reject, new Error('upstream hard timeout (' + (timeoutMs + 15000) + 'ms)'));
     }, timeoutMs + 15000);
     const method = opts.method || 'GET';
-    const headers = Object.assign({ 'User-Agent': 'chronodrift-proxy/1.0' }, opts.headers || {});
+    // 【2026-07-26】OSM Wikiの利用条件に「アプリを一意に識別できるUser-AgentかRefererを
+    // 必ず付けること」と明記がある。連絡先が分かる形にしておくと、問題があった時に
+    // いきなりIP遮断されるのではなく連絡が来る可能性が上がる(現に今Renderは遮断済み)。
+    const headers = Object.assign({
+      'User-Agent': 'chronodrift/1.0 (+https://chronodrift.onrender.com)',
+    }, opts.headers || {});
     if (opts.body) headers['Content-Length'] = Buffer.byteLength(opts.body);
     // 【2026-07-26・全ミラー同時到達不能への対処】/api/upstream-status が3ミラーとも
     // 失敗を返した(overpass-api.de=AggregateError、他2つ=upstream timeout)。独立した
@@ -1272,7 +1296,11 @@ const server = http.createServer((req, res) => {
       for (const m of OVERPASS_MIRRORS) {
         const h = new URL(m).host;
         try {
-          const r = await httpsRequestOnce('https://' + h + '/api/status', { timeoutMs: 8000 });
+          // 【2026-07-26】以前は 'https://' + host + '/api/status' と組み立てていたため、
+          // パス付きのミラー(maps.mail.ru は /osm/tools/overpass/api/interpreter)で
+          // 存在しないURLを叩いていた。エンドポイントURLから導出する。
+          const statusUrl = m.replace(/\/interpreter$/, '/status');
+          const r = await httpsRequestOnce(statusUrl, { timeoutMs: 8000 });
           // 【2026-07-27】この軽量GETが通った=そのホストへ到達できている、という事実は
           // isUnreachableErrorの判定材料として有効なので記録する(以前はfetchUpstream経由の
           // 成功しか記録しておらず、診断エンドポイントの成功が活かされていなかった)。
