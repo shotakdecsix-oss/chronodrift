@@ -335,6 +335,9 @@ function exploreOnUpdate(dt) {
   const joyMag = joyActive ? Math.min(1, Math.sqrt(joyOx*joyOx + joyOz*joyOz)) : 0;
   let speed = 5 + 40 * Math.min(1, Math.pow(joyMag, 0.7) * 1.15); // 最大45m/s
   if (keys['shift']) speed = 45;
+  // 【2026-07-27・BIRDモード】水平速度をそのまま3倍(part7.js参照)。joystick加速・
+  // Shiftダッシュを含めた結果を丸ごと倍にするので、通常時の入力の強弱感はそのまま活きる。
+  if (birdMode) speed *= BIRD_SPEED_MULT;
   const forward = _moveForward.set(-Math.sin(camYaw), 0, -Math.cos(camYaw));
   const right   = _moveRight.set( Math.cos(camYaw), 0, -Math.sin(camYaw));
 
@@ -375,6 +378,16 @@ function exploreOnUpdate(dt) {
   // 解除した瞬間はvelY=0のまま「else if (airborne)」に合流し、自然に落下が始まる。
   if (altLocked) {
     velY = 0;
+  } else if (birdMode) {
+    // 【2026-07-27・BIRDモード】重力・地形追従・接地判定を無視し、上昇(hopHeld)/
+    // 下降(birdDescendHeld)ボタンだけで高さを直接制御する。常にairborne=trueにして
+    // おくことで、下のJump pose(空中姿勢)が流用され、歩行アニメーションは出ない
+    // (浮遊中は脚を動かさない方が自然なため、新規アニメーションは追加しない)。
+    // 両方同時押しは相殺して静止。OFFに戻すと最後のvelYを引き継いで通常の重力
+    // 落下(下の「else if (airborne)」)へ自然に合流する。
+    airborne = true;
+    velY = hopHeld === birdDescendHeld ? 0 : (hopHeld ? BIRD_VSPEED : -BIRD_VSPEED);
+    player.position.y += velY * dt;
   } else if (hopHeld) {
     velY = RISE_SPEED;
     airborne = true;

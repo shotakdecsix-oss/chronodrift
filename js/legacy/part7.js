@@ -840,6 +840,49 @@ if (altKeepBtn) {
 // PC: Cキーでトグル(押しっぱなし対策にe.repeatで無視)
 document.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'c' && !e.repeat) setAltLocked(!altLocked); });
 
+// ======= BIRDモード(浮遊・水平3倍速・上下自由)=======
+// 【2026-07-27・ユーザー要望】通常の重力・地形追従・接地判定を丸ごと無視し、
+// 上昇(既存のhopHeld/⤴/Space)と下降(新設のbirdDescendHeld/⤵/Ctrl)だけで
+// 高さを直接制御する。水平速度は通常の速度式(joystick加速・Shiftダッシュ込み)の
+// 結果をそのままBIRD_SPEED_MULT倍する(exploreOnUpdate、part9.js側)。
+// 実装はexploreOnUpdate内に分岐を1つ足すだけに留め、既存のジャンプ/重力/着地ロジックは
+// 変更しない(birdMode=falseに戻せば従来どおりに戻る)。
+let birdMode = false, birdDescendHeld = false;
+const BIRD_SPEED_MULT = 3;         // 水平速度の倍率(ユーザー要望どおり3倍)
+const BIRD_VSPEED = RISE_SPEED * 3; // 上昇/下降速度。通常のホバー上昇(RISE_SPEED)と同じ倍率で揃える
+const birdBtn = document.getElementById('birdBtn');
+function updateBirdBtn() {
+  if (!birdBtn) return;
+  birdBtn.title = birdMode ? t('birdBtnTitleOn') : t('birdBtnTitleOff');
+  birdBtn.classList.toggle('active', birdMode);
+}
+function setBirdMode(v) {
+  if (birdMode === v) return;
+  birdMode = v;
+  updateBirdBtn();
+  if (birdDownBtn) birdDownBtn.style.display = birdMode ? '' : 'none';
+  if (!birdMode) birdDescendHeld = false; // OFFにした瞬間に下降キー押しっぱなしが残らないように
+}
+if (birdBtn) { bindTapButton(birdBtn, () => setBirdMode(!birdMode)); updateBirdBtn(); }
+document.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'b' && !e.repeat) setBirdMode(!birdMode); });
+
+const birdDownBtn = document.getElementById('birdDownBtn');
+if (birdDownBtn) {
+  // hopBtn(上昇)と同じ passive:false + preventDefault() パターン(長押し時のiOS/Android
+  // テキスト選択吹き出しでtouchend/mouseupが途中発火するのを防ぐ)。
+  birdDownBtn.addEventListener('touchstart', e => { e.preventDefault(); birdDescendHeld = true; }, { passive: false });
+  birdDownBtn.addEventListener('touchend',   e => { e.preventDefault(); birdDescendHeld = false; }, { passive: false });
+  birdDownBtn.addEventListener('touchcancel',e => { e.preventDefault(); birdDescendHeld = false; }, { passive: false });
+  birdDownBtn.addEventListener('mousedown',  e => { e.preventDefault(); birdDescendHeld = true; });
+  birdDownBtn.addEventListener('mouseup',    () => { birdDescendHeld = false; });
+  birdDownBtn.addEventListener('mouseleave', () => { birdDescendHeld = false; });
+  birdDownBtn.addEventListener('contextmenu', e => e.preventDefault());
+  birdDownBtn.addEventListener('selectstart', e => e.preventDefault());
+}
+// PC: Ctrlキーで下降(押している間)
+document.addEventListener('keydown', e => { if (e.key === 'Control' && !e.repeat) birdDescendHeld = true; });
+document.addEventListener('keyup',   e => { if (e.key === 'Control') birdDescendHeld = false; });
+
 // Mouse drag for camera
 // 「地面や建物を指(カーソル)でつかんで動かす」感覚にするため、ドラッグしている位置が
 // キャラより画面の上半分(空側=キャラより奥)か下半分(地面側=キャラより手前)かで、

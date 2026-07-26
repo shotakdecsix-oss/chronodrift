@@ -211,6 +211,18 @@ body {
   will-change:transform; /* 画面回転時の表示/タップ判定ズレ対策(2026-07-23) */
 }
 #altKeepBtn.active { background:rgba(139,123,255,0.45); border-color:var(--accent); }
+/* BIRDモード(浮遊・3倍速)の下降ボタン。hopBtn(上昇)の真上に重ねて縦に並べる。
+   通常モードでは意味を持たないため、setBirdMode()がbirdMode時だけdisplayを出す(part7.js)。 */
+#birdDownBtn {
+  position:fixed; bottom:calc(var(--safe-bottom) + 76px); right:var(--safe-right);
+  width:52px; height:52px; border-radius:50%;
+  font-size:22px; color:var(--text); cursor:pointer; pointer-events:all; z-index:30;
+  touch-action:none; user-select:none; -webkit-user-select:none;
+  -webkit-touch-callout:none; -webkit-tap-highlight-color:transparent;
+  will-change:transform;
+  display:none;
+}
+#birdDownBtn:active { background:rgba(139,123,255,0.35); }
 /* Map overlay */
 #mapOverlay {
   position:fixed; top:0; left:0; width:100%; height:100%;
@@ -306,6 +318,9 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
   <!-- 2026-07-21: 海面(🌊)/時間帯(🕐)/キャラクター選択(🧍)/視点回転(🔄)の個別アイコンを
        廃止し、設定(⚙)1つに統合(ユーザー要望)。中身は下の#perfCtrlパネル内へ移動。 -->
   <button class="railBtn glass hasSub" id="perfBtn" title="設定(描写・海面・時間帯・キャラクター・視点)" data-i18n-title="perfBtnTitle"><span class="ico">⚙</span><span class="sub" id="perfSub">標準</span></button>
+  <!-- 2026-07-27: BIRDモード(浮遊・水平移動3倍速・上下自由)のトグル。ON中は
+       #birdDownBtn(下降)を表示し、上昇は既存のhopBtn(⤴/Space)を流用する。 -->
+  <button class="railBtn glass" id="birdBtn" title="BIRDモード(浮遊・3倍速)" data-i18n-title="birdBtnTitleOff">🐦</button>
   <button class="railBtn glass" id="helpBtn" title="操作ヘルプ" data-i18n-title="helpBtnTitle">?</button>
 </nav>
 
@@ -403,8 +418,8 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 <!-- 操作ヘルプ(初回のみ自動表示。以後は?ボタンから) -->
 <div id="helpModal">
   <div id="info" class="glass">
-    <span data-i18n-html="helpBody">PC: WASD移動 / Shiftダッシュ / Spaceジャンプ / ドラッグ回転 / Cで高度キープ切替<br>
-    スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ / 🔓で高度キープ切替</span>
+    <span data-i18n-html="helpBody">PC: WASD移動 / Shiftダッシュ / Spaceジャンプ / ドラッグ回転 / Cで高度キープ切替 / Bで🐦BIRDモード切替(浮遊・3倍速、Space上昇/Ctrl下降)<br>
+    スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ / 🔓で高度キープ切替 / 🐦でBIRDモード切替(⤴上昇/⤵下降)</span>
     <div id="deployInfo"></div>
     <button id="infoCloseBtn" data-i18n="closeBtn">閉じる</button>
   </div>
@@ -416,6 +431,7 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 <div id="joystick" class="glass"><div id="joystickKnob"></div></div>
 <button id="altKeepBtn" class="glass" title="高度キープ(空中でタップ)" data-i18n-title="altKeepTitleOff">🔓</button>
 <button id="hopBtn" class="glass">⤴</button>
+<button id="birdDownBtn" class="glass" title="下降" data-i18n-title="birdDownBtnTitle">⤵</button>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
