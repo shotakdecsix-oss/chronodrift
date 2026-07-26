@@ -143,6 +143,18 @@ const INJECT = `<script>
   // レート制限に自分から突っ込んでいた。かつ一度そうなると詰まったまま自己回復しない。
   // → (1) 直接モードにも同じ1.1秒間隔のペース配分を追加、(2) proxyDownを恒久フラグではなく
   // タイムスタンプにし、一定時間後にプロキシへの復帰を自動で試みるようにする。
+  // 【2026-07-27・直接モードの廃止(Overpassのみ)】7回の実測が一貫して示したのは、
+  // 直接モードへ落ちた回は例外なく悪化するという事実:
+  //   プロキシ経由 … ディスクキャッシュ○ / inflight束ね○ / レート枠=Renderの共有IP
+  //                  実測 PROXY=9 が全て200、R tier2=10.2秒
+  //   直接モード   … 上記すべて無効 / レート枠=【ユーザー自身の2スロット】
+  //                  実測 429・504 が半数、Rはサンプルすら取れず
+  // 「1回の接続失敗で10分間、確実に悪い経路へ倒す」よりも「失敗させてタイル別backoffで
+  // 再試行させる」方が期待値が高い(上流の一時的な不調なら次の試行で通る)。
+  // よってOverpassについては直接モードへのフォールバックを行わない。
+  // elevation/nominatimは直アクセスで問題が出ていないので従来どおり(そちらのために
+  // direct()とproxyDownの仕組み自体は残す)。
+  const NO_DIRECT_FALLBACK = {}; // prefix -> true(下でOVERPASS_PREFIXを登録)
   const proxyDown = {};
   // 【2026-07-27】プレフィックスごとの「次にプロキシへ復帰を試すまでの待ち時間」。
   // 通常の不調は120秒(PROXY_RETRY_MS)、上流到達不能(X-Upstream-Unreachable)は
@@ -167,6 +179,7 @@ const INJECT = `<script>
   // ネットワークエラーを返したミラーは一定時間除外する。ペース配分・直列化チェーンも
   // ミラー(ホスト)ごとに独立させ、健全なミラーが複数ある間は実効スループットも上がる。
   const OVERPASS_PREFIX = 'https://overpass-api.de/api/interpreter'; // part8.js側が呼ぶ元URL(書き換え対象の目印。ミラー順とは無関係)
+  NO_DIRECT_FALLBACK[OVERPASS_PREFIX] = true; // 上記の理由によりOverpassは直接モードへ倒さない
   // 【2026-07-19・実験→撤回】private.coffeeを先頭にする実験はRenderの実機ログで
   // private.coffee/kumi.systemsが常時タイムアウトすることが確認されたため撤回。
   // overpass-api.deを先頭に戻す(server.js側のOVERPASS_MIRRORSと同じ理由)。
@@ -323,7 +336,7 @@ const INJECT = `<script>
           return origFetch(url, init);
         };
         const downSince = proxyDown[prefix];
-        if (downSince && (Date.now() - downSince) < (proxyRetryMs[prefix] || PROXY_RETRY_MS)) return direct();
+        if (!NO_DIRECT_FALLBACK[prefix] && downSince && (Date.now() - downSince) < (proxyRetryMs[prefix] || PROXY_RETRY_MS)) return direct();
         // 【2026-07-27・(1)暖機】プロキシ経路へ出す前にサーバーの起動完了を待つ。
         // 起動中(スピンダウンからの復帰、実測39秒)にリクエストを投げると
         // Renderのエッジが返すloading HTMLを掴み、proxyDownがラッチしてしまうため。
@@ -368,6 +381,16 @@ const INJECT = `<script>
           // 上流の429/504/タイムアウトはこの印が付かないので直接モードには落ちない。
           const proxyAlive = !!res.headers.get('X-Proxy-Health');
           const unreachable = !!res.headers.get('X-Upstream-Unreachable');
+          if (res.status >= 500 && (!proxyAlive || unreachable) && NO_DIRECT_FALLBACK[prefix]) {
+            // Overpass: 直接モードへは倒さず、そのまま失敗として返す。呼び出し元
+            // (part8.jsのfetchOSMTileBatch)がタイル別backoffで再試行する。
+            // どの条件で退避しかけたのかは診断のため必ず残す。
+            console.warn('[proxy-fail]', prefix, 'status=' + res.status,
+              'health=' + (res.headers.get('X-Proxy-Health') || 'なし'),
+              'unreachable=' + (res.headers.get('X-Upstream-Unreachable') || 'なし'),
+              '-> 直接モードには落とさず失敗として返す');
+            return res;
+          }
           if (res.status >= 500 && (!proxyAlive || unreachable)) {
             // 【2026-07-27】到達不能(サーバーのegressから上流へ届かない)は分単位で続く状態
             // なので、120秒ごとに再挑戦すると そのたび3並列×20〜30秒のタイムアウトを空費する。
@@ -393,6 +416,12 @@ const INJECT = `<script>
           // 滞留の同時発生)。AbortErrorの場合はproxyDownを立てず、呼び出し元(fetchOSMTileBatch
           // の既存リトライ・バックオフ)にそのまま失敗として返す。
           if (e && e.name === 'AbortError') throw e;
+          if (NO_DIRECT_FALLBACK[prefix]) {
+            // Overpass: プロキシへのfetch自体が失敗しても直接モードへは倒さない(上記の理由)。
+            console.warn('[proxy-fail]', prefix, 'fetch例外:', (e && e.name) + ': ' + (e && e.message),
+              '-> 直接モードには落とさず失敗として返す');
+            throw e;
+          }
           proxyDown[prefix] = Date.now();
           proxyRetryMs[prefix] = PROXY_RETRY_MS; // プロキシへのfetch自体が失敗した場合は従来どおり2分で再挑戦
           return direct();
