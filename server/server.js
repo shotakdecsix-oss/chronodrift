@@ -660,7 +660,10 @@ const HOST_COOLDOWN_MS = 45000;
 // この状態でプロキシに投げ続けると1タイルあたり45秒×リトライを空費するだけなので、
 // (1) 到達不能を素早く確定させ、(2) クライアントへ X-Upstream-Unreachable を返して
 // ブラウザ直アクセス(ユーザー自身のIP。実測でOverpassに到達できている)へ倒す。
-const HOST_UNREACHABLE_COOLDOWN_MS = 300000; // 接続レベルの失敗は5分スキップ(45秒だと再挑戦の空費が大きい)
+// 【2026-07-27・撤去】接続レベルの失敗に5分のクールダウンを課していたが、実測で失敗は
+// 断続的(38%は成功)と判明したため有害だった。次の1本が成功するかもしれないのに待たせる
+// 意味がない。接続失敗はリトライで吸収する(fetchUpstreamのcatch参照)。
+const HOST_UNREACHABLE_COOLDOWN_MS = 45000; // 現在はmarkHostCooldownの引数経由でのみ使用(実質未使用)
 const hostEverSucceeded = new Set(); // 一度でも応答を受け取れたホスト
 const CONN_FAIL_CODES = /ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ECONNABORTED|EPIPE|EPROTO|ERR_TLS/;
 // 「そのホストへ到達できていない」判定。接続レベルのエラーコード、happy-eyeballsで全アドレス
@@ -773,11 +776,19 @@ async function fetchUpstream(upstreamUrl, opts) {
       // 【2026-07-27】接続レベルの失敗(=そのホストへ到達できない)はリトライしても
       // 同じ結果にしかならず、1回あたり45秒級を空費してタイル取得の予算を食い潰す。
       // 長めのクールダウンを立てて即座に抜け、到達不能フラグを付けて呼び出し元へ返す。
+      // 【2026-07-27・実測で方針転換】以前はここで即座に諦めていた(接続レベルの失敗=経路が
+      // 死んでいる、という判断)。しかし実機計測で Render→Overpass の接続は【断続的に】
+      // 失敗することが分かった: 39本中 成功15 / 接続失敗24(=38%は成功する)。
+      // 恒久的な遮断ではないので、諦めるのではなくリトライするのが正しい。接続レベルの
+      // 失敗は即座に返る(タイムアウトを待たない)ためリトライのコストがほぼ無く、
+      // 3回試せば成功率は 38% -> 約76%(1-0.62^3)まで上がる計算になる。
+      // 全試行が接続失敗で終わった時だけ「到達不能」としてクライアントへ伝える。
       if (isUnreachableError(e, host)) {
-        markHostCooldown(host, true);
-        log(`  unreachable ${host} (${e.name}${e.message ? ': ' + e.message : ''}) -> skip for ${HOST_UNREACHABLE_COOLDOWN_MS / 1000}s`);
-        e.unreachable = true;
-        throw e;
+        e.unreachable = true; // 最終的に投げる時のための印(途中で成功すれば使われない)
+        log(`  conn-fail ${attempt}/${maxAttempts} ${host} (${e.name}${e.message ? ': ' + e.message : ''})`);
+        // 接続失敗は即座に返るので待ちは短くてよい(タイムアウト系の1.5秒×attemptより短く)
+        await sleep(300 * attempt);
+        continue;
       }
       markHostCooldown(host);
       log(`  retry ${attempt}/${maxAttempts} (${e.message}) ${host}`);
@@ -836,7 +847,10 @@ async function fetchUpstreamMulti(upstreamUrls, opts) {
     try {
       // フォールバックミラーは実績が悪い(毎回タイムアウト)ため、1回だけ・かつ短い持ち時間で
       // 見切る。死んでいる場合の損失を45秒×3から10秒程度に抑え、本家の再試行へ早く戻す。
-      const res = await fetchUpstream(url, Object.assign({}, opts, { maxAttempts: idx === 0 ? 2 : 1, maxTimeoutMs: idx === 0 ? null : 10000 }));
+      // 【2026-07-27】先頭(本命)の試行回数を2->4に増やす。接続レベルの失敗が断続的に
+      // 62%発生している実測を踏まえた措置。接続失敗は即座に返るのでコストは小さく、
+      // タイムアウト系の失敗は従来どおり1.5秒×attemptのバックオフで抑制される。
+      const res = await fetchUpstream(url, Object.assign({}, opts, { maxAttempts: idx === 0 ? 4 : 1, maxTimeoutMs: idx === 0 ? null : 10000 }));
       if (res.status === 200) return res;
       lastRes = res;
     } catch (e) {
