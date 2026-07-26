@@ -26,7 +26,19 @@ window.TP = (() => {
   // ディスクキャッシュ・inflight束ね・優先度レーンが全て無効になり、各プレイヤー自身のIPで
   // Overpassの2スロットを取り合う縮退状態になる。その状態で測ったレイテンシは
   // 「通常運転の性能」ではないので、経由を常に記録し、report()で警告を出す。
-  const net = { PROXY: 0, DIRECT: 0, ok: 0, ng: 0, statuses: {} };
+  // 【2026-07-28・重大な計測バグの修正(同じ形の誤りの5度目)】以前のこのラッパーは
+  //   const r = await f.apply(this, arguments);  ... 集計 ...
+  // という形で、**fetchが例外を投げた場合に集計を一切通らなかった**。
+  // ネットワークレベルの失敗(ERR_CONNECTION_TIMED_OUT / ERR_NAME_NOT_RESOLVED 等)は
+  // レスポンスを返さず throw するため、net には1件も記録されない。
+  // これが致命的なのは、**経路によって失敗の現れ方が違う**こと:
+  //   プロキシ経由 … サーバーが 502 という「レスポンス」を返す -> ng に計上される
+  //   直接モード   … ブラウザが接続できず throw する           -> 完全に不可視
+  // つまり「直接83% / プロキシ24%」という、既定を直接アクセスへ変更した根拠そのものが、
+  // 直接モードの失敗だけを数え落とす偏った比較だった可能性が高い。
+  // 実例(2026-07-28の計測): 146秒で8本のジョブが完了しているのに net は DIRECT=1・
+  // 成功1・失敗0。実際にはコンソールに ERR_CONNECTION_TIMED_OUT が並んでいた。
+  const net = { PROXY: 0, DIRECT: 0, ok: 0, ng: 0, statuses: {}, thrown: 0, errors: {} };
   // 【2026-07-27・レビュー指摘の反映】R が改善しなかった時、原因が「1クエリが重い」のか
   // 「発行枠(OSM_TILE_CONCURRENCY)が律速」なのかで打つ手が逆になる(前者=道路ジョブ分割、
   // 後者=concurrencyの見直し)。瞬間値のsnapを目視するのでは判断が主観的になるので、
@@ -51,13 +63,26 @@ window.TP = (() => {
     const f = window.fetch;
     window.fetch = async function (input) {
       const req = typeof input === 'string' ? input : (input && input.url) || '';
-      const r = await f.apply(this, arguments);
-      if (/interpreter|api\/overpass/.test(req)) {
-        net[/onrender|\/api\/overpass/.test(r.url) ? 'PROXY' : 'DIRECT']++;
-        net.statuses[r.status] = (net.statuses[r.status] || 0) + 1;
-        if (r.status === 200) net.ok++; else net.ng++;
+      const isOv = /interpreter|api\/overpass/.test(req);
+      try {
+        const r = await f.apply(this, arguments);
+        if (isOv) {
+          net[/onrender|\/api\/overpass/.test(r.url) ? 'PROXY' : 'DIRECT']++;
+          net.statuses[r.status] = (net.statuses[r.status] || 0) + 1;
+          if (r.status === 200) net.ok++; else net.ng++;
+        }
+        return r;
+      } catch (e) {
+        if (isOv) {
+          // 【注】投げた時点ではレスポンスが無いので、どちらの経路で失敗したかを
+          // r.url から判定できない。狙った経路はINJECT側の分岐と同じ条件で推定する。
+          net.thrown++;
+          const route = window.__FORCE_PROXY_OVERPASS__ ? 'PROXY?' : 'DIRECT?';
+          const nm = route + ':' + ((e && (e.name === 'AbortError' ? 'AbortError' : e.message)) || 'unknown');
+          net.errors[nm] = (net.errors[nm] || 0) + 1;
+        }
+        throw e;
       }
-      return r;
     };
   })();
 
@@ -203,7 +228,14 @@ window.TP = (() => {
     report() {
       console.log(`%c[TP] 計測時間 ${((Date.now() - t0) / 1000).toFixed(0)}秒`, 'font-weight:bold');
       const tot = net.PROXY + net.DIRECT;
-      console.log(`--- 経由: PROXY=${net.PROXY}  DIRECT=${net.DIRECT}  (成功${net.ok}/失敗${net.ng})`, net.statuses);
+      const att = net.ok + net.ng + net.thrown;
+      console.log(`--- 経由: PROXY=${net.PROXY}  DIRECT=${net.DIRECT}  ` +
+        `試行${att}本 = 成功${net.ok} / HTTP失敗${net.ng} / 例外${net.thrown}` +
+        (att ? `  成功率=${Math.round(net.ok / att * 100)}%` : ''), net.statuses);
+      if (net.thrown) {
+        console.log('%c⚠ レスポンスすら返らなかった例外が' + net.thrown + '本あります。' +
+          'これは「HTTPで失敗した」ではなく「接続できなかった」です。内訳:', 'color:#c00', net.errors);
+      }
       // 【2026-07-28・警告の反転を撤回して元に戻す】いったんは「A/Bの結果DIRECTが正規経路」
       // として警告を反転させたが、その根拠だった「Renderのegressが接続レベルで死んでいる」は
       // CONN_FAIL_CODESの誤分類(ECONNRESET/ETIMEDOUT等を到達不能に算入していた)による

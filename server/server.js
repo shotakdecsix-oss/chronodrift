@@ -352,7 +352,20 @@ const INJECT = `<script>
         // プロキシのディスクキャッシュ・inflight束ねは魅力だが、24%しか通らないのでは
         // 前提が成立しない。Renderのegressが改善したら window.__FORCE_PROXY_OVERPASS__ = true
         // で再評価できるようにしておく。
-        if (prefix === OVERPASS_PREFIX && !window.__FORCE_PROXY_OVERPASS__) return direct();
+        // 【2026-07-28・上の「既定を直接アクセスへ」を撤回。プロキシ既定へ戻す】
+        // 根拠にした「直接83% / プロキシ24%」は、計測プローブのfetchラッパーが
+        // **例外を投げたリクエストを一切集計していなかった**ために生じた偏った比較だった。
+        // 失敗の現れ方が経路で違うのが原因:
+        //   プロキシ経由 … サーバーが502という「レスポンス」を返す -> 失敗として計上された
+        //   直接モード   … ブラウザが接続できず throw する          -> 完全に不可視だった
+        // 実証(2026-07-28、直接モードでの実測): 146秒でジョブは8本完了しているのに
+        // プローブのnetは「DIRECT=1・成功1・失敗0」。実際のコンソールには
+        // POST https://overpass-api.de/api/interpreter net::ERR_CONNECTION_TIMED_OUT が並び、
+        // 146秒経っても road済=1 / building済=0(=事実上プレイ不能)だった。
+        // つまり直接モードはこのクライアントから機能していない。上の83%という数字は
+        // 「接続できた分だけを分母にした成功率」であって、経路の良否を比較できていない。
+        // 直接モードは逃げ道として残すが、既定はプロキシに戻す。
+        if (prefix === OVERPASS_PREFIX && window.__FORCE_DIRECT_OVERPASS__) return direct();
         const downSince = proxyDown[prefix];
         if (!NO_DIRECT_FALLBACK[prefix] && downSince && (Date.now() - downSince) < (proxyRetryMs[prefix] || PROXY_RETRY_MS)) return direct();
         // 【2026-07-27・(1)暖機】プロキシ経路へ出す前にサーバーの起動完了を待つ。
@@ -371,9 +384,23 @@ const INJECT = `<script>
               return new Promise((r) => setTimeout(r, 5000)).then(() => proxied(attempt + 1));
             }
             hideWakeBanner();
-            // 60秒粘っても起動しない=本当に不調。従来どおり直接モードへ退避する。
             proxyDown[prefix] = Date.now();
             proxyRetryMs[prefix] = PROXY_RETRY_MS;
+            // 【2026-07-26・退避経路の穴を塞ぐ】ここは唯一 NO_DIRECT_FALLBACK を見ずに
+            // direct() へ落ちていた分岐だった。他の3箇所(370/415/450行)は全て
+            // NO_DIRECT_FALLBACK[OVERPASS_PREFIX]=true で守られているのに、
+            // 「コールドスタートが60秒粘っても終わらなかった」という、Renderの無料プランで
+            // 最も起こりやすい状況でだけ直接モードへ倒れていた。
+            // 実証(2026-07-26): このクライアントからは https://overpass-api.de/api/status
+            // という軽いGETすら接続できない(ERR_CONNECTION_TIMED_OUT)。直接モードは
+            // 「遅い代替経路」ではなく「確実に失敗する経路」であり、そこへ倒すと2枠が
+            // 28〜34秒ずつTCPタイムアウトで焼かれ、実測で146秒かけて道路1枚という
+            // 事実上プレイ不能な状態になる。倒さず失敗として返し、タイル別backoffに任せる。
+            if (NO_DIRECT_FALLBACK[prefix]) {
+              console.warn('[proxy-fail]', prefix, 'コールドスタートが60秒で終わらず',
+                '-> 直接モードには落とさず失敗として返す');
+              return res;
+            }
             return direct();
           }
           hideWakeBanner();
