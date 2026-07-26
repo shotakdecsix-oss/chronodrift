@@ -785,12 +785,20 @@ async function fetchOSMTileBatch(opts) {
   // (tilePriority='blocking')の両方が参照する集合なので、ここに足すだけで両方に伝播する。
   // 各候補タイルの矩形上でプレイヤー位置に一番近い点との距離(クランプ)を比較し、
   // 辺で接する・角で接するどちらの隣接タイルにも正しく対応する。
+  // 【2026-07-26・ユーザー要望で1枚→2枚に拡大、かつ進行方向を考慮】前方の建物生成が
+  // 遅れる報告を受けて見直した。従来は純粋な距離(d2)だけで1枚を選んでいたため、斜め移動
+  // 中などは「本当に次に踏み込む1枚」とズレることがあり、しかも1枚しか先読みしないので
+  // 前方2タイル目の到達が間に合わないケースがあった。距離から進行方向(_osmMoveUx/Uz)への
+  // 射影ぶんを差し引いたスコア(_tileScoreのbase項と同じ考え方)で8枚を順位付けし、上位
+  // 2枚を昇格する。停止中(_osmMoveUx=_osmMoveUz=0)は射影項が0になるので、従来どおり
+  // 純粋な距離順で近い2枚が選ばれる。
   {
     const _pcx = player.position.x, _pcz = player.position.z;
     // 【注】下のNEAR_TIER_R判定で定義される_pTileX/_pTileZと同じ計算だが、あちらは
     // この時点でまだ宣言されていないため、ここで独立に計算する(依存関係を増やさない)。
     const _selfTileX = Math.floor(_pcx / OSM_TILE_M), _selfTileZ = Math.floor(_pcz / OSM_TILE_M);
-    let _bestKey = null, _bestD2 = Infinity;
+    const _BLOCK_PROMOTE_N = 2; // 格上げする枚数(旧: 1)
+    const _cands = [];
     for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
       if (dx === 0 && dz === 0) continue; // 中心(既にtier1)は対象外
       const tx = _selfTileX + dx, tz = _selfTileZ + dz;
@@ -798,10 +806,13 @@ async function fetchOSMTileBatch(opts) {
       if (_blockingTiles.has(k)) continue; // 角で既にtier1扱いのタイルは対象外
       const x0 = tx * OSM_TILE_M, x1 = x0 + OSM_TILE_M, z0 = tz * OSM_TILE_M, z1 = z0 + OSM_TILE_M;
       const nx = Math.max(x0, Math.min(_pcx, x1)), nz = Math.max(z0, Math.min(_pcz, z1));
-      const d2 = (_pcx - nx) * (_pcx - nx) + (_pcz - nz) * (_pcz - nz);
-      if (d2 < _bestD2) { _bestD2 = d2; _bestKey = k; }
+      const dist = Math.hypot(_pcx - nx, _pcz - nz);
+      // 進行方向側を優先: タイル中心方向への射影(タイル一枚分=OSM_TILE_M*0.8を上限目安に)ぶん距離を割り引く
+      const dirBonus = (dx * _osmMoveUx + dz * _osmMoveUz) * OSM_TILE_M * 0.8;
+      _cands.push({ k, score: dist - dirBonus });
     }
-    if (_bestKey) _blockingTiles.add(_bestKey);
+    _cands.sort((a, b) => a.score - b.score);
+    for (let i = 0; i < Math.min(_BLOCK_PROMOTE_N, _cands.length); i++) _blockingTiles.add(_cands[i].k);
   }
   // 【2026-07-19】ユーザー報告: デバッグオーバーレイで見ると、取得待ち(赤)のタイルが
   // 現在地から離れた場所(先読み5x5・進行方向先読み分)まで一度に広がりすぎていて、
@@ -862,7 +873,11 @@ async function fetchOSMTileBatch(opts) {
     // 待ち時間次第で簡単に逆転しうる点も一因)。tier2(分離ゾーン、道路・建物ジョブとも)と
     // tier3(複合クエリ)を別帯に分離し、両者の差(1000)をagingTiebreak上限(100)より
     // 十分大きく取ることで、待ち時間に関わらずtier2がtier3を追い越さないようにする。
-    if (t.kind === 'building') return base - agingTiebreak - 10000 + 80; // tier2帯内、道路よりわずかに後(ユーザー選択の道路優先)
+    // 【2026-07-26・ユーザー判断で道路優先(+80)を撤廃】進行方向前方の建物生成が
+    // 体感で遅れるという報告を受け、tier2帯内では道路とbuildingを同列(オフセット無し)に
+    // 戻す。移動し続けると新しく近傍に入るtileの道路要求が絶え間なく割り込み、少し後ろの
+    // 「道路済み・建物待ち」タイルが繰り返し追い越されて建物だけ遅延する副作用があった。
+    if (t.kind === 'building') return base - agingTiebreak - 10000; // tier2帯内、道路と同列
     if (Math.abs(t.tx - _pTileX) <= NEAR_SPLIT_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_SPLIT_TIER_R) return base - agingTiebreak - 10000; // tier1+2(分離ゾーン)
     if (Math.abs(t.tx - _pTileX) <= NEAR_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_TIER_R) return base - agingTiebreak - 9000; // tier3(複合クエリ)。tier2より明確に一段下
     return base - agingTiebreak;

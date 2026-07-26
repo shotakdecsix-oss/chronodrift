@@ -89,16 +89,17 @@ window.TP = (() => {
     };
   })();
 
-  // 【2026-07-28・tier1+ の追加】part8.js は「足元64m圏にかかるタイル」と「ring1のうち
-  // プレイヤーに最も近い1枚(格上げ)」を _blockingTiles に入れ、スコア -100000 の最優先で
-  // 取得している。ところがこのプローブは距離だけで tier を決めていたため、格上げされた
-  // 1枚が tier2 に混ざり、R tier2=108.3s の中で「最優先で走ったはずの1枚」と
-  // 「後回しの7枚」が区別できなかった。格上げ枠を tier1+ として分離して測る。
-  //   tier1+ ≈ tier1 なら格上げは効いている(tier2の108秒は残り7枚の話)
+  // 【2026-07-28・tier1+ の追加、2026-07-26・1枚→2枚+進行方向加重に追随】part8.js は
+  // 「足元64m圏にかかるタイル」と「ring1のうち進行方向を加味したスコア上位2枚(格上げ)」を
+  // _blockingTiles に入れ、スコア -100000 の最優先で取得している。このプローブは距離だけで
+  // tier を決めていたため、格上げされたタイルが tier2 に混ざると区別できない。格上げ枠を
+  // tier1+ として分離して測る。
+  //   tier1+ ≈ tier1 なら格上げは効いている(tier2の遅さは残り6枚の話)
   //   tier1+ ≈ tier2 なら格上げが機能していない(優先度は実行中のジョブを追い越せないため)
   // 【注意】これは part8.js の _blockingTiles 計算の“写し”。あちらを変えたらここも直すこと
   // (_blockingTiles は fetchOSMTileBatch のローカルconstなので外から参照できない)。
   const _BLOCK_PAD = 64;
+  const _BLOCK_PROMOTE_N = 2; // part8.jsと同じ(旧: 1)
   let _blkCache = null, _blkAt = 0;
   const blockingNow = () => {
     const now = Date.now();
@@ -109,17 +110,21 @@ window.TP = (() => {
     const bz0 = Math.floor((pz - _BLOCK_PAD) / TM), bz1 = Math.floor((pz + _BLOCK_PAD) / TM);
     for (let tx = bx0; tx <= bx1; tx++) for (let tz = bz0; tz <= bz1; tz++) s.add(tx + ',' + tz);
     const sx = Math.floor(px / TM), sz = Math.floor(pz / TM);
-    let bk = null, bd = Infinity;
+    const cands = [];
+    const ux = (typeof _osmMoveUx !== 'undefined') ? _osmMoveUx : 0;
+    const uz = (typeof _osmMoveUz !== 'undefined') ? _osmMoveUz : 0;
     for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
       if (dx === 0 && dz === 0) continue;
       const tx = sx + dx, tz = sz + dz, k = tx + ',' + tz;
       if (s.has(k)) continue;
       const x0 = tx * TM, x1 = x0 + TM, z0 = tz * TM, z1 = z0 + TM;
       const nx = Math.max(x0, Math.min(px, x1)), nz = Math.max(z0, Math.min(pz, z1));
-      const d2 = (px - nx) * (px - nx) + (pz - nz) * (pz - nz);
-      if (d2 < bd) { bd = d2; bk = k; }
+      const dist = Math.hypot(px - nx, pz - nz);
+      const dirBonus = (dx * ux + dz * uz) * TM * 0.8;
+      cands.push({ k, score: dist - dirBonus });
     }
-    if (bk) s.add(bk);
+    cands.sort((a, b) => a.score - b.score);
+    for (let i = 0; i < Math.min(_BLOCK_PROMOTE_N, cands.length); i++) s.add(cands[i].k);
     _blkAt = now; _blkCache = s;
     return s;
   };
