@@ -648,7 +648,56 @@ function scheduleUpstream(host, task, priority) {
 // URLに埋め込む(GET)と数千文字になり、overpass-api.deから414 (Request-URI Too Long)を
 // 返される事象を確認(道路の拡張生成が完全に止まって見えた真因。詳細はpart8.js側コメント参照)。
 // POST(ボディにdata=<クエリ>)はURL長に依存しないため、GET/POST両対応に拡張する。
-function httpsRequestOnce(urlStr, opts) {
+// 【2026-07-26・本命の発見】/api/upstream-status を family=4 固定で取り直したところ:
+//   overpass-api.de   A = [65.109.112.52, 162.55.144.139]  <- バックエンドが2台ある
+//   実際のエラー      connect ECONNREFUSED 65.109.112.52:443
+//   ipv6Probe         connect ENETUNREACH 2a01:...          <- IPv6経路は本当に無い
+// ECONNREFUSED は「経路はあるがそのポートで誰も待っていない」= **片方のバックエンドが
+// 落ちている**。ところが Node の既定の dns.lookup は解決結果を1つしか返さないため、
+// 落ちている 65.109.112.52 を掴んだリクエストは、健全な 162.55.144.139 を一度も試さずに
+// 失敗する。OSのリゾルバが返す順は入れ替わるので、成功したり失敗したりする。
+// **今日ずっと追いかけていた「60〜76%が失敗する」という不安定さの正体はこれの可能性が高い。**
+// 到達不能の誤分類(CONN_FAIL_CODES)を何度も直していたのは、症状を触っていただけだった。
+// 対策: Aレコードを全部引いて、接続レベルで失敗したら次のアドレスへ回す。
+// 【注】kumi.systems と private.coffee は A も AAAA も同じ 193.219.97.30 / 2a0d:... で、
+// 実体は同一ホスト。ミラーは名前が3つでも実質2系統しかない(枠を増やす検討時の前提)。
+const _dnsCache = new Map();     // host -> { addrs, at }
+const _addrCursor = new Map();   // host -> 次に使う開始インデックス(ラウンドロビン)
+const DNS_CACHE_MS = 300000;
+const CONNECT_LEVEL = /ECONNREFUSED|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|ECONNRESET|EPIPE/;
+async function _addrsFor(host) {
+  const c = _dnsCache.get(host);
+  if (c && Date.now() - c.at < DNS_CACHE_MS && c.addrs.length) return c.addrs;
+  const addrs = await require('dns').promises.resolve4(host);
+  _dnsCache.set(host, { addrs, at: Date.now() });
+  return addrs;
+}
+async function httpsRequestOnce(urlStr, opts) {
+  opts = opts || {};
+  // family=6 の診断プローブと、明示的にアドレスを指定された場合は従来どおり1発で撃つ。
+  if (opts.family === 6 || opts.address) return _httpsRequestToAddress(urlStr, opts, opts.address);
+  let addrs = [];
+  try { addrs = await _addrsFor(new URL(urlStr).host); } catch (e) { /* 解決不能ならホスト名のまま撃つ */ }
+  if (addrs.length < 2) return _httpsRequestToAddress(urlStr, opts, addrs[0] || null);
+  const host = new URL(urlStr).host;
+  const start = (_addrCursor.get(host) || 0) % addrs.length;
+  _addrCursor.set(host, start + 1); // 次回は別のアドレスから始める(1台に偏らせない)
+  let lastErr = null;
+  for (let i = 0; i < addrs.length; i++) {
+    const addr = addrs[(start + i) % addrs.length];
+    try {
+      return await _httpsRequestToAddress(urlStr, opts, addr);
+    } catch (e) {
+      lastErr = e;
+      // 接続レベルの失敗だけ次のアドレスへ回す。HTTPで応答が返っている(429/504等)なら
+      // アドレスを変えても同じなので、そのまま呼び出し元へ返す。
+      if (!CONNECT_LEVEL.test((e && e.code) || (e && e.message) || '')) throw e;
+      log(`  addr-fail ${host} ${addr} (${(e && e.code) || (e && e.message)}) -> 次のアドレスへ`);
+    }
+  }
+  throw lastErr || new Error('no address reachable for ' + host);
+}
+function _httpsRequestToAddress(urlStr, opts, address) {
   opts = opts || {};
   // 【2026-07-25・詰まり検出→強制打ち切り対応】通常は45秒(UPSTREAM_TIMEOUT_MS)だが、
   // 呼び出し側(fetchUpstream)がバックログ検出時に短いopts.timeoutMsを渡してきた場合は
@@ -683,16 +732,29 @@ function httpsRequestOnce(urlStr, opts) {
     // 【戻し方】この仮説が外れたら family の行を消すだけでよい。Overpassの3ミラーは
     // いずれもAレコードを持つので、IPv4固定で到達性を失うことはない。
     const family = opts.family || 4;
-    const req = https.request(urlStr, { method, headers, family }, (res) => {
+    // addressが指定されていれば、そのIPへ直接繋ぐ。TLSの証明書検証はIPではなく
+    // servername(ホスト名)に対して行われるので、servernameとHostヘッダを明示する。
+    const u = new URL(urlStr);
+    const reqOpts = address
+      ? { method, headers: Object.assign({ Host: u.host }, headers), family,
+          host: address, servername: u.hostname, port: u.port || 443,
+          path: u.pathname + u.search }
+      : { method, headers, family };
+    // 【注意】https.request のシグネチャは (options, cb) か (url, options, cb) のどちらか。
+    // (options, undefined, cb) と書くと cb が2引数目として拾われず、コールバックが
+    // 永久に呼ばれない(=このPromiseがハードタイムアウトまで解決しない)。分岐して呼ぶ。
+    const onRes = (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => settle(resolve, {
         status: res.statusCode,
         contentType: res.headers['content-type'] || 'application/json',
         body: Buffer.concat(chunks),
+        address: address || null, // どのアドレスで成功したかを診断で見えるようにする
       }));
       res.on('error', (e) => settle(reject, e)); // 【重要】これが無いのが上記の主因だった
-    });
+    };
+    const req = address ? https.request(reqOpts, onRes) : https.request(urlStr, reqOpts, onRes);
     req.setTimeout(timeoutMs, () => req.destroy(new Error('upstream timeout')));
     req.on('error', (e) => settle(reject, e));
     if (opts.body) req.write(opts.body);
@@ -1216,7 +1278,7 @@ const server = http.createServer((req, res) => {
           // 成功しか記録しておらず、診断エンドポイントの成功が活かされていなかった)。
           hostEverSucceeded.add(h);
           hostTimeoutStreak.delete(h);
-          out.upstream[h] = { status: r.status, body: r.body.toString('utf8').slice(0, 500) };
+          out.upstream[h] = { status: r.status, via: r.address || '(hostname)', body: r.body.toString('utf8').slice(0, 500) };
         } catch (e) {
           // 【2026-07-26】以前は e.message しか出しておらず、AggregateError が
           // 「AggregateError」としか読めなかった。実際の原因コード(ECONNREFUSED /
