@@ -335,6 +335,13 @@ const INJECT = `<script>
           await paceThrough(prefix);
           return origFetch(url, init);
         };
+        // 【2026-07-27・A/B用の逃げ道】コンソールから window.__FORCE_DIRECT_OVERPASS__ = true
+        // にすると、Overpassだけプロキシを通さずブラウザ直アクセスにする(リロードで解除)。
+        // 目的: Render→Overpassの接続失敗率が60〜75%と判明した一方、ブラウザからは
+        // 到達できている(429=届いている)ため、どちらが実際に速いかを実測で比べたい。
+        // 直接モードを廃止した時の判断材料はOSM_TILE_CONCURRENCY=3の頃のもので、
+        // 2本に修正済みの現在は前提が変わっている。デプロイせずに比較できるようにする。
+        if (prefix === OVERPASS_PREFIX && window.__FORCE_DIRECT_OVERPASS__) return direct();
         const downSince = proxyDown[prefix];
         if (!NO_DIRECT_FALLBACK[prefix] && downSince && (Date.now() - downSince) < (proxyRetryMs[prefix] || PROXY_RETRY_MS)) return direct();
         // 【2026-07-27・(1)暖機】プロキシ経路へ出す前にサーバーの起動完了を待つ。
