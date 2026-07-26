@@ -341,7 +341,18 @@ const INJECT = `<script>
         // 到達できている(429=届いている)ため、どちらが実際に速いかを実測で比べたい。
         // 直接モードを廃止した時の判断材料はOSM_TILE_CONCURRENCY=3の頃のもので、
         // 2本に修正済みの現在は前提が変わっている。デプロイせずに比較できるようにする。
-        if (prefix === OVERPASS_PREFIX && window.__FORCE_DIRECT_OVERPASS__) return direct();
+        // 【2026-07-27・A/B実測に基づく既定の変更】Overpassは既定でブラウザ直アクセスにする。
+        // 同一条件・同一場所で測った結果:
+        //   プロキシ経由 : 21本中 成功 5 = 24%(残りは全て接続レベルの失敗 unreachable=1)
+        //   直接モード   : 12本中 成功10 = 83%(失敗は429が2本のみ)
+        // Renderのegressからoverpass-api.deへの接続が60〜76%失敗する一方、ブラウザからは
+        // 到達できるため。以前「直接モードは常に悪い」と判断した計測は全て
+        // OSM_TILE_CONCURRENCY=3 の頃のもので、2スロットに3本ぶつけて429ストームになって
+        // いただけだった(同時2本に修正した現在は429は12本中2本)。
+        // プロキシのディスクキャッシュ・inflight束ねは魅力だが、24%しか通らないのでは
+        // 前提が成立しない。Renderのegressが改善したら window.__FORCE_PROXY_OVERPASS__ = true
+        // で再評価できるようにしておく。
+        if (prefix === OVERPASS_PREFIX && !window.__FORCE_PROXY_OVERPASS__) return direct();
         const downSince = proxyDown[prefix];
         if (!NO_DIRECT_FALLBACK[prefix] && downSince && (Date.now() - downSince) < (proxyRetryMs[prefix] || PROXY_RETRY_MS)) return direct();
         // 【2026-07-27・(1)暖機】プロキシ経路へ出す前にサーバーの起動完了を待つ。
@@ -854,10 +865,9 @@ async function fetchUpstreamMulti(upstreamUrls, opts) {
     try {
       // フォールバックミラーは実績が悪い(毎回タイムアウト)ため、1回だけ・かつ短い持ち時間で
       // 見切る。死んでいる場合の損失を45秒×3から10秒程度に抑え、本家の再試行へ早く戻す。
-      // 【2026-07-27】先頭(本命)の試行回数を2->4に増やす。接続レベルの失敗が断続的に
-      // 62%発生している実測を踏まえた措置。接続失敗は即座に返るのでコストは小さく、
-      // タイムアウト系の失敗は従来どおり1.5秒×attemptのバックオフで抑制される。
-      const res = await fetchUpstream(url, Object.assign({}, opts, { maxAttempts: idx === 0 ? 4 : 1, maxTimeoutMs: idx === 0 ? null : 10000 }));
+      // 【2026-07-27】接続失敗のリトライを4回に増やしたが実測で成功率は上がらず
+      // (38%->24%)、失敗が時間的に相関していることが判明したため2回に戻した。
+      const res = await fetchUpstream(url, Object.assign({}, opts, { maxAttempts: idx === 0 ? 2 : 1, maxTimeoutMs: idx === 0 ? null : 10000 }));
       if (res.status === 200) return res;
       lastRes = res;
     } catch (e) {
