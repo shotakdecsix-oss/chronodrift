@@ -127,13 +127,14 @@ window.TP = (() => {
       console.log(`%c[TP] 計測時間 ${((Date.now() - t0) / 1000).toFixed(0)}秒`, 'font-weight:bold');
       const tot = net.PROXY + net.DIRECT;
       console.log(`--- 経由: PROXY=${net.PROXY}  DIRECT=${net.DIRECT}  (成功${net.ok}/失敗${net.ng})`, net.statuses);
-      if (net.DIRECT > 0) {
-        console.log('%c⚠ この計測は縮退モード(DIRECT)を含みます。DIRECTではサーバーのディスク' +
-          'キャッシュ・inflight束ね・優先度レーンが全て無効で、ユーザー自身のIPでOverpassの' +
-          '2スロットを奪い合うため、レイテンシは通常運転の値ではありません。' +
-          (net.PROXY === 0 ? ' 全リクエストがDIRECTです。この結果で性能判断をしないでください。'
-                           : ' DIRECT混入率 ' + Math.round(net.DIRECT / tot * 100) + '%。'),
-          'color:#c00;font-weight:bold');
+      // 【2026-07-28・A/B実測を受けて意味を反転】以前ここはDIRECTを「縮退モード」として
+      // 赤字警告していたが、A/B計測でRenderのegressがoverpass-api.deに対して6〜7割の確率で
+      // 接続レベルから失敗することが判明した(プロキシ経由 成功5/21=24% に対し
+      // 直接 成功10/12=83%)。現在はDIRECTが正規の経路で、PROXYの方が例外。
+      if (net.PROXY > 0) {
+        console.log('%c⚠ PROXY経由のリクエストが混ざっています(' + Math.round(net.PROXY / tot * 100) +
+          '%)。現在Overpassは直接アクセスが既定で、__FORCE_PROXY_OVERPASS__ を立てない限り' +
+          'PROXYは出ないはずです。設定を確認してください。', 'color:#c00;font-weight:bold');
       }
       // 稼働枠の占有率(枠が律速かクエリが律速かの切り分け)
       if (occ.samples) {
@@ -144,10 +145,19 @@ window.TP = (() => {
         console.log(`--- 稼働枠の占有率(上限${OSM_TILE_CONCURRENCY}): ${parts.join('  ')}` +
           `   平均キュー長=${Math.round(occ.queueSum / occ.samples)}  平均far=${(occ.farSum / occ.samples).toFixed(2)}` +
           `  クールダウン中=${Math.round(occ.coolSamples / occ.samples * 100)}%`);
+        // 【2026-07-28・実測で判明したため文言を訂正】以前ここは「満杯ならconcurrencyを
+        // 上げる」と表示していたが、これは誤り。上流Overpassは1IPあたり2スロット固定
+        // ([overpass status] rate limit=2 available now=0 を実測で複数回観測)なので、
+        // 発行枠を増やしても429が増えるだけでthroughputは上がらない。枠が満杯=
+        // 「上流の許容量を使い切っている」であり、残る手は【リクエストの本数を減らす】
+        // (バッチ化・先読みの削減)しかない。R tier1(1クエリの往復)と見比べること:
+        //   R tier1 が速い(10秒前後)のに tier2/3 が数十〜百秒 -> 純粋な待ち行列。本数を減らす
+        //   R tier1 自体が遅い(30秒超)                        -> クエリ自体が重い。範囲/条件節を削る
         console.log(`    判定の目安: 満杯${full}% -> ` + (full >= 80
-          ? '★ 枠が律速。発行側(OSM_TILE_CONCURRENCY)を上げる検討へ'
-          : full >= 40 ? '枠とクエリコストが拮抗。両方の数字を見て判断'
-                       : '★ 枠は余っている。クエリのコストかbackoffが律速(道路ジョブ分割の検討へ)'));
+          ? '★ 上流(1IP=2スロット)を使い切っている。concurrencyを上げても429が増えるだけ。' +
+            'リクエスト本数を減らす(バッチ化・先読み削減)方向へ'
+          : full >= 40 ? '枠とクエリコストが拮抗。R tier1の値と見比べて判断'
+                       : '★ 枠が余っている。クエリのコストかbackoffが律速'));
       }
       console.log('--- R: 緑赤灰→緑緑赤(道路クエリ往復) ---');
       for (const t of [1, 2, 3, 4]) console.log(`  tier${t}: ${fmt(stats(collect(roadRec, t)))}`);

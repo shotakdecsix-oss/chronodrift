@@ -904,16 +904,58 @@ async function fetchOSMTileBatch(opts) {
   const isSplitJob = !!(nextTile && (nextTile.kind === 'road' || nextTile.kind === 'building'));
   // 【2026-07-27】_soloOnly(far枠が満杯)の時は無条件で1枚。まとめクエリを起動すると
   // tilePriority='far'になり、上限を超えてfarが走ってしまうため。
-  let batchSize = (isSplitJob || _soloOnly) ? 1 : ((!roadReadyTiles.has(ptKey) || nextFailCount >= 2 || nearSolo) ? 1 : OSM_TILE_BATCH);
+  //
+  // 【2026-07-28・実測に基づく最重要の変更(Step C)】分離ジョブのソロ固定を解除する。
+  // 直接モードでの実測(成功率11/13)で、ようやく信頼できるR/Bが取れた:
+  //     R tier1 = 8.6s   /  R tier2 = 108.3s  /  B tier1 = 7.8s
+  //     稼働枠は上限2に95%張り付き、平均キュー長79
+  // つまり「1クエリの往復」は8秒台で十分速く、tier2の108秒はほぼ全部がキュー待ち。
+  // そして上流Overpassは1IPあたり2スロット固定([overpass status] rate limit=2
+  // available now=0 を実測で複数回観測)なので、OSM_TILE_CONCURRENCYを上げても429が
+  // 増えるだけで throughput は増えない。律速は「枠」ではなく「発行するリクエストの本数」。
+  //
+  // 現状の5x5充填コスト:
+  //     tier1+2(3x3=9枚)× 道路/建物分離 = 18本(全部ソロ)
+  //     tier3(外周16枚)÷ OSM_TILE_BATCH(3)=  約6本
+  //     計 約24本 ÷ 2枠 × 約9s ≒ 約110秒 … 実測のtier2 R=108.3sとほぼ一致する
+  // 分離ジョブの18本が支配的なので、ここを3枚まとめにすれば 18本→約8本、総計24→14本
+  // (-42%)になり、tier2の待ちがそのまま比例して縮む。
+  //
+  // ただし2つだけ例外を残す:
+  //   (1) 先頭がblocking(足元64m圏)なら従来どおりソロ。足元だけは他タイルの重さを
+  //       背負わせず最短で返したい(実測8.6sはこのソロ経路の値)。
+  //   (2) 直近で失敗しているタイル(nextFailCount>=2)もソロ。まとめると巻き添えで
+  //       他タイルまで再試行に落ちるため。
+  // また _soloOnly(far枠満杯)は分離ジョブには適用しない。下のtilePriorityで
+  // 「全タイルが近傍圏内の分離バッチ」は batch.length>1 でも 'near' 扱いにするため、
+  // far枠を侵さないことが構造的に保証される。
+  const _headBlocking = !!(nextTile && _blockingTiles.has(_posKey(nextTile)));
+  let batchSize;
+  if (isSplitJob) {
+    batchSize = (_headBlocking || nextFailCount >= 2) ? 1 : OSM_TILE_BATCH;
+  } else if (_soloOnly) {
+    batchSize = 1;
+  } else {
+    batchSize = (!roadReadyTiles.has(ptKey) || nextFailCount >= 2 || nearSolo) ? 1 : OSM_TILE_BATCH;
+  }
   // 【2026-07-17・Fable5診断】上のソートでbackoff中のタイルは後ろへ回しているが、
   // 先頭からbatchSize件がたまたまbackoff中のタイルを含んでしまう(=eligibleが
   // batchSize未満しか無い)場合に備え、先頭からの「再試行可能な連続数」に丸める
   // (processOSMTileQueue側で先頭1件は必ず再試行可能であることを保証済み)。
   // 【2026-07-26】異なるkindが同じバッチに混ざらないよう、先頭と同じkindが連続する
   // 範囲に限定する(道路ジョブと建物ジョブ、複合クエリを取り違えて1クエリにまとめない)。
+  // 【2026-07-28・Step C】分離ジョブをまとめられるようにしたことで、1つのバッチに
+  // 「近傍圏内のタイル」と「プレイヤーが離れて圏外になった置き去りのタイル」が混ざりうる
+  // ようになった。混ざると下のtilePriorityが実態と食い違う(遠いタイルを含むのに'near'と
+  // 名乗る/その逆)ため、分離ジョブのバッチは近傍圏内かどうかで区切る。blockingも同様に
+  // 区切る(足元をソロで返す上の判断を、後続タイルの混入で無効化しないため)。
+  const _isNearSplit = (t) => Math.max(Math.abs(t.tx - _pTileX), Math.abs(t.tz - _pTileZ)) <= NEAR_SPLIT_TIER_R;
+  const _headNearSplit = _isNearSplit(nextTile);
   let eligibleRun = 0;
   for (const t of osmTileQueue) {
     if (t.kind !== nextTile.kind) break;
+    if (isSplitJob && _isNearSplit(t) !== _headNearSplit) break;
+    if (isSplitJob && _blockingTiles.has(_posKey(t)) !== _headBlocking) break;
     if ((osmTileNextRetryAt.get(_tileKey(t)) || 0) > _now) break;
     eligibleRun++;
   }
@@ -951,7 +993,17 @@ async function fetchOSMTileBatch(opts) {
   // 近傍1枚クエリ・ジャンプ直後の1枚クエリ等はすべてbatch.length===1になる)、
   // far=それ以外(複数タイルまとめクエリ)。サーバー側は0番レーンをblocking/near専用に
   // 予約しており、far指定はそのレーンを使わない=重いまとめクエリが予約レーンを塞がない。
-  const tilePriority = keys.some(k => _blockingTiles.has(k)) ? 'blocking' : (batch.length === 1 ? 'near' : 'far');
+  // 【2026-07-28・Step C】分離ジョブ(tier1+2の道路/建物)をまとめられるようにしたのに
+  // 伴い、「batch.length===1 なら near」という判定だけでは不足になった。3枚まとめた
+  // tier2の道路バッチは、対象が全部3x3圏内である以上どう見てもnearなのに、旧判定では
+  // 'far'を名乗ってfar枠(上限1)を消費し、せっかくリクエスト数を減らしてもそこが新しい
+  // 直列点になってしまう。バッチ内の全タイルが近傍圏内(NEAR_SPLIT_TIER_R)なら、
+  // 枚数に関係なくnearとして扱う。上のeligibleRunで近傍/圏外を混ぜないよう区切って
+  // あるので、この判定は「全部near」か「全部圏外」のどちらかに必ず落ちる。
+  const _batchAllNearSplit = batch.every(t => Math.max(Math.abs(t.tx - _pTileX), Math.abs(t.tz - _pTileZ)) <= NEAR_SPLIT_TIER_R);
+  const tilePriority = keys.some(k => _blockingTiles.has(k)) ? 'blocking'
+    : (batch.length === 1 || _batchAllNearSplit) ? 'near'
+    : 'far';
   // 【2026-07-27・実機報告対応】このバッチが実際に'far'枠を1つ消費したことを記録する
   // (processOSMTileQueueの予約枠チェック用)。ここは最初のawaitより前(同期区間)なので、
   // 呼び出し元のwhileループが次にosmTileActiveFarCountを参照する時には必ず反映済み。
