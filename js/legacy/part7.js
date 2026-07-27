@@ -313,8 +313,21 @@ let geoTargetX = 0, geoTargetZ = 0;   // geoOnUpdateが平滑追従する目標�
 let geoTargetYaw = null;              // 移動ベクトルから推定した向き(未確定はnull)
 const GEO_HEADING_MIN_DIST = 3;       // この距離(m)未満の移動では向きを更新しない(ジッター対策)
 
+// 【2026-07-27・真因修正】ここで pos.coords から { lat, lon } を分割代入していたが、
+// Geolocation APIのGeolocationCoordinatesのプロパティ名は latitude / longitude であり、
+// lat / lon は存在しない(xzToLatLon等が返す自前オブジェクトのキー名と取り違えていた)。
+// 結果 lat/lon が undefined → 末尾の playerMarker.setLatLng([undefined, undefined]) で
+// Leafletが "Invalid LatLng object" をthrowし、getCurrentPositionのsuccessコールバックが
+// この行で静かに中断。以降の jumpToLatLon / watchPosition / updateGeoBtnUI が実行されず、
+// 「📡 現在地を取得中...」のまま止まる不具合の真因だった(clearTimeoutは既に済んでいるため
+// 見張りタイマーも発火しない)。leafletMap未初期化の回だけthrowを免れてジャンプが成功して
+// いたのが「一度だけ成功した」現象の正体。
 function onGeoFix(pos) {
-  const { lat, lon } = pos.coords;
+  const lat = pos.coords.latitude, lon = pos.coords.longitude;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    console.warn('[geo] invalid coords', pos && pos.coords);
+    return;
+  }
   const { x, z } = latLonToXZ(lat, lon);
   if (geoLastFixXZ) {
     const dist = Math.hypot(x - geoLastFixXZ.x, z - geoLastFixXZ.z);
@@ -372,6 +385,10 @@ function startGeoFollow() {
       if (geoFixSettled) return; // 見張りタイマー発火後に遅れて応答が来た場合は無視
       geoFixSettled = true; clearTimeout(geoManualTimeout);
       console.log('[geo] getCurrentPosition success', p.coords.latitude, p.coords.longitude);
+      // 【2026-07-27追加】このコールバック内で例外が出ると、位置情報の取得自体は成功して
+      // いるのに画面は「取得中...」のまま固まり、実機(Macが無くWeb Inspectorも使えない)
+      // では原因が全く分からない。以後は例外を握ってその場でメッセージに出す。
+      try {
       // 初回だけ既存のjumpToLatLon経由できちんと地形・タイル取得キュー等の後始末を済ませてから
       // 継続追従(watchPosition)を始める(その場しのぎの部分パッチではなく、実績のある
       // 「現在地・向きを保存してリロード/取り直す」経路にそのまま乗せる)。
@@ -398,6 +415,10 @@ function startGeoFollow() {
       updateGeoBtnUI();
       mapOverlay.classList.remove('active');
       mapHintEl.textContent = t('mapHintGeoTracking');
+      } catch (e) {
+        console.error('[geo] error after fix', e);
+        mapHintEl.textContent = '⚠ GPS: ' + (e && e.message ? e.message : e);
+      }
     },
     err => {
       if (geoFixSettled) return;
