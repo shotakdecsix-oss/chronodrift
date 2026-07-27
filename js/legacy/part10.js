@@ -127,7 +127,7 @@ function advanceRouteProgress(dist) {
 // 面ジオメトリ(リボンメッシュ)で構築し、確実に太く見せる。
 const ROUTE_LINE_MAX_POINTS = 2000;
 const ROUTE_LINE_WIDTH = 3.5; // メートル。道路(数m幅)と並んでもはっきり見える太さ
-const ROUTE_LINE_COLOR = 0xff8800; // 道路・水域の青系と被らない橙色(遠目にも目立つ)
+const ROUTE_LINE_COLOR = 0x2fd7ff; // 水色(ユーザー指定)
 function buildRouteLine() {
   clearRouteLine();
   if (routePoints.length < 2) return;
@@ -166,12 +166,17 @@ function buildRouteLine() {
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geo.setIndex(indices);
   geo.computeVertexNormals();
+  // 【2026-07-28修正・ユーザー報告「道路に埋まってしまっている」】depthWrite:falseとY+オフセット
+  // (旧+0.4)だけではrenderOrderの兼ね合いや地形メッシュと解析的なgetGroundY値の局所的なズレで
+  // 道路面に埋まって見える箇所が残った。depthTest自体を切ることで、深度バッファの前後関係に
+  // 一切左右されず常に手前に描画されるようにする(ナビ用の案内線としては地形に隠れないほうが
+  // 実用上望ましいという判断。renderOrderを大きくして他の不透明物より後に描画させる)。
   const mat = new THREE.MeshBasicMaterial({
     color: ROUTE_LINE_COLOR, transparent: true, opacity: 0.92,
-    side: THREE.DoubleSide, fog: false, depthWrite: false,
+    side: THREE.DoubleSide, fog: false, depthWrite: false, depthTest: false,
   });
   routeLine = new THREE.Mesh(geo, mat);
-  routeLine.renderOrder = 5; // 地面・道路面とのzファイティングを避け確実に手前に見せる
+  routeLine.renderOrder = 999;
   scene.add(routeLine);
 }
 
@@ -235,8 +240,10 @@ const routeBtnEl = document.getElementById('routeBtn');
 const routePanelEl = document.getElementById('routePanel');
 const routeStartInputEl = document.getElementById('routeStartInput');
 const routeDestInputEl = document.getElementById('routeDestInput');
-const routeStartCurBtnEl = document.getElementById('routeStartCurBtn');
-const routeDestCurBtnEl = document.getElementById('routeDestCurBtn');
+const routeStartGameBtnEl = document.getElementById('routeStartGameBtn');
+const routeStartGpsBtnEl = document.getElementById('routeStartGpsBtn');
+const routeDestGameBtnEl = document.getElementById('routeDestGameBtn');
+const routeDestGpsBtnEl = document.getElementById('routeDestGpsBtn');
 const routeStartHistoryChipsEl = document.getElementById('routeStartHistoryChips');
 const routeDestHistoryChipsEl = document.getElementById('routeDestHistoryChips');
 const routeSearchBtnEl = document.getElementById('routeSearchBtn');
@@ -258,14 +265,35 @@ let routeDestResolved = null;
 if (routeStartInputEl) routeStartInputEl.addEventListener('input', () => { routeStartResolved = null; });
 if (routeDestInputEl) routeDestInputEl.addEventListener('input', () => { routeDestResolved = null; });
 
-function useCurrentLocationFor(which) {
+// 【2026-07-28・ユーザー要望で分離】ジャンプ・GPS追従等でゲーム上の現在地(player.position)と
+// スマホの実際の居場所(GPS)がズレていることがあるため、2つの別ボタンにする。
+function useGameLocationFor(which) {
   const { lat, lon } = xzToLatLon(player.position.x, player.position.z);
-  const resolved = { lat, lon, name: '現在地' };
-  if (which === 'start') { routeStartInputEl.value = '📍現在地'; routeStartResolved = resolved; }
-  else { routeDestInputEl.value = '📍現在地'; routeDestResolved = resolved; }
+  const resolved = { lat, lon, name: 'ゲーム上の現在地' };
+  if (which === 'start') { routeStartInputEl.value = '🎮ゲーム上の現在地'; routeStartResolved = resolved; }
+  else { routeDestInputEl.value = '🎮ゲーム上の現在地'; routeDestResolved = resolved; }
 }
-if (routeStartCurBtnEl) routeStartCurBtnEl.addEventListener('click', () => useCurrentLocationFor('start'));
-if (routeDestCurBtnEl) routeDestCurBtnEl.addEventListener('click', () => useCurrentLocationFor('dest'));
+if (routeStartGameBtnEl) routeStartGameBtnEl.addEventListener('click', () => useGameLocationFor('start'));
+if (routeDestGameBtnEl) routeDestGameBtnEl.addEventListener('click', () => useGameLocationFor('dest'));
+
+// スマホのGPS現在地(一回きりのgetCurrentPosition。GPS追従モードのwatchPositionとは無関係・併存可)
+function useGpsLocationFor(which) {
+  if (!('geolocation' in navigator)) { routeHintEl.textContent = 'この端末は位置情報に対応していません'; return; }
+  if (!window.isSecureContext) { routeHintEl.textContent = 'GPS取得にはHTTPS接続が必要です'; return; }
+  routeHintEl.textContent = 'GPS取得中...';
+  navigator.geolocation.getCurrentPosition(
+    (p) => {
+      const resolved = { lat: p.coords.latitude, lon: p.coords.longitude, name: 'GPS現在地' };
+      if (which === 'start') { routeStartInputEl.value = '📡GPS現在地'; routeStartResolved = resolved; }
+      else { routeDestInputEl.value = '📡GPS現在地'; routeDestResolved = resolved; }
+      routeHintEl.textContent = '';
+    },
+    (err) => { routeHintEl.textContent = 'GPS取得に失敗しました: ' + (err.code === 1 ? '権限が拒否されました' : err.message); },
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+}
+if (routeStartGpsBtnEl) routeStartGpsBtnEl.addEventListener('click', () => useGpsLocationFor('start'));
+if (routeDestGpsBtnEl) routeDestGpsBtnEl.addEventListener('click', () => useGpsLocationFor('dest'));
 
 function useHistoryFor(which, h) {
   const resolved = { lat: h.lat, lon: h.lon, name: h.name };

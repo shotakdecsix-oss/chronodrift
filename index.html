@@ -165,7 +165,7 @@ body {
   position:fixed; top:calc(var(--safe-top) + 96px); right:var(--safe-right);
   border-radius:999px; padding:6px 14px; font-size:12px; font-family:inherit; z-index:45;
   color:var(--text); white-space:nowrap; pointer-events:all; cursor:pointer;
-  border-color:#ff8800;
+  border-color:#2fd7ff;
   display:none;
   animation:routeSimPulse 2s ease-in-out infinite;
   transition:transform .1s;
@@ -173,8 +173,8 @@ body {
 #routeSimBadge.show { display:block; }
 #routeSimBadge:active { transform:scale(.94); }
 @keyframes routeSimPulse {
-  0%, 100% { box-shadow:var(--shadow), 0 0 0 0 rgba(255,136,0,0.55); }
-  50% { box-shadow:var(--shadow), 0 0 0 6px rgba(255,136,0,0); }
+  0%, 100% { box-shadow:var(--shadow), 0 0 0 0 rgba(47,215,255,0.55); }
+  50% { box-shadow:var(--shadow), 0 0 0 6px rgba(47,215,255,0); }
 }
 
 /* Touch joystick */
@@ -320,7 +320,7 @@ body {
 .routeQuickBtn {
   background:rgba(20,80,120,0.9); color:#c8ecff;
   border:1px solid #40c0ff; border-radius:8px;
-  padding:10px 12px; font-size:14px; cursor:pointer; white-space:nowrap;
+  padding:10px 10px; font-size:14px; cursor:pointer; white-space:nowrap; flex-shrink:0;
 }
 .routeQuickBtn:hover { background:rgba(30,110,160,0.95); }
 .routeHistoryChips { display:flex; flex-wrap:wrap; gap:5px; margin:-2px 0 2px; }
@@ -519,17 +519,21 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
     <div id="mapSearchHistoryChips"></div>
   </details>
   <!-- 2026-07-27: モードB(経路シミュレーション)。routeBtnで開閉、実装はpart10.js。
-       2026-07-28: 出発地・目的地とも「現在地」「履歴地」からワンタップで選べるように追加。 -->
+       2026-07-28: 出発地・目的地とも「現在地」「履歴地」からワンタップで選べるように追加。
+       2026-07-28(2): 「現在地」を、ゲーム上の現在地(player.position)とスマホのGPS現在地の
+       2種類に分離(ユーザー要望。ジャンプ・GPS追従等でゲーム内位置と実際の居場所がズレるため)。 -->
   <div id="routePanel">
     <div id="routeSearchGroup">
       <div class="routeInputRow">
         <input id="routeStartInput" type="text" placeholder="出発地" autocomplete="off">
-        <button id="routeStartCurBtn" class="routeQuickBtn" title="現在地を使う">📍</button>
+        <button id="routeStartGameBtn" class="routeQuickBtn" title="ゲーム上の現在地を使う">🎮</button>
+        <button id="routeStartGpsBtn" class="routeQuickBtn" title="スマホのGPS現在地を使う">📡</button>
       </div>
       <div id="routeStartHistoryChips" class="routeHistoryChips"></div>
       <div class="routeInputRow">
         <input id="routeDestInput" type="text" placeholder="目的地" autocomplete="off">
-        <button id="routeDestCurBtn" class="routeQuickBtn" title="現在地を使う">📍</button>
+        <button id="routeDestGameBtn" class="routeQuickBtn" title="ゲーム上の現在地を使う">🎮</button>
+        <button id="routeDestGpsBtn" class="routeQuickBtn" title="スマホのGPS現在地を使う">📡</button>
       </div>
       <div id="routeDestHistoryChips" class="routeHistoryChips"></div>
       <button id="routeSearchBtn">🔎 経路検索</button>
