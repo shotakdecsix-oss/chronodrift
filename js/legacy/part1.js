@@ -1328,6 +1328,58 @@ function reactivateNearbyDormantBuildings() {
   }
 }
 
+// ======= dormantの距離アンロード =======
+// 【2026-07-28・経路シムのクラッシュ実測(PC Chrome、[mem]計器)で判明】
+// renderer.info の geometries(約18000)・textures(約1080)は数分走っても頭打ちになる一方、
+// dormantCount だけが 0 → 22000 超へ単調増加し、末尾では toDormant/2s が 4000 件を超えて
+// いた(evicted は数十〜数百件しかなく、revive はプレイヤー近傍セルしか対象にしない)。
+// つまりGPU側はもう漏れておらず、際限なく増えるのは「軽量データは永久保持」という設計の
+// dormantGrid だけ、というのが実測の結論。
+// 通常のWASD探索では行動範囲が狭く問題化しなかったが、経路シムは無人で何十kmも一方向へ
+// 進み続けるため、二度と戻らない土地の建物記述子を全部抱え続けることになる。
+//
+// 対策: プレイヤーから十分遠いセルは丸ごと捨てる。捨てる距離は道路のアンロード距離
+// (ROAD_UNLOAD_DIST=2500m)より十分外側に取り、「まだ見えている・すぐ戻れる」範囲の
+// 建物は絶対に捨てない。加えて総数の絶対上限も設け、上限超過時は遠いセルから落とす。
+// 【トレードオフ】捨てたセルへ後から戻ると、そのタイルは取得済み扱いのままなので建物が
+// 復活しない(地形・道路は残る)。KEEP距離を大きめに取っているので通常の探索では起きないが、
+// 経路シムで数km走ってから引き返した場合は起こりうる。クラッシュより軽い劣化として許容する。
+const DORMANT_KEEP_DIST = Math.max(4000, ROAD_UNLOAD_DIST * 1.6);
+const DORMANT_MAX = 60000; // これを超えたら遠いセルから落とす(絶対上限)
+let _dormantEvictFrame = 0;
+let _dormantEvicted = 0; // [mem]ログ用(直近ウィンドウの累計)
+function evictFarDormant() {
+  _dormantEvictFrame++;
+  if (_dormantEvictFrame % 90 !== 0) return; // unloadFarBuildingsと同じ周期
+  if (dormantCount === 0) return;
+  const px = player.position.x, pz = player.position.z;
+  const keep2 = DORMANT_KEEP_DIST * DORMANT_KEEP_DIST;
+  // 第1段: KEEP距離の外のセルを捨てる。セル中心で判定(セルは200m四方なので誤差は無視できる)
+  for (const [key, arr] of dormantGrid) {
+    const c = key.split(','), cx = (+c[0] + 0.5) * DORMANT_CELL, cz = (+c[1] + 0.5) * DORMANT_CELL;
+    const dx = cx - px, dz = cz - pz;
+    if (dx * dx + dz * dz <= keep2) continue;
+    dormantCount -= arr.length;
+    _dormantEvicted += arr.length;
+    dormantGrid.delete(key);
+  }
+  // 第2段: それでも上限を超えている(=KEEP距離内が異常に密)場合、遠いセルから落として上限に収める
+  if (dormantCount <= DORMANT_MAX) return;
+  const cells = [];
+  for (const [key, arr] of dormantGrid) {
+    const c = key.split(','), cx = (+c[0] + 0.5) * DORMANT_CELL, cz = (+c[1] + 0.5) * DORMANT_CELL;
+    const dx = cx - px, dz = cz - pz;
+    cells.push({ key, n: arr.length, d2: dx * dx + dz * dz });
+  }
+  cells.sort((a, b) => b.d2 - a.d2); // 遠い順
+  for (const c of cells) {
+    if (dormantCount <= DORMANT_MAX) break;
+    dormantCount -= c.n;
+    _dormantEvicted += c.n;
+    dormantGrid.delete(c.key);
+  }
+}
+
 // ======= 【2026-07-21・Fable5診断(b)】ゲート待ち建物の隔離キュー =======
 // 以前はchunkNearTerrainReady/osmTilesReadyAroundが不成立の建物を、1件ずつ「ダメなら末尾へ
 // 戻す」方式で扱っていた(part9.js生成ループ)。密集地では地形NEARの網羅が建物到着に

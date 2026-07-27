@@ -179,7 +179,19 @@ function updateDebugTileOverlay(force) {
   // buildQueuedが実態より少なく出てしまう(退行)。
   for (const e of chunkWaitBuildings.values()) for (const b of e.arr) bump(pendingByTile, tileKeyOf(b.x, b.z));
   for (const e of tileWaitBuildings.values()) for (const b of e.arr) bump(pendingByTile, tileKeyOf(b.x, b.z));
-  for (const arr of dormantGrid.values()) for (const b of arr) bump(dormantByTile, tileKeyOf(b.x, b.z));
+  // 【2026-07-28】以前は dormantGrid 全件を0.5秒ごとに走査していたが、dormantは数万件規模まで
+  // 育つ(経路シムでは20000超を実測)ため、表示されない遠方セルまで毎回舐めた上に
+  // tileKeyOf で文字列キーを大量生成し、GC圧を無駄に上げていた。オーバーレイが表示するのは
+  // プレイヤー周囲 R タイル分だけなので、対応するdormantセルだけを直接引く。
+  {
+    const cellsPerTile = Math.ceil(OSM_TILE_M / DORMANT_CELL);
+    const gx0 = (ptx - R) * cellsPerTile, gx1 = (ptx + R + 1) * cellsPerTile;
+    const gz0 = (ptz - R) * cellsPerTile, gz1 = (ptz + R + 1) * cellsPerTile;
+    for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
+      const arr = dormantGrid.get(gx + ',' + gz);
+      if (arr) for (const b of arr) bump(dormantByTile, tileKeyOf(b.x, b.z));
+    }
+  }
   for (const rec of buildingRecords) bump(doneByTile, tileKeyOf(rec.x, rec.z));
   // 【2026-07-19】roadReadyTiles は「道路データを受信・登録済み」なだけで、実際の3Dメッシュ化
   // (processRoadMeshQueue、フレーム分割)はまだこれからのことがある。特にタイル到着直後は
@@ -377,13 +389,19 @@ function updateMemDiag() {
     bRec: buildingRecords.length, dormant: dormantCount,
     roadRec: roadRecords.length, roadMesh, motorwayMesh,
     areaMesh, chunks: chunkMeshes.size, facade: facadeCache.size,
+    dormCells: dormantGrid.size,
     dbgPlanes: debugTilePlanes.size, tileQ: osmTileQueue.length, heapMB,
   };
   // 前回との差分。クラッシュ前に「何が一貫して増え続けているか」を一目で見るための主目的。
   const d = _memDiagPrev ? {} : null;
   if (d) for (const k in now) d[k] = now[k] - _memDiagPrev[k];
   _memDiagPrev = now;
-  console.log('[mem]', now, d ? { delta: d } : '');
+  // 【2026-07-28】オブジェクトのまま出すとコンソールで折りたたまれ、肝心のheapMB等が
+  // 展開しないと読めない(実機ログ提供時に「…」で潰れた)。1行の文字列で出す。
+  const sgnN = (v) => (v > 0 ? '+' + v : String(v));
+  console.log('[mem] ' + Object.keys(now).map(k => k + ' ' + now[k] + (d ? '(' + sgnN(d[k]) + ')' : '')).join(' ')
+    + ' | dormEvicted/win ' + _dormantEvicted);
+  _dormantEvicted = 0;
   if (debugTileOverlayOn) {
     const el = _memHud();
     el.style.display = 'block';
@@ -391,7 +409,7 @@ function updateMemDiag() {
     el.textContent =
       `geo ${now.geo} (${d ? sgn(d.geo) : '-'})   tex ${now.tex} (${d ? sgn(d.tex) : '-'})\n`
       + `heap ${now.heapMB}MB (${d ? sgn(d.heapMB) : '-'})   calls ${now.calls}\n`
-      + `bRec ${now.bRec} dorm ${now.dormant} facade ${now.facade}\n`
+      + `bRec ${now.bRec} dorm ${now.dormant}/${now.dormCells}c facade ${now.facade}\n`
       + `road ${now.roadMesh}/${now.roadRec} (mtw ${now.motorwayMesh})\n`
       + `area ${now.areaMesh} chunk ${now.chunks} scene ${now.sceneCh}\n`
       + `dbgPlanes ${now.dbgPlanes} tileQ ${now.tileQ}`;
@@ -892,6 +910,7 @@ function animate() {
   // (長時間プレイでの重量化→クラッシュ)のを防ぐため、遠方の建物を解放する
   unloadFarBuildings();
   reactivateNearbyDormantBuildings(); // 逆に、近づいた遠景建物は生成キューへ復帰させる
+  evictFarDormant(); // 二度と戻らない遠方のdormant記述子を捨てる(part1.js、無人長距離走行対策)
   scanGateWaitQueues(); // 【2026-07-21・Fable5診断(b)】ゲート待ち隔離キューの低頻度スキャン
   // (2026-07-16: 高度LOD(updateAltitudeLOD)は撤去 — 40m/300mまで絞ってもクラッシュ防止に
   //  効かないことが実証され、上空の「スカスカ感」の害だけが残ったため。クラッシュの実対策は
