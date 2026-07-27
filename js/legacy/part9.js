@@ -558,7 +558,8 @@ function geoOnUpdate(dt) {
   let effectiveYaw = geoTargetYaw;
   if (geoCompassHeading !== null && geoCompassLastUpdate !== null &&
       (performance.now() - geoCompassLastUpdate) < GEO_COMPASS_STALE_MS) {
-    const hRad = geoCompassHeading * Math.PI / 180;
+    // GEO_COMPASS_OFFSET_DEG(part7.js): 実機で進行方向と逆向きになる報告があったための補正。
+    const hRad = (geoCompassHeading + GEO_COMPASS_OFFSET_DEG) * Math.PI / 180;
     // xzToLatLon/latLonToXZの座標系(+X=東、+Z=南)に合わせた北基準の向きベクトルから
     // atan2(dx,dz)で角度を出す(GPS移動ベクトル推定・WASD向き計算と同じ基準に揃える)。
     effectiveYaw = Math.atan2(Math.sin(hRad), -Math.cos(hRad));

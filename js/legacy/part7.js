@@ -333,6 +333,11 @@ let geoCompassHeading = null;   // 真北基準・時計回りの度数(0-360)�
 let geoCompassLastUpdate = null; // 最後にイベントを受け取ったperformance.now()時刻
 let geoOrientationHandler = null; // addEventListenerで登録した関数の参照(stopGeoFollowでの解除用)
 const GEO_COMPASS_STALE_MS = 2000; // この時間イベントが来なければコンパス値を「古い」として使わない
+// 【2026-07-27・ユーザー報告】実機で「視界が進行方向に対して逆向き」になる不具合が出た。
+// webkitCompassHeading/alphaは「スマホを平らに持った時の天面が指す向き」を基準にした値で、
+// 縦持ち(画面を自分に向けてナビ的に構える)の実際の使い方では、素の値と実際に向いている
+// 向きが180°ずれるケースが多い。定数化しておき、実機フィードバックで調整しやすくする。
+const GEO_COMPASS_OFFSET_DEG = 180;
 
 // iOS 13+はDeviceOrientationEvent.requestPermission()をユーザー操作(タップ)起点で呼ぶ必要がある。
 // startGeoFollow(geoBtnのクリックハンドラから同期的に呼ばれる)の冒頭で呼ぶことでこれを満たす。
