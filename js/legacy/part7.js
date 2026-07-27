@@ -336,7 +336,7 @@ function updateGeoBtnUI() {
   geoBtnEl.title = geoModeActive ? t('geoBtnTitleOn') : t('geoBtnTitleOff');
 }
 
-function startGeoFollow() {
+async function startGeoFollow() {
   if (!('geolocation' in navigator)) {
     mapHintEl.textContent = t('mapHintGeoUnsupported');
     return;
@@ -345,9 +345,25 @@ function startGeoFollow() {
     mapHintEl.textContent = t('mapHintGeoHttpsOnly');
     return;
   }
+  // 【2026-07-27追加・ユーザー報告対応】権限が既に「拒否」で固定されていると、
+  // getCurrentPositionは許可ダイアログを一切出さずに即座にエラーコールバックへ抜ける
+  // (=タップしても何も起きないように見える、という報告と一致する)。Permissions API
+  // が使える環境では事前に状態を見て、対処法(ブラウザのサイト設定から許可し直す)を
+  // 具体的に案内する。未対応/失敗時は何もせず従来どおりgetCurrentPositionに任せる。
+  if (navigator.permissions && navigator.permissions.query) {
+    try {
+      const status = await navigator.permissions.query({ name: 'geolocation' });
+      console.log('[geo] permission state:', status.state);
+      if (status.state === 'denied') {
+        mapHintEl.textContent = t('mapHintGeoBlocked');
+        return;
+      }
+    } catch (e) { console.warn('[geo] permissions.query failed', e); }
+  }
   mapHintEl.textContent = t('mapHintGeoFetching');
   navigator.geolocation.getCurrentPosition(
     p => {
+      console.log('[geo] getCurrentPosition success', p.coords.latitude, p.coords.longitude);
       // 初回だけ既存のjumpToLatLon経由できちんと地形・タイル取得キュー等の後始末を済ませてから
       // 継続追従(watchPosition)を始める(その場しのぎの部分パッチではなく、実績のある
       // 「現在地・向きを保存してリロード/取り直す」経路にそのまま乗せる)。
@@ -364,6 +380,7 @@ function startGeoFollow() {
       mapHintEl.textContent = t('mapHintGeoTracking');
     },
     err => {
+      console.warn('[geo] getCurrentPosition error', err.code, err.message);
       mapHintEl.textContent = t('mapHintGeoFailed',
         { reason: err.code === 1 ? t('geoPermissionDenied') : err.message });
     },
