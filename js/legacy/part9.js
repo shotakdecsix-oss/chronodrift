@@ -270,8 +270,22 @@ function updateDebugTileOverlay(force) {
     // 誤読しやすかった(実態は復帰レート律速で正常な高止まり)。分けて出す。
     logRows.push({ tile: key, status, road: roadReady, roadMeshPending, waitMs, terrain: terrainReady, buildDone: done, buildQueued: pendingByTile.get(key) || 0, buildDormant: dormantByTile.get(key) || 0, fails: osmTileFailCount.get(key) || 0 });
   }
-  // 範囲外に出た平面は隠すだけ(破棄しない。再度範囲に入ったらそのまま使い回す)
-  for (const [key, mesh] of debugTilePlanes) if (!seen.has(key)) mesh.visible = false;
+  // 範囲外に出た平面は隠す(近くに戻ってくる可能性が高いので基本は使い回す)。
+  // 【2026-07-28】ただし従来は一度作った平面を永久に保持していたため、経路シムのように
+  // 何kmも一方向へ走り続けるとGroup(短冊3枚=Mesh3個)が訪問タイル数だけ際限なく
+  // scene.childrenへ溜まっていた(不可視でも毎フレームのシーン走査対象になる)。
+  // 十分遠い(表示範囲の倍以上)ものはジオメトリ・マテリアルごと破棄する。
+  // 再接近時は_debugTilePlaneGroupが作り直すので見た目は変わらない。
+  const _evictR = R * 2 + 2;
+  for (const [key, grp] of debugTilePlanes) {
+    if (seen.has(key)) continue;
+    grp.visible = false;
+    const c = key.split(','), kx = +c[0], kz = +c[1];
+    if (Math.abs(kx - ptx) <= _evictR && Math.abs(kz - ptz) <= _evictR) continue;
+    scene.remove(grp);
+    for (const m of [grp.terrainMesh, grp.roadMesh, grp.buildMesh]) { m.geometry.dispose(); m.material.dispose(); }
+    debugTilePlanes.delete(key);
+  }
   if (force || _debugTileFrame % 120 === 0) {
     console.table(logRows); // 詳細な数値は~2秒ごとにコンソールへ
     // 【2026-07-21・ユーザー要望】道路生成が「地形は緑なのに赤いまま」滞留するパターンの
@@ -314,6 +328,75 @@ function updateDebugTileOverlay(force) {
       'gateWaitKeys', chunkWaitBuildings.size + tileWaitBuildings.size, 'gateWaitTotal', gateWaitTotalCount(),
       'revived/2s', _bgRevived, 'evicted/2s', _bgEvicted);
     _bgGenerated = 0; _bgRequeued = 0; _bgDormant = 0; _bgRevived = 0; _bgEvicted = 0;
+  }
+}
+
+// ======= 常時メモリ計測(GPU/JSヒープの増加源の切り分け) =======
+// 【2026-07-28・経路シム中のタブクラッシュ調査】
+// これまでの対策(自販機等の撤去・木プール上限引き上げ・高架の距離アンロード・キュー自己
+// スロットル)を入れてもクラッシュが再発しており、静的レビューでは決定打が出なかった。
+// 過去の同種の調査(DEBUG_SESSION_20260716_BUILDINGS)では「renderer.infoの実測(geo/tex/
+// calls/tri)と内訳カウントで切り分けるのが最速」という結論が出ているので、まず同じ計器を
+// 常時稼働させる。狙いは「GPU側で伸びているのがジオメトリなのかテクスチャなのか」を
+// 一発で分けること(これだけで探索範囲が半分になる)。
+//
+// 【重要】既存の[fetch]/[roadgen]/[buildgen]ログはupdateDebugTileOverlay内にあり、
+// 🩺オーバーレイがONの時しか出ない。この[mem]ログはオーバーレイと無関係に常時出す
+// (集計はMap.size等のO(1)参照と配列1周のみで、~2秒に1回なので負荷は無視できる)。
+// また実機がiPhoneでリモートデバッグできないため、🩺ON時は画面にも同じ数値を出す。
+let _memDiagFrame = 0;
+let _memDiagPrev = null;
+let _memHudEl = null;
+function _memHud() {
+  if (_memHudEl) return _memHudEl;
+  const d = document.createElement('div');
+  d.id = 'memHud';
+  d.style.cssText = 'position:fixed;left:4px;top:4px;z-index:9999;pointer-events:none;'
+    + 'font:10px/1.35 monospace;color:#7fffd4;background:rgba(0,0,0,0.55);'
+    + 'padding:3px 5px;border-radius:4px;white-space:pre;display:none;';
+  document.body.appendChild(d);
+  _memHudEl = d;
+  return d;
+}
+function updateMemDiag() {
+  if (++_memDiagFrame % 120 !== 0) return; // ~2秒ごと
+  // 道路は「レコードは永久保持・meshだけ距離で解放」方式なので、総数とmesh保持数を分けて見る
+  // (総数だけ伸びてmeshが伸びないならGPUは健全、meshが伸び続けるならアンロード漏れ)。
+  let roadMesh = 0, motorwayMesh = 0;
+  for (const r of roadRecords) { if (r.mesh) { roadMesh++; if (r.type === 'motorway') motorwayMesh++; } }
+  let areaMesh = 0;
+  for (const e of areaPolyMeshes) if (e.mesh) areaMesh++;
+  const mem = renderer.info.memory, rnd = renderer.info.render;
+  const heapMB = (performance.memory && performance.memory.usedJSHeapSize)
+    ? Math.round(performance.memory.usedJSHeapSize / 1048576) : -1;
+  const now = {
+    geo: mem.geometries, tex: mem.textures,
+    prog: renderer.info.programs ? renderer.info.programs.length : -1,
+    calls: rnd.calls, tri: rnd.triangles,
+    sceneCh: scene.children.length,
+    bRec: buildingRecords.length, dormant: dormantCount,
+    roadRec: roadRecords.length, roadMesh, motorwayMesh,
+    areaMesh, chunks: chunkMeshes.size, facade: facadeCache.size,
+    dbgPlanes: debugTilePlanes.size, tileQ: osmTileQueue.length, heapMB,
+  };
+  // 前回との差分。クラッシュ前に「何が一貫して増え続けているか」を一目で見るための主目的。
+  const d = _memDiagPrev ? {} : null;
+  if (d) for (const k in now) d[k] = now[k] - _memDiagPrev[k];
+  _memDiagPrev = now;
+  console.log('[mem]', now, d ? { delta: d } : '');
+  if (debugTileOverlayOn) {
+    const el = _memHud();
+    el.style.display = 'block';
+    const sgn = (v) => (v > 0 ? '+' + v : String(v));
+    el.textContent =
+      `geo ${now.geo} (${d ? sgn(d.geo) : '-'})   tex ${now.tex} (${d ? sgn(d.tex) : '-'})\n`
+      + `heap ${now.heapMB}MB (${d ? sgn(d.heapMB) : '-'})   calls ${now.calls}\n`
+      + `bRec ${now.bRec} dorm ${now.dormant} facade ${now.facade}\n`
+      + `road ${now.roadMesh}/${now.roadRec} (mtw ${now.motorwayMesh})\n`
+      + `area ${now.areaMesh} chunk ${now.chunks} scene ${now.sceneCh}\n`
+      + `dbgPlanes ${now.dbgPlanes} tileQ ${now.tileQ}`;
+  } else if (_memHudEl) {
+    _memHudEl.style.display = 'none';
   }
 }
 
@@ -829,6 +912,8 @@ function animate() {
   updateForest();
   // デバッグ: タイル読み込み状況オーバーレイ(オフ中は内部で即return、コストなし)
   updateDebugTileOverlay();
+  // メモリ計測(🩺のON/OFFに関係なく常時。updateMemDiag参照)
+  updateMemDiag();
 
   // 空・星・遠景地形をカメラ/プレイヤーに追従させる
   // (固定のままだと移動やマップジャンプで far クリップ外に出て「空が消える」)
