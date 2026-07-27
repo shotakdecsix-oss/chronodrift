@@ -292,9 +292,51 @@ mapSearchInput.addEventListener('keydown', e => {
 });
 mapSearchInput.addEventListener('keyup', e => e.stopPropagation());
 
-// ======= スマホ等の位置情報から現在地ジャンプ =======
+// ======= スマホ等の位置情報から現在地ジャンプ / GPS追従モード(モードA) =======
 // Geolocation API は HTTPS(secure context)必須。LANのhttpアクセスでは使えない旨を案内する
-document.getElementById('geoBtn').addEventListener('click', () => {
+//
+// 【2026-07-27・GPS追従モード実装(FEATURE_GEO_NAV_MODES.md モードA)】
+// 「現在地」ボタンを、1回きりのgetCurrentPositionジャンプから、watchPositionによる
+// 継続追従のトグルへ拡張する。WASD自由移動(explore)とはModeRegistryで排他的に切り替わり、
+// 実処理(位置の平滑追従・回頭・床/重力・カメラ)はgeoOnUpdate(part9.js)側にある。
+//
+// 設計判断(ユーザー確認済み):
+//  - 向き(heading)はDevice Orientation(コンパス)を使わず、直近のGPS移動ベクトルから推定する。
+//    iOSのrequestPermission()許可ダイアログが不要になり実装もシンプルになる。GPSジッターで
+//    向きが暴れないよう、GEO_HEADING_MIN_DIST未満の移動では向きを更新しない(静止中は保持)。
+//  - GPS誤差で建物にめり込むケースを許容し、GPSモード中は水平衝突判定(wouldCollide)を
+//    行わない(geoOnUpdate側で素通し)。実座標への追従を優先する。
+let geoModeActive = false;
+let geoWatchId = null;
+let geoLastFixXZ = null;              // 直近のGPS点(向き推定の差分元)。{x, z}
+let geoTargetX = 0, geoTargetZ = 0;   // geoOnUpdateが平滑追従する目標点(生のGPS点)
+let geoTargetYaw = null;              // 移動ベクトルから推定した向き(未確定はnull)
+const GEO_HEADING_MIN_DIST = 3;       // この距離(m)未満の移動では向きを更新しない(ジッター対策)
+
+function onGeoFix(pos) {
+  const { lat, lon } = pos.coords;
+  const { x, z } = latLonToXZ(lat, lon);
+  if (geoLastFixXZ) {
+    const dist = Math.hypot(x - geoLastFixXZ.x, z - geoLastFixXZ.z);
+    if (dist >= GEO_HEADING_MIN_DIST) {
+      // facing計算(exploreOnUpdate)と同じ基準(atan2(dx, dz))で向きを推定
+      geoTargetYaw = Math.atan2(x - geoLastFixXZ.x, z - geoLastFixXZ.z);
+      geoLastFixXZ = { x, z };
+    }
+  } else {
+    geoLastFixXZ = { x, z };
+  }
+  geoTargetX = x; geoTargetZ = z;
+  if (leafletMap && playerMarker) playerMarker.setLatLng([lat, lon]);
+}
+
+function updateGeoBtnUI() {
+  if (!geoBtnEl) return;
+  geoBtnEl.classList.toggle('active', geoModeActive);
+  geoBtnEl.title = geoModeActive ? t('geoBtnTitleOn') : t('geoBtnTitleOff');
+}
+
+function startGeoFollow() {
   if (!('geolocation' in navigator)) {
     mapHintEl.textContent = t('mapHintGeoUnsupported');
     return;
@@ -306,14 +348,40 @@ document.getElementById('geoBtn').addEventListener('click', () => {
   mapHintEl.textContent = t('mapHintGeoFetching');
   navigator.geolocation.getCurrentPosition(
     p => {
-      mapHintEl.textContent = t('mapHintGeoJump');
+      // 初回だけ既存のjumpToLatLon経由できちんと地形・タイル取得キュー等の後始末を済ませてから
+      // 継続追従(watchPosition)を始める(その場しのぎの部分パッチではなく、実績のある
+      // 「現在地・向きを保存してリロード/取り直す」経路にそのまま乗せる)。
+      geoLastFixXZ = null; geoTargetYaw = null;
+      onGeoFix(p);
       jumpToLatLon(p.coords.latitude, p.coords.longitude);
+      geoWatchId = navigator.geolocation.watchPosition(onGeoFix,
+        (err) => console.warn('[geo] watchPosition error', err),
+        { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 });
+      geoModeActive = true;
+      if (window.ModeRegistry) ModeRegistry.switchMode('geo');
+      updateGeoBtnUI();
+      mapOverlay.classList.remove('active');
+      mapHintEl.textContent = t('mapHintGeoTracking');
     },
     err => {
       mapHintEl.textContent = t('mapHintGeoFailed',
         { reason: err.code === 1 ? t('geoPermissionDenied') : err.message });
     },
     { enableHighAccuracy: true, timeout: 10000 });
+}
+
+function stopGeoFollow() {
+  if (geoWatchId !== null) { navigator.geolocation.clearWatch(geoWatchId); geoWatchId = null; }
+  geoModeActive = false;
+  geoLastFixXZ = null; geoTargetYaw = null;
+  if (window.ModeRegistry) ModeRegistry.switchMode('explore');
+  updateGeoBtnUI();
+  mapHintEl.textContent = t('mapHintGeoStopped');
+}
+
+const geoBtnEl = document.getElementById('geoBtn');
+geoBtnEl.addEventListener('click', () => {
+  if (geoModeActive) stopGeoFollow(); else startGeoFollow();
 });
 
 // 【2026-07-23修正】引数名がグローバルのi18n関数t()と衝突し、この関数内で

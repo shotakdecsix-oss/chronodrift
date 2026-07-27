@@ -89,6 +89,11 @@ const I18N = {
     mapHintGeoJump: '📍 現在地へジャンプ！',
     mapHintGeoFailed: '⚠️ 現在地を取得できませんでした({reason})',
     geoPermissionDenied: '位置情報の利用が許可されていません',
+    // 【2026-07-27・GPS追従モード(モードA)】現在地ボタンをトグル化した際の追加文言
+    geoBtnTitleOff: 'GPS追従開始(実際に歩くとゲーム内も追従します)',
+    geoBtnTitleOn: 'GPS追従中(タップで解除)',
+    mapHintGeoTracking: '📡 GPS追従中(現在地ボタンでいつでも解除できます)',
+    mapHintGeoStopped: '📡 GPS追従を解除しました',
     gpsElevation: '標高 {elev}m',
     gpsOpenGoogleMaps: 'Googleマップで開く',
     meijiLanduseLabel: '明治期土地利用',
@@ -188,6 +193,11 @@ const I18N = {
     mapHintGeoJump: '📍 Jumping to your location!',
     mapHintGeoFailed: '⚠️ Could not get your location ({reason})',
     geoPermissionDenied: 'Location permission was denied',
+    // 【2026-07-27・GPS follow mode (Mode A)】extra strings for the toggled location button
+    geoBtnTitleOff: 'Start GPS follow (walk outside and your character follows)',
+    geoBtnTitleOn: 'GPS follow is on (tap to stop)',
+    mapHintGeoTracking: '📡 Following your GPS location (tap the location button to stop anytime)',
+    mapHintGeoStopped: '📡 GPS follow stopped',
     gpsElevation: 'Elevation {elev}m',
     gpsOpenGoogleMaps: 'Open in Google Maps',
     meijiLanduseLabel: 'Meiji-era land use',
@@ -237,6 +247,7 @@ function applyI18n() {
   if (typeof refreshPerfLabel === 'function') refreshPerfLabel();
   if (typeof updateCamDirBtn === 'function') updateCamDirBtn();
   if (typeof updateAltKeepBtn === 'function') updateAltKeepBtn();
+  if (typeof updateGeoBtnUI === 'function') updateGeoBtnUI();
   if (typeof updateLangButtons === 'function') updateLangButtons();
   if (typeof refreshMeijiCredit === 'function') refreshMeijiCredit();
   if (typeof refreshDeployInfo === 'function') refreshDeployInfo();

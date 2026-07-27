@@ -478,6 +478,14 @@ function exploreOnUpdate(dt) {
   }
 
   // Camera
+  updatePlayerCamera();
+}
+
+// カメラ更新(三人称/一人称/上空)を切り出した共通関数。
+// 【2026-07-27・GPS追従モード追加に伴う抽出】元はexploreOnUpdateの末尾にそのまま書かれていた
+// ブロックを、ロジックを一切変えずに関数化しただけ(挙動は完全に同一)。GPS追従モード
+// (geoOnUpdate、下記)もWASD自由移動と同じ三人称/一人称/上空カメラを使うための共通化。
+function updatePlayerCamera() {
   if (viewMode === 1) {
     // First person
     scene.fog = WORLD_FOG;
@@ -514,6 +522,56 @@ function exploreOnUpdate(dt) {
     camera.position.lerp(safeCam, 0.2);
     camera.lookAt(player.position.x, player.position.y + 1.5, player.position.z);
   }
+}
+
+// ======= GPS MODE(モードA): 実際のGPS位置に追従。WASD/スティック入力は無視 =======
+// geoTargetX/Z・geoTargetYaw(part7.jsのonGeoFixが継続更新)へ、位置は指数平滑で追従、
+// 向きは角度差の平滑回頭でなめらかに追いつかせる。ユーザー確認済みの設計により、GPS誤差での
+// 建物めり込みを許容し水平方向の衝突判定(wouldCollide)はここでは行わない。
+// ジャンプ・BIRDモード・高度キープ等の操作系はこのモードでは対象外(実際に歩くモードのため)。
+const GEO_POS_SMOOTH = 6;  // 位置追従の平滑化速度(1/秒。大きいほど目標点に速く寄る)
+const GEO_YAW_SMOOTH = 4;  // 向き追従の平滑化速度(1/秒)
+function geoOnUpdate(dt) {
+  const dx = geoTargetX - player.position.x, dz = geoTargetZ - player.position.z;
+  player.position.x += dx * Math.min(1, dt * GEO_POS_SMOOTH);
+  player.position.z += dz * Math.min(1, dt * GEO_POS_SMOOTH);
+  const isMoving = Math.hypot(dx, dz) > 0.05;
+
+  // 向き: 移動ベクトルから推定したgeoTargetYaw(part7.js)へ、explore同様の角度差平滑で回頭。
+  // 三人称/一人称カメラも進行方向へ追従させるためcamYawも合わせて更新する。
+  if (geoTargetYaw !== null) {
+    let diff = geoTargetYaw - player.rotation.y;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    player.rotation.y += diff * GEO_YAW_SMOOTH * dt;
+    camYaw = player.rotation.y;
+  }
+
+  // 床・重力(ジャンプ/BIRD/高度キープは対象外。歩行中に段差から落ちる程度は自然に追従させる)
+  const floorY = floorHeightAt(player.position.x, player.position.z, player.position.y);
+  if (airborne) {
+    velY += GRAVITY * dt;
+    player.position.y += velY * dt;
+    if (velY <= 0 && player.position.y <= floorY) { player.position.y = floorY; velY = 0; airborne = false; }
+  } else if (player.position.y - floorY > 1.5) {
+    airborne = true; velY = 0;
+  } else {
+    player.position.y = floorY;
+  }
+
+  // 歩行アニメーション: 実際の歩行を模した固定ペース(WASDのrunT/speed連動アニメは使わない)
+  if (isMoving && !airborne) {
+    walkCycle += dt * 6;
+    const swing = Math.sin(walkCycle) * 0.5;
+    leftArm.rotation.x = swing; rightArm.rotation.x = -swing;
+    leftLeg.rotation.x = -swing; rightLeg.rotation.x = swing;
+  } else if (!airborne) {
+    leftArm.rotation.x = 0; rightArm.rotation.x = 0;
+    leftLeg.rotation.x = 0; rightLeg.rotation.x = 0;
+  }
+  player.rotation.x += (0 - player.rotation.x) * Math.min(1, dt * 10);
+
+  updatePlayerCamera();
 }
 
 function animate() {
@@ -764,6 +822,9 @@ if (window.ModeRegistry) {
   // 移動・ジャンプ・歩行アニメーション・カメラの実処理は exploreOnUpdate(上で定義)に
   // 分離済み。将来のRPG/アクション等のモードは、同じ枠組みで別のonUpdateを登録すればよい。
   ModeRegistry.registerMode({ id: 'explore', label: '3D探索', onUpdate: exploreOnUpdate });
+  // 【2026-07-27・GPS追従モード(モードA)】geoBtn(part7.js)のstartGeoFollow/stopGeoFollowが
+  // switchMode('geo')/switchMode('explore')でこの2モードを排他的に切り替える。
+  ModeRegistry.registerMode({ id: 'geo', label: 'GPS追従', onUpdate: geoOnUpdate });
   ModeRegistry.switchMode('explore');
 }
 

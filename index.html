@@ -257,6 +257,8 @@ body {
   white-space:nowrap;
 }
 #mapSearchBtn:hover, #geoBtn:hover { background:rgba(30,110,160,0.95); }
+/* 2026-07-27: GPS追従モード(モードA)中であることを示すアクティブ表示。altKeepBtnと同じ配色。 */
+#geoBtn.active { background:rgba(139,123,255,0.45); border-color:var(--accent); }
 /* ジャンプ先履歴(検索でジャンプした地名を⚙保存し、検索欄の下にチップ表示・再タップで再ジャンプ)。
    【2026-07-24修正】文字が大きすぎる/横向きで地図を圧迫するとの指摘のため、
    <details>による折り畳みに変更(デフォルト閉じた状態=普段は概要行1つ分しか場所を取らない)
