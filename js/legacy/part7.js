@@ -324,6 +324,62 @@ let geoVelX = 0, geoVelZ = 0;          // 推定水平速度(m/s)
 const GEO_MAX_SPEED = 8;               // 速度推定の上限(m/s)。GPS誤差による瞬間的な暴走を抑える(早歩き〜軽いジョグ程度まで許容)
 const GEO_EXTRAPOLATE_MAX = 5;         // 新しいフィックスが来ないまま外挿し続ける秒数の上限(信号ロスト時の暴走防止)
 
+// 【2026-07-27・向きをスマホのコンパスに変更(ユーザー要望)】GPS移動ベクトルからの推定は
+// フィックスが数秒おきにしか来ない上に短距離では誤差が大きく、視界が安定しないとの報告。
+// Device Orientation(コンパス)は静止中も含め高頻度・連続的に向きが取れるため、これを
+// 取得できている間は優先して使い、取れない場合(未対応ブラウザ・許可拒否・PCでのテスト等)は
+// 従来のGPS移動ベクトル推定(geoTargetYaw)にフォールバックする(geoOnUpdate、part9.js側で判定)。
+let geoCompassHeading = null;   // 真北基準・時計回りの度数(0-360)。未取得はnull
+let geoCompassLastUpdate = null; // 最後にイベントを受け取ったperformance.now()時刻
+let geoOrientationHandler = null; // addEventListenerで登録した関数の参照(stopGeoFollowでの解除用)
+const GEO_COMPASS_STALE_MS = 2000; // この時間イベントが来なければコンパス値を「古い」として使わない
+
+// iOS 13+はDeviceOrientationEvent.requestPermission()をユーザー操作(タップ)起点で呼ぶ必要がある。
+// startGeoFollow(geoBtnのクリックハンドラから同期的に呼ばれる)の冒頭で呼ぶことでこれを満たす。
+// Android等はrequestPermission自体が存在しないため、そのままリスナー登録するだけでよい。
+function requestDeviceOrientation() {
+  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    DeviceOrientationEvent.requestPermission().then(state => {
+      if (state === 'granted') attachOrientationListener();
+      else console.warn('[geo] device orientation permission not granted:', state);
+    }).catch(e => console.warn('[geo] device orientation permission request failed', e));
+  } else if (window.DeviceOrientationEvent) {
+    attachOrientationListener();
+  } else {
+    console.warn('[geo] DeviceOrientationEvent not supported; falling back to GPS-vector heading only');
+  }
+}
+function attachOrientationListener() {
+  if (geoOrientationHandler) return; // 二重登録防止(既に追従中に再度呼ばれた場合など)
+  geoOrientationHandler = (event) => {
+    let heading = null;
+    if (typeof event.webkitCompassHeading === 'number' && !isNaN(event.webkitCompassHeading)) {
+      // iOS(Safari/WebKit系。Chrome for iOSも同じエンジン): 真北基準・時計回りでそのまま使える
+      heading = event.webkitCompassHeading;
+    } else if (event.absolute && typeof event.alpha === 'number') {
+      // Android等: absolute=trueの時だけalphaが真北基準。alphaは反時計回りなので変換する
+      heading = (360 - event.alpha) % 360;
+    }
+    if (heading === null) return;
+    geoCompassHeading = heading;
+    geoCompassLastUpdate = performance.now();
+  };
+  // iOSはwebkitCompassHeadingが通常のdeviceorientationイベントに乗る。Android等はabsolute=trueが
+  // 保証されるdeviceorientationabsoluteを優先し、無い環境だけdeviceorientationにフォールバックする。
+  if ('ondeviceorientationabsolute' in window) {
+    window.addEventListener('deviceorientationabsolute', geoOrientationHandler, true);
+  } else {
+    window.addEventListener('deviceorientation', geoOrientationHandler, true);
+  }
+}
+function detachOrientationListener() {
+  if (!geoOrientationHandler) return;
+  window.removeEventListener('deviceorientationabsolute', geoOrientationHandler, true);
+  window.removeEventListener('deviceorientation', geoOrientationHandler, true);
+  geoOrientationHandler = null;
+  geoCompassHeading = null; geoCompassLastUpdate = null;
+}
+
 // 【2026-07-27・真因修正】ここで pos.coords から { lat, lon } を分割代入していたが、
 // Geolocation APIのGeolocationCoordinatesのプロパティ名は latitude / longitude であり、
 // lat / lon は存在しない(xzToLatLon等が返す自前オブジェクトのキー名と取り違えていた)。
@@ -393,6 +449,12 @@ function startGeoFollow() {
     mapHintEl.textContent = t('mapHintGeoHttpsOnly');
     return;
   }
+  // 【2026-07-27・向きをスマホのコンパスに変更】iOSのDeviceOrientationEvent.requestPermission()は
+  // ユーザー操作(タップ)起点で同期的に呼ぶ必要があるため、このクリックハンドラの中で
+  // 真っ先に呼ぶ(geolocationの許可プロンプトより先でも後でも問題ないが、awaitを挟まず
+  // タップ直後に呼ぶことが重要)。取得できなければgeoOnUpdate側でGPS移動ベクトルに
+  // フォールバックするので、許可されなくてもGPS追従自体は従来どおり動く。
+  requestDeviceOrientation();
   // 【2026-07-27・撤回】権限拒否済みを事前検出するnavigator.permissions.query()の
   // awaitを一度追加したが、ユーザー実機(iPhone Chrome、位置情報は「アプリ使用中許可」
   // 済み)で「取得中...」のまま応答が無くなる不具合が出た。この端末では許可は既に
@@ -468,6 +530,7 @@ function stopGeoFollow() {
   geoModeActive = false;
   geoLastFixXZ = null; geoTargetYaw = null;
   geoAnchorTime = null; geoVelX = 0; geoVelZ = 0;
+  detachOrientationListener();
   if (window.ModeRegistry) ModeRegistry.switchMode('explore');
   updateGeoBtnUI();
   mapHintEl.textContent = t('mapHintGeoStopped');

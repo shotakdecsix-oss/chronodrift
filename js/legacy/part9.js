@@ -533,7 +533,10 @@ function updatePlayerCamera() {
 // (wouldCollide)はここでは行わない。ジャンプ・BIRDモード・高度キープ等の操作系はこの
 // モードでは対象外(実際に歩くモードのため)。
 const GEO_POS_SMOOTH = 6;  // 位置追従の平滑化速度(1/秒。大きいほど目標点に速く寄る)
-const GEO_YAW_SMOOTH = 4;  // 向き追従の平滑化速度(1/秒)
+// 【2026-07-27・向きをスマホのコンパスに変更】コンパスは高頻度・連続的に取れるため、
+// GPS移動ベクトル頼りだった頃より応答を上げても(値自体が安定しているので)ジッターにならない。
+// 4→8に引き上げ、実際にスマホを振り向けた動きへの追従をきびきびさせる。
+const GEO_YAW_SMOOTH = 8;  // 向き追従の平滑化速度(1/秒)
 function geoOnUpdate(dt) {
   // 直近フィックス(geoAnchor)から、推定速度(geoVel)で経過時間ぶん外挿した点を目標にする。
   // GEO_EXTRAPOLATE_MAXを超えたら外挿をやめてその場で待機させる(信号ロスト時の暴走防止)。
@@ -548,10 +551,20 @@ function geoOnUpdate(dt) {
   player.position.z += dz * Math.min(1, dt * GEO_POS_SMOOTH);
   const isMoving = Math.hypot(geoVelX, geoVelZ) > 0.15 || Math.hypot(dx, dz) > 0.05;
 
-  // 向き: 移動ベクトルから推定したgeoTargetYaw(part7.js)へ、explore同様の角度差平滑で回頭。
-  // 三人称/一人称カメラも進行方向へ追従させるためcamYawも合わせて更新する。
-  if (geoTargetYaw !== null) {
-    let diff = geoTargetYaw - player.rotation.y;
+  // 向き: スマホのコンパス(geoCompassHeading、part7.js)が新しければ最優先で使う。
+  // 取れていない/古い(GEO_COMPASS_STALE_MS超)場合はGPS移動ベクトル推定(geoTargetYaw)に
+  // フォールバックする。explore同様の角度差平滑で回頭し、三人称/一人称カメラも
+  // 進行方向へ追従させるためcamYawも合わせて更新する。
+  let effectiveYaw = geoTargetYaw;
+  if (geoCompassHeading !== null && geoCompassLastUpdate !== null &&
+      (performance.now() - geoCompassLastUpdate) < GEO_COMPASS_STALE_MS) {
+    const hRad = geoCompassHeading * Math.PI / 180;
+    // xzToLatLon/latLonToXZの座標系(+X=東、+Z=南)に合わせた北基準の向きベクトルから
+    // atan2(dx,dz)で角度を出す(GPS移動ベクトル推定・WASD向き計算と同じ基準に揃える)。
+    effectiveYaw = Math.atan2(Math.sin(hRad), -Math.cos(hRad));
+  }
+  if (effectiveYaw !== null) {
+    let diff = effectiveYaw - player.rotation.y;
     while (diff > Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
     player.rotation.y += diff * GEO_YAW_SMOOTH * dt;
