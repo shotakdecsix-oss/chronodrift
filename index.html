@@ -158,6 +158,24 @@ body {
   0%, 100% { box-shadow:var(--shadow), 0 0 0 0 rgba(139,123,255,0.55); }
   50% { box-shadow:var(--shadow), 0 0 0 6px rgba(139,123,255,0); }
 }
+/* 2026-07-28: 経路シム中バッジ。geoFollowBadgeと同じ仕組み(常時表示・タップで即終了)だが、
+   両方同時に表示され得るため縦にもう1段(+96px)ずらして重ならないようにする。
+   経路ライン(part10.js)と同じ橙系の配色にして「経路モード」であることが一目でわかるようにする。 */
+#routeSimBadge {
+  position:fixed; top:calc(var(--safe-top) + 96px); right:var(--safe-right);
+  border-radius:999px; padding:6px 14px; font-size:12px; font-family:inherit; z-index:45;
+  color:var(--text); white-space:nowrap; pointer-events:all; cursor:pointer;
+  border-color:#ff8800;
+  display:none;
+  animation:routeSimPulse 2s ease-in-out infinite;
+  transition:transform .1s;
+}
+#routeSimBadge.show { display:block; }
+#routeSimBadge:active { transform:scale(.94); }
+@keyframes routeSimPulse {
+  0%, 100% { box-shadow:var(--shadow), 0 0 0 0 rgba(255,136,0,0.55); }
+  50% { box-shadow:var(--shadow), 0 0 0 6px rgba(255,136,0,0); }
+}
 
 /* Touch joystick */
 #joystick {
@@ -297,6 +315,21 @@ body {
   border-radius:8px; border:1px solid #40c0ff;
   background:rgba(10,20,40,0.9); color:#e0f0ff;
 }
+/* 2026-07-28: 出発地・目的地それぞれの「現在地を使う」ボタンと「履歴地」チップ。
+   mapSearchHistoryChipsと同じ見た目(既存の履歴データiseharaJumpHistoryをそのまま再利用)。 */
+.routeQuickBtn {
+  background:rgba(20,80,120,0.9); color:#c8ecff;
+  border:1px solid #40c0ff; border-radius:8px;
+  padding:10px 12px; font-size:14px; cursor:pointer; white-space:nowrap;
+}
+.routeQuickBtn:hover { background:rgba(30,110,160,0.95); }
+.routeHistoryChips { display:flex; flex-wrap:wrap; gap:5px; margin:-2px 0 2px; }
+.routeHistoryChips button {
+  background:rgba(20,60,90,0.85); color:#a8d8f0;
+  border:1px solid rgba(64,192,255,0.4); border-radius:999px;
+  padding:4px 10px; font-size:11px; cursor:pointer; white-space:nowrap;
+}
+.routeHistoryChips button:hover { background:rgba(30,90,130,0.9); }
 #routeSearchBtn {
   background:rgba(20,80,120,0.9); color:#c8ecff;
   border:1px solid #40c0ff; border-radius:8px;
@@ -375,6 +408,10 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
      ジョイスティックの取得対象から除外する作りのため、divのままだとタップがそちらに
      奪われてワンタッチ解除が効かなくなる。 -->
 <button id="geoFollowBadge" type="button" class="glass" data-i18n="geoFollowBadgeLabel" data-i18n-title="geoFollowBadgeTitle" title="タップで解除">🛰 GPS追従中</button>
+
+<!-- 2026-07-28: 経路シミュレーション(モードB)中であることを常時示すバッジ(part10.js)。
+     geoFollowBadgeと同じ理由でbuttonにする(タップで即終了=ワンタッチ離脱)。 -->
+<button id="routeSimBadge" type="button" class="glass" title="タップで経路シムを終了">🚗 経路シム中</button>
 
 <!-- 左: アイコンレール -->
 <nav id="hudRail">
@@ -481,13 +518,20 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
     <summary id="mapSearchHistorySummary" data-i18n="jumpHistorySummary">🕘 履歴</summary>
     <div id="mapSearchHistoryChips"></div>
   </details>
-  <!-- 2026-07-27: モードB(経路シミュレーション)。routeBtnで開閉、実装はpart10.js。 -->
+  <!-- 2026-07-27: モードB(経路シミュレーション)。routeBtnで開閉、実装はpart10.js。
+       2026-07-28: 出発地・目的地とも「現在地」「履歴地」からワンタップで選べるように追加。 -->
   <div id="routePanel">
     <div id="routeSearchGroup">
       <div class="routeInputRow">
         <input id="routeStartInput" type="text" placeholder="出発地" autocomplete="off">
-        <input id="routeDestInput" type="text" placeholder="目的地" autocomplete="off">
+        <button id="routeStartCurBtn" class="routeQuickBtn" title="現在地を使う">📍</button>
       </div>
+      <div id="routeStartHistoryChips" class="routeHistoryChips"></div>
+      <div class="routeInputRow">
+        <input id="routeDestInput" type="text" placeholder="目的地" autocomplete="off">
+        <button id="routeDestCurBtn" class="routeQuickBtn" title="現在地を使う">📍</button>
+      </div>
+      <div id="routeDestHistoryChips" class="routeHistoryChips"></div>
       <button id="routeSearchBtn">🔎 経路検索</button>
       <div id="routeHint"></div>
     </div>

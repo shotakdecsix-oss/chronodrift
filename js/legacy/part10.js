@@ -75,7 +75,7 @@ let routeProgress = 0;     // 現在の走行距離(m)。0〜routeTotalDist
 let routeCurIdx = 0;       // advanceRouteProgressが前回止まったセグメント番号(単調増加、毎フレーム0から探さないための足がかり)
 let routeSpeed = 10;       // 自動再生速度(m/s)。スライダーで変更
 let routePaused = false;   // true=停止中(寄り道中 or 一時停止 or 到着後)
-let routeLine = null;      // 地面のライン表示(THREE.Line)
+let routeLine = null;      // 地面のライン表示(THREE.Mesh、リボン状。太さの都合でLineではなくMesh)
 
 // 経路を3D空間の座標配列に変換し、区間ごとの累積距離を計算する(移動用、フル解像度のまま)
 function buildRoutePoints(coords) {
@@ -121,27 +121,57 @@ function advanceRouteProgress(dist) {
 // 地面にラインを描画する(視覚的なガイドのみ。移動計算に使うroutePointsはフル解像度のまま
 // 別に保持し、描画だけ間引く。長距離ルートで頂点数・getGroundY呼び出し回数が
 // 際限なく増えないようにするため)。
+// 【2026-07-28修正・ユーザー報告「細すぎる」】THREE.Line(LineBasicMaterial)のlinewidthは
+// 多くの環境(Chrome/ANGLE等)で1px固定になり太さの指定が効かない既知の制約があるため、
+// makeRoadGeo(part3.js、道路メッシュ)と同じ「中心線から左右に法線オフセットした帯」を
+// 面ジオメトリ(リボンメッシュ)で構築し、確実に太く見せる。
 const ROUTE_LINE_MAX_POINTS = 2000;
+const ROUTE_LINE_WIDTH = 3.5; // メートル。道路(数m幅)と並んでもはっきり見える太さ
+const ROUTE_LINE_COLOR = 0xff8800; // 道路・水域の青系と被らない橙色(遠目にも目立つ)
 function buildRouteLine() {
-  if (routeLine) {
-    scene.remove(routeLine);
-    routeLine.geometry.dispose();
-    routeLine.material.dispose();
-    routeLine = null;
-  }
-  if (!routePoints.length) return;
+  clearRouteLine();
+  if (routePoints.length < 2) return;
   const step = Math.max(1, Math.ceil(routePoints.length / ROUTE_LINE_MAX_POINTS));
-  const verts = [];
+  const pts = [];
   for (let i = 0; i < routePoints.length; i += step) {
     const p = routePoints[i];
-    verts.push(p.x, getGroundY(p.x, p.z) + 0.3, p.z);
+    pts.push({ x: p.x, z: p.z, y: getGroundY(p.x, p.z) + 0.4 });
   }
-  const last = routePoints[routePoints.length - 1];
-  verts.push(last.x, getGroundY(last.x, last.z) + 0.3, last.z);
+  const lastP = routePoints[routePoints.length - 1];
+  const lx = pts[pts.length - 1];
+  if (!lx || lx.x !== lastP.x || lx.z !== lastP.z) {
+    pts.push({ x: lastP.x, z: lastP.z, y: getGroundY(lastP.x, lastP.z) + 0.4 });
+  }
+  if (pts.length < 2) return;
+
+  const halfW = ROUTE_LINE_WIDTH / 2;
+  const positions = [];
+  const indices = [];
+  for (let i = 0; i < pts.length; i++) {
+    const prev = pts[i - 1] || pts[i];
+    const next = pts[i + 1] || pts[i];
+    let dx = next.x - prev.x, dz = next.z - prev.z;
+    const len = Math.hypot(dx, dz) || 1;
+    dx /= len; dz /= len;
+    const nx = -dz, nz = dx; // 進行方向に対する左右法線
+    const p = pts[i];
+    positions.push(p.x + nx * halfW, p.y, p.z + nz * halfW); // 左端
+    positions.push(p.x - nx * halfW, p.y, p.z - nz * halfW); // 右端
+    if (i > 0) {
+      const a = (i - 1) * 2, b = a + 1, c = i * 2, d = c + 1;
+      indices.push(a, b, c, b, d, c);
+    }
+  }
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
-  const mat = new THREE.LineBasicMaterial({ color: 0x40c0ff, transparent: true, opacity: 0.85 });
-  routeLine = new THREE.Line(geo, mat);
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  const mat = new THREE.MeshBasicMaterial({
+    color: ROUTE_LINE_COLOR, transparent: true, opacity: 0.92,
+    side: THREE.DoubleSide, fog: false, depthWrite: false,
+  });
+  routeLine = new THREE.Mesh(geo, mat);
+  routeLine.renderOrder = 5; // 地面・道路面とのzファイティングを避け確実に手前に見せる
   scene.add(routeLine);
 }
 
@@ -164,7 +194,13 @@ function routeSimOnUpdate(dt) {
     player.position.x = pt.x;
     player.position.z = pt.z;
     if (Math.hypot(pt.dx, pt.dz) > 0.001) {
-      const targetYaw = Math.atan2(pt.dx, pt.dz);
+      // 【2026-07-28修正・ユーザー報告「視界が進行方向に対して逆」】camYaw基準の前方ベクトルは
+      // (-sin(camYaw), -cos(camYaw))(updatePlayerCamera・exploreOnUpdateのforward定義と同じ)。
+      // camYawはこの後player.rotation.yを追いかけるため、実際に(dx,dz)方向を向かせるには
+      // camYaw = atan2(-dx, -dz) でなければならない(atan2(dx,dz)のままだとちょうど180°逆になる)。
+      // GPS追従モード(geoOnUpdate、part7.js)のコンパス経路もGEO_COMPASS_OFFSET_DEG=180で
+      // 実質同じ補正を行っており、こちらは経路シム(コンパス非経由)向けに同じ補正を直接適用する。
+      const targetYaw = Math.atan2(-pt.dx, -pt.dz);
       let diff = targetYaw - player.rotation.y;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
@@ -199,6 +235,10 @@ const routeBtnEl = document.getElementById('routeBtn');
 const routePanelEl = document.getElementById('routePanel');
 const routeStartInputEl = document.getElementById('routeStartInput');
 const routeDestInputEl = document.getElementById('routeDestInput');
+const routeStartCurBtnEl = document.getElementById('routeStartCurBtn');
+const routeDestCurBtnEl = document.getElementById('routeDestCurBtn');
+const routeStartHistoryChipsEl = document.getElementById('routeStartHistoryChips');
+const routeDestHistoryChipsEl = document.getElementById('routeDestHistoryChips');
 const routeSearchBtnEl = document.getElementById('routeSearchBtn');
 const routeHintEl = document.getElementById('routeHint');
 const routeSearchGroupEl = document.getElementById('routeSearchGroup');
@@ -208,18 +248,73 @@ const routeSpeedSliderEl = document.getElementById('routeSpeedSlider');
 const routeSpeedLabelEl = document.getElementById('routeSpeedLabel');
 const routePlayPauseBtnEl = document.getElementById('routePlayPauseBtn');
 const routeEndBtnEl = document.getElementById('routeEndBtn');
+const routeSimBadgeEl = document.getElementById('routeSimBadge');
+
+// 出発地・目的地それぞれ「現在地」「履歴地」タップで確定した場合はここに{lat,lon,name}を保持し、
+// startRouteSimでのテキスト検索(geocodeQuery)をスキップする。手入力し直したら破棄する
+// (入力欄のテキストと確定済み座標がズレたまま経路検索されるのを防ぐ)。
+let routeStartResolved = null;
+let routeDestResolved = null;
+if (routeStartInputEl) routeStartInputEl.addEventListener('input', () => { routeStartResolved = null; });
+if (routeDestInputEl) routeDestInputEl.addEventListener('input', () => { routeDestResolved = null; });
+
+function useCurrentLocationFor(which) {
+  const { lat, lon } = xzToLatLon(player.position.x, player.position.z);
+  const resolved = { lat, lon, name: '現在地' };
+  if (which === 'start') { routeStartInputEl.value = '📍現在地'; routeStartResolved = resolved; }
+  else { routeDestInputEl.value = '📍現在地'; routeDestResolved = resolved; }
+}
+if (routeStartCurBtnEl) routeStartCurBtnEl.addEventListener('click', () => useCurrentLocationFor('start'));
+if (routeDestCurBtnEl) routeDestCurBtnEl.addEventListener('click', () => useCurrentLocationFor('dest'));
+
+function useHistoryFor(which, h) {
+  const resolved = { lat: h.lat, lon: h.lon, name: h.name };
+  if (which === 'start') { routeStartInputEl.value = h.name; routeStartResolved = resolved; }
+  else { routeDestInputEl.value = h.name; routeDestResolved = resolved; }
+}
+// 【重要】地名検索ジャンプ(mapSearchInput/searchPlaceJump、part7.js)が使っている履歴
+// (iseharaJumpHistory、loadJumpHistory)をそのまま読むだけ(新規の保存先は増やさない)。
+function renderRouteHistoryChips() {
+  const list = (typeof loadJumpHistory === 'function') ? loadJumpHistory() : [];
+  [['start', routeStartHistoryChipsEl], ['dest', routeDestHistoryChipsEl]].forEach(([which, container]) => {
+    if (!container) return;
+    container.innerHTML = '';
+    list.forEach(h => {
+      const b = document.createElement('button');
+      b.textContent = '🕘 ' + h.name;
+      b.addEventListener('click', (e) => { e.stopPropagation(); useHistoryFor(which, h); });
+      container.appendChild(b);
+    });
+  });
+}
+renderRouteHistoryChips();
 
 if (routeBtnEl && routePanelEl) {
   routeBtnEl.addEventListener('click', () => {
     routePanelEl.classList.toggle('open');
     routeBtnEl.classList.toggle('active', routePanelEl.classList.contains('open'));
+    if (routePanelEl.classList.contains('open')) renderRouteHistoryChips(); // 開くたびに最新の履歴を反映
   });
 }
+
+// プレイ画面に常時出す経路シム中バッジ(geoFollowBadgeと同じ考え方)。タップでワンタッチ終了できる。
+function updateRouteSimBadge() {
+  if (!routeSimBadgeEl) return;
+  const hasRoute = routePoints.length > 0;
+  routeSimBadgeEl.classList.toggle('show', hasRoute);
+  if (hasRoute) {
+    const active = window.ModeRegistry && ModeRegistry.getActiveMode();
+    const playing = !!(active && active.id === 'routesim' && !routePaused);
+    routeSimBadgeEl.textContent = playing ? '🚗 経路シム再生中' : '🚗 経路シム(一時停止)';
+  }
+}
+if (routeSimBadgeEl) bindTapButton(routeSimBadgeEl, () => { if (routePoints.length > 0) endRouteSim(); });
 
 function updateRouteControlsUI() {
   const active = window.ModeRegistry && ModeRegistry.getActiveMode();
   const playing = !!(active && active.id === 'routesim' && !routePaused);
   if (routePlayPauseBtnEl) routePlayPauseBtnEl.textContent = playing ? '⏸ 一時停止' : '▶ 経路に戻る';
+  updateRouteSimBadge();
 }
 
 function showRouteControls(distance, duration, startName, destName) {
@@ -238,7 +333,11 @@ async function startRouteSim() {
   const destQ = routeDestInputEl.value.trim();
   if (!startQ || !destQ) { routeHintEl.textContent = '出発地・目的地を入力してください'; return; }
   routeHintEl.textContent = '検索中...';
-  const [startGeo, destGeo] = await Promise.all([geocodeQuery(startQ), geocodeQuery(destQ)]);
+  // 「現在地」「履歴地」タップで確定済みならテキスト検索(geocodeQuery)をスキップする
+  const [startGeo, destGeo] = await Promise.all([
+    routeStartResolved || geocodeQuery(startQ),
+    routeDestResolved || geocodeQuery(destQ),
+  ]);
   if (!startGeo) { routeHintEl.textContent = `「${startQ}」が見つかりませんでした`; return; }
   if (!destGeo) { routeHintEl.textContent = `「${destQ}」が見つかりませんでした`; return; }
 
@@ -320,6 +419,7 @@ function endRouteSim() {
   if (routeSearchGroupEl) routeSearchGroupEl.style.display = 'flex';
   if (routeHintEl) routeHintEl.textContent = '';
   try { localStorage.removeItem('iseharaResumeRouteSim'); } catch (e) {}
+  updateRouteControlsUI(); // routePoints.length===0になったのでバッジも隠れる(updateRouteSimBadge経由)
 }
 if (routeEndBtnEl) routeEndBtnEl.addEventListener('click', endRouteSim);
 

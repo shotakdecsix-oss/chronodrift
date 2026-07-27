@@ -418,10 +418,16 @@ function onGeoFix(pos) {
   geoAnchorX = x; geoAnchorZ = z; geoAnchorTime = now;
 
   if (geoLastFixXZ) {
-    const dist = Math.hypot(x - geoLastFixXZ.x, z - geoLastFixXZ.z);
+    const dx = x - geoLastFixXZ.x, dz = z - geoLastFixXZ.z;
+    const dist = Math.hypot(dx, dz);
     if (dist >= GEO_HEADING_MIN_DIST) {
-      // facing計算(exploreOnUpdate)と同じ基準(atan2(dx, dz))で向きを推定
-      geoTargetYaw = Math.atan2(x - geoLastFixXZ.x, z - geoLastFixXZ.z);
+      // 【2026-07-28修正・ユーザー報告(経路シムで同じ症状が出て発覚)】camYawの前方ベクトルは
+      // (-sin(camYaw), -cos(camYaw))(part9.js updatePlayerCamera/exploreOnUpdate参照)。
+      // geoTargetYawはこの後camYawに反映される(geoOnUpdate)ため、実際の移動方向(dx,dz)を
+      // 向かせるには atan2(-dx, -dz) が正しい。以前のatan2(dx,dz)は180°逆(視界が進行方向と
+      // 逆向き)になっていたが、コンパスが使える端末ではこちらの分岐に来ないため気づかれずに
+      // 残っていた(GEO_COMPASS_OFFSET_DEG=180のコンパス側だけ正しく補正済みだった)。
+      geoTargetYaw = Math.atan2(-dx, -dz);
       geoLastFixXZ = { x, z };
     }
   } else {
