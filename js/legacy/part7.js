@@ -308,10 +308,21 @@ mapSearchInput.addEventListener('keyup', e => e.stopPropagation());
 //    行わない(geoOnUpdate側で素通し)。実座標への追従を優先する。
 let geoModeActive = false;
 let geoWatchId = null;
-let geoLastFixXZ = null;              // 直近のGPS点(向き推定の差分元)。{x, z}
-let geoTargetX = 0, geoTargetZ = 0;   // geoOnUpdateが平滑追従する目標点(生のGPS点)
+let geoLastFixXZ = null;              // 直近のGPS点(向き推定の差分元。ジッター閾値を超えた時だけ更新)。{x, z}
 let geoTargetYaw = null;              // 移動ベクトルから推定した向き(未確定はnull)
 const GEO_HEADING_MIN_DIST = 3;       // この距離(m)未満の移動では向きを更新しない(ジッター対策)
+
+// 【2026-07-27・連続移動化(ユーザー要望)】以前はgeoTargetX/Zという「最新フィックスの生座標」
+// へ指数平滑で追従するだけだった。watchPositionのフィックスは数秒おきにしか来ないため、
+// フィックスの瞬間だけ動いてあとは静止する「ワープ→停止」を繰り返すように見えていた。
+// 直近2フィックスから速度を推定し(geoVelX/Z)、次のフィックスが来るまでの間も推定速度で
+// 前進させ続ける(dead reckoning)ことで、実際に連続して歩いているような動きにする。
+// geoAnchor*は「直近フィックスの位置・キャプチャ時刻」、geoOnUpdate(part9.js)側が
+// 毎フレーム geoAnchor + geoVel*経過時間 で外挿した点を平滑追従の目標にする。
+let geoAnchorX = 0, geoAnchorZ = 0, geoAnchorTime = null;
+let geoVelX = 0, geoVelZ = 0;          // 推定水平速度(m/s)
+const GEO_MAX_SPEED = 8;               // 速度推定の上限(m/s)。GPS誤差による瞬間的な暴走を抑える(早歩き〜軽いジョグ程度まで許容)
+const GEO_EXTRAPOLATE_MAX = 5;         // 新しいフィックスが来ないまま外挿し続ける秒数の上限(信号ロスト時の暴走防止)
 
 // 【2026-07-27・真因修正】ここで pos.coords から { lat, lon } を分割代入していたが、
 // Geolocation APIのGeolocationCoordinatesのプロパティ名は latitude / longitude であり、
@@ -329,6 +340,22 @@ function onGeoFix(pos) {
     return;
   }
   const { x, z } = latLonToXZ(lat, lon);
+  const now = performance.now();
+
+  // 速度推定(dead reckoning用)。直近フィックスからの単純な有限差分だが、GPS誤差による
+  // 瞬間的な暴走を防ぐためGEO_MAX_SPEEDで上限クランプする。極端に短い間隔(重複フィックス等)
+  // は分母が小さくノイズが増幅されるため速度推定に使わない(位置・向きの更新は別途行う)。
+  if (geoAnchorTime !== null) {
+    const dtSec = (now - geoAnchorTime) / 1000;
+    if (dtSec > 0.15) {
+      let vx = (x - geoAnchorX) / dtSec, vz = (z - geoAnchorZ) / dtSec;
+      const speed = Math.hypot(vx, vz);
+      if (speed > GEO_MAX_SPEED) { const s = GEO_MAX_SPEED / speed; vx *= s; vz *= s; }
+      geoVelX = vx; geoVelZ = vz;
+    }
+  }
+  geoAnchorX = x; geoAnchorZ = z; geoAnchorTime = now;
+
   if (geoLastFixXZ) {
     const dist = Math.hypot(x - geoLastFixXZ.x, z - geoLastFixXZ.z);
     if (dist >= GEO_HEADING_MIN_DIST) {
@@ -339,17 +366,22 @@ function onGeoFix(pos) {
   } else {
     geoLastFixXZ = { x, z };
   }
-  geoTargetX = x; geoTargetZ = z;
   if (leafletMap && playerMarker) playerMarker.setLatLng([lat, lon]);
 }
 
 function updateGeoBtnUI() {
-  if (!geoBtnEl) return;
-  geoBtnEl.classList.toggle('active', geoModeActive);
-  geoBtnEl.title = geoModeActive ? t('geoBtnTitleOn') : t('geoBtnTitleOff');
-  // 【2026-07-27・ユーザー報告対応】背景色の変化(.active)だけでは追従中かどうか
-  // 分かりにくいとの報告のため、ボタンの文字自体もはっきり切り替える。
-  geoBtnEl.textContent = t(geoModeActive ? 'geoBtnLabelActive' : 'geoBtnLabel');
+  if (geoBtnEl) {
+    geoBtnEl.classList.toggle('active', geoModeActive);
+    geoBtnEl.title = geoModeActive ? t('geoBtnTitleOn') : t('geoBtnTitleOff');
+    // 【2026-07-27・ユーザー報告対応】背景色の変化(.active)だけでは追従中かどうか
+    // 分かりにくいとの報告のため、ボタンの文字自体もはっきり切り替える。
+    geoBtnEl.textContent = t(geoModeActive ? 'geoBtnLabelActive' : 'geoBtnLabel');
+  }
+  // 【2026-07-27・ユーザー要望】マップ画面を閉じて3D探索に戻ると「現在地」ボタン自体が
+  // 画面外(マップオーバーレイの中)に隠れ、GPS追従中かどうかが常時は分からなかった。
+  // 画面上に常時見える小さなバッジを追加し、追従中だけ表示する(UI非表示モードでも
+  // addressDisplayと同格の重要情報として残す。非表示リストに加えていない)。
+  if (geoFollowBadgeEl) geoFollowBadgeEl.classList.toggle('show', geoModeActive);
 }
 
 function startGeoFollow() {
@@ -393,6 +425,7 @@ function startGeoFollow() {
       // 継続追従(watchPosition)を始める(その場しのぎの部分パッチではなく、実績のある
       // 「現在地・向きを保存してリロード/取り直す」経路にそのまま乗せる)。
       geoLastFixXZ = null; geoTargetYaw = null;
+      geoAnchorTime = null; geoVelX = 0; geoVelZ = 0;
       onGeoFix(p);
       // 【2026-07-27・ユーザー報告対応】ゲーム内の現在の原点(MID_LAT/MID_LON)から実際のGPS
       // 座標が300km(RECENTER_DIST_M)超離れていると、jumpToLatLonは「現在地・向きを保存して
@@ -434,6 +467,7 @@ function stopGeoFollow() {
   if (geoWatchId !== null) { navigator.geolocation.clearWatch(geoWatchId); geoWatchId = null; }
   geoModeActive = false;
   geoLastFixXZ = null; geoTargetYaw = null;
+  geoAnchorTime = null; geoVelX = 0; geoVelZ = 0;
   if (window.ModeRegistry) ModeRegistry.switchMode('explore');
   updateGeoBtnUI();
   mapHintEl.textContent = t('mapHintGeoStopped');
@@ -443,6 +477,7 @@ const geoBtnEl = document.getElementById('geoBtn');
 geoBtnEl.addEventListener('click', () => {
   if (geoModeActive) stopGeoFollow(); else startGeoFollow();
 });
+const geoFollowBadgeEl = document.getElementById('geoFollowBadge');
 
 // 【2026-07-23修正】引数名がグローバルのi18n関数t()と衝突し、この関数内で
 // t('gpsElevation',...)を呼ぶと引数(経過時間の数値)の方が優先されて

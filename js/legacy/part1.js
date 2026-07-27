@@ -95,6 +95,7 @@ const I18N = {
     // 【2026-07-27】背景色の変化だけでは分かりにくいとのユーザー報告のため、
     // 追従中はボタンの文字自体も変える(altKeepBtn等と同じ「状態で表示を差し替える」方式)。
     geoBtnLabelActive: '🛰 追従中',
+    geoFollowBadgeLabel: '🛰 GPS追従中',
     mapHintGeoTracking: '📡 GPS追従中(現在地ボタンでいつでも解除できます)',
     mapHintGeoStopped: '📡 GPS追従を解除しました',
     mapHintGeoBlocked: '⚠️ このサイトで位置情報がブロックされています。ブラウザのアドレスバー付近の🔒(サイト情報)アイコン→位置情報の設定を「許可」に変更してから、もう一度お試しください',
@@ -202,6 +203,7 @@ const I18N = {
     geoBtnTitleOff: 'Start GPS follow (walk outside and your character follows)',
     geoBtnTitleOn: 'GPS follow is on (tap to stop)',
     geoBtnLabelActive: '🛰 Following',
+    geoFollowBadgeLabel: '🛰 GPS Following',
     mapHintGeoTracking: '📡 Following your GPS location (tap the location button to stop anytime)',
     mapHintGeoStopped: '📡 GPS follow stopped',
     mapHintGeoBlocked: '⚠️ Location access is blocked for this site. Tap the 🔒 (site info) icon near the address bar, allow Location, then try again',

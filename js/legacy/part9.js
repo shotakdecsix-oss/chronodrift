@@ -525,17 +525,28 @@ function updatePlayerCamera() {
 }
 
 // ======= GPS MODE(モードA): 実際のGPS位置に追従。WASD/スティック入力は無視 =======
-// geoTargetX/Z・geoTargetYaw(part7.jsのonGeoFixが継続更新)へ、位置は指数平滑で追従、
-// 向きは角度差の平滑回頭でなめらかに追いつかせる。ユーザー確認済みの設計により、GPS誤差での
-// 建物めり込みを許容し水平方向の衝突判定(wouldCollide)はここでは行わない。
-// ジャンプ・BIRDモード・高度キープ等の操作系はこのモードでは対象外(実際に歩くモードのため)。
+// geoAnchorX/Z/Time・geoVelX/Z(part7.jsのonGeoFixが継続更新)から、次のフィックスが来るまでの
+// 間も推定速度で外挿し続ける(dead reckoning)ことで、フィックスの瞬間だけワープしてあとは
+// 静止する、という動きではなく連続して歩いているように見せる(ユーザー要望・2026-07-27)。
+// 外挿した点へは位置は指数平滑で追従、向きは角度差の平滑回頭でなめらかに追いつかせる。
+// ユーザー確認済みの設計により、GPS誤差での建物めり込みを許容し水平方向の衝突判定
+// (wouldCollide)はここでは行わない。ジャンプ・BIRDモード・高度キープ等の操作系はこの
+// モードでは対象外(実際に歩くモードのため)。
 const GEO_POS_SMOOTH = 6;  // 位置追従の平滑化速度(1/秒。大きいほど目標点に速く寄る)
 const GEO_YAW_SMOOTH = 4;  // 向き追従の平滑化速度(1/秒)
 function geoOnUpdate(dt) {
-  const dx = geoTargetX - player.position.x, dz = geoTargetZ - player.position.z;
+  // 直近フィックス(geoAnchor)から、推定速度(geoVel)で経過時間ぶん外挿した点を目標にする。
+  // GEO_EXTRAPOLATE_MAXを超えたら外挿をやめてその場で待機させる(信号ロスト時の暴走防止)。
+  let targetX = geoAnchorX, targetZ = geoAnchorZ;
+  if (geoAnchorTime !== null) {
+    const elapsed = Math.min((performance.now() - geoAnchorTime) / 1000, GEO_EXTRAPOLATE_MAX);
+    targetX = geoAnchorX + geoVelX * elapsed;
+    targetZ = geoAnchorZ + geoVelZ * elapsed;
+  }
+  const dx = targetX - player.position.x, dz = targetZ - player.position.z;
   player.position.x += dx * Math.min(1, dt * GEO_POS_SMOOTH);
   player.position.z += dz * Math.min(1, dt * GEO_POS_SMOOTH);
-  const isMoving = Math.hypot(dx, dz) > 0.05;
+  const isMoving = Math.hypot(geoVelX, geoVelZ) > 0.15 || Math.hypot(dx, dz) > 0.05;
 
   // 向き: 移動ベクトルから推定したgeoTargetYaw(part7.js)へ、explore同様の角度差平滑で回頭。
   // 三人称/一人称カメラも進行方向へ追従させるためcamYawも合わせて更新する。

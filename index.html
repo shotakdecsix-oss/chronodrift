@@ -140,6 +140,22 @@ body {
   display:flex; align-items:center; justify-content:center;
 }
 
+/* 2026-07-27: GPS追従モード中バッジ(常時表示、右上のUI非表示トグルの下)。
+   .showが付いた時だけ表示し、目立つよう軽くパルスさせる。 */
+#geoFollowBadge {
+  position:fixed; top:calc(var(--safe-top) + 52px); right:var(--safe-right);
+  border-radius:999px; padding:6px 14px; font-size:12px; z-index:45;
+  color:var(--text); white-space:nowrap; pointer-events:none;
+  border-color:var(--accent);
+  display:none;
+  animation:geoFollowPulse 2s ease-in-out infinite;
+}
+#geoFollowBadge.show { display:block; }
+@keyframes geoFollowPulse {
+  0%, 100% { box-shadow:var(--shadow), 0 0 0 0 rgba(139,123,255,0.55); }
+  50% { box-shadow:var(--shadow), 0 0 0 6px rgba(139,123,255,0); }
+}
+
 /* Touch joystick */
 #joystick {
   position:fixed; bottom:calc(var(--safe-bottom) + 24px); left:calc(var(--safe-left) + 12px);
@@ -308,6 +324,10 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 <!-- 上中央: ロケーションカプセル(タップでGPS座標・標高を展開) -->
 <div id="addressDisplay" class="glass" data-i18n="addrLoading">📍 現在地を取得中...</div>
 <a id="gpsDisplay" class="glass" href="#" target="_blank">📍 座標取得中...</a>
+
+<!-- 2026-07-27: GPS追従モード中であることを常時示すバッジ(part7.js updateGeoBtnUIがトグル)。
+     「現在地」ボタン自体はマップ画面を閉じると隠れるため、3D探索中でも見える位置に置く。 -->
+<div id="geoFollowBadge" class="glass" data-i18n="geoFollowBadgeLabel">🛰 GPS追従中</div>
 
 <!-- 左: アイコンレール -->
 <nav id="hudRail">
