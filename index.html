@@ -278,6 +278,46 @@ body {
 #mapSearchBtn:hover, #geoBtn:hover { background:rgba(30,110,160,0.95); }
 /* 2026-07-27: GPS追従モード(モードA)中であることを示すアクティブ表示。altKeepBtnと同じ配色。 */
 #geoBtn.active { background:rgba(139,123,255,0.45); border-color:var(--accent); }
+/* 2026-07-27: モードB(経路シミュレーション、FEATURE_GEO_NAV_MODES.md §3、part10.js)。
+   routeBtnでパネル(#routePanel)を開閉し、出発地・目的地を検索して経路自動再生する。
+   既存のmapSearchInput/searchPlaceJumpとは完全に独立(壊さないため)。 */
+#routeBtn {
+  background:rgba(20,80,120,0.9); color:#c8ecff;
+  border:1px solid #40c0ff; border-radius:8px;
+  padding:10px 14px; font-size:14px; cursor:pointer; white-space:nowrap;
+}
+#routeBtn:hover { background:rgba(30,110,160,0.95); }
+#routeBtn.active { background:rgba(139,123,255,0.45); border-color:var(--accent); }
+#routePanel { display:none; width:90vw; pointer-events:all; flex-direction:column; gap:8px; }
+#routePanel.open { display:flex; }
+#routeSearchGroup { display:flex; flex-direction:column; gap:8px; }
+.routeInputRow { display:flex; gap:8px; }
+#routeStartInput, #routeDestInput {
+  flex:1; min-width:0; padding:10px 12px; font-size:15px;
+  border-radius:8px; border:1px solid #40c0ff;
+  background:rgba(10,20,40,0.9); color:#e0f0ff;
+}
+#routeSearchBtn {
+  background:rgba(20,80,120,0.9); color:#c8ecff;
+  border:1px solid #40c0ff; border-radius:8px;
+  padding:10px 14px; font-size:14px; cursor:pointer; white-space:nowrap;
+}
+#routeSearchBtn:hover { background:rgba(30,110,160,0.95); }
+#routeHint { color:#80e0ff; font-size:12px; text-align:center; }
+#routeControls {
+  display:none; flex-direction:column; gap:8px;
+  background:rgba(10,20,40,0.85); border:1px solid #40c0ff; border-radius:8px; padding:10px 12px;
+}
+#routeInfo { color:#c8ecff; font-size:12px; text-align:center; }
+.routeSpeedRow { display:flex; align-items:center; gap:8px; color:#c8ecff; font-size:12px; }
+#routeSpeedSlider { flex:1; }
+.routeControlBtnRow { display:flex; gap:8px; }
+#routePlayPauseBtn, #routeEndBtn {
+  flex:1; background:rgba(20,80,120,0.9); color:#c8ecff;
+  border:1px solid #40c0ff; border-radius:8px; padding:10px 0; font-size:14px; cursor:pointer;
+}
+#routePlayPauseBtn:hover, #routeEndBtn:hover { background:rgba(30,110,160,0.95); }
+#routeEndBtn { border-color:#ff6060; color:#ffd0d0; }
 /* ジャンプ先履歴(検索でジャンプした地名を⚙保存し、検索欄の下にチップ表示・再タップで再ジャンプ)。
    【2026-07-24修正】文字が大きすぎる/横向きで地図を圧迫するとの指摘のため、
    <details>による折り畳みに変更(デフォルト閉じた状態=普段は概要行1つ分しか場所を取らない)
@@ -432,6 +472,7 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
     <input id="mapSearchInput" type="text" placeholder="地名・住所・施設名で検索" autocomplete="off" data-i18n-placeholder="mapSearchPlaceholder">
     <button id="mapSearchBtn" data-i18n="mapSearchBtnLabel">🔎 検索</button>
     <button id="geoBtn" data-i18n="geoBtnLabel">📡 現在地</button>
+    <button id="routeBtn">🚗 経路</button>
   </div>
   <!-- 2026-07-21: 検索でジャンプした地名の履歴(ユーザー要望)。part7.jsが
        localStorageから読み込んでチップとして描画し、タップで再ジャンプする。
@@ -440,6 +481,29 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
     <summary id="mapSearchHistorySummary" data-i18n="jumpHistorySummary">🕘 履歴</summary>
     <div id="mapSearchHistoryChips"></div>
   </details>
+  <!-- 2026-07-27: モードB(経路シミュレーション)。routeBtnで開閉、実装はpart10.js。 -->
+  <div id="routePanel">
+    <div id="routeSearchGroup">
+      <div class="routeInputRow">
+        <input id="routeStartInput" type="text" placeholder="出発地" autocomplete="off">
+        <input id="routeDestInput" type="text" placeholder="目的地" autocomplete="off">
+      </div>
+      <button id="routeSearchBtn">🔎 経路検索</button>
+      <div id="routeHint"></div>
+    </div>
+    <div id="routeControls">
+      <div id="routeInfo"></div>
+      <div class="routeSpeedRow">
+        <span>速度</span>
+        <input id="routeSpeedSlider" type="range" min="2" max="40" step="1" value="10">
+        <span id="routeSpeedLabel">36 km/h</span>
+      </div>
+      <div class="routeControlBtnRow">
+        <button id="routePlayPauseBtn">⏸ 一時停止</button>
+        <button id="routeEndBtn">✕ 経路終了</button>
+      </div>
+    </div>
+  </div>
   <div id="leafletMap"></div>
   <button id="mapCloseBtn">✕ 閉じる</button>
 </div>
@@ -476,5 +540,6 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 <script src="js/legacy/part7.js"></script>
 <script src="js/legacy/part8.js"></script>
 <script src="js/legacy/part9.js"></script>
+<script src="js/legacy/part10.js"></script>
 </body>
 </html>
