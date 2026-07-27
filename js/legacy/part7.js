@@ -336,7 +336,7 @@ function updateGeoBtnUI() {
   geoBtnEl.title = geoModeActive ? t('geoBtnTitleOn') : t('geoBtnTitleOff');
 }
 
-async function startGeoFollow() {
+function startGeoFollow() {
   if (!('geolocation' in navigator)) {
     mapHintEl.textContent = t('mapHintGeoUnsupported');
     return;
@@ -345,21 +345,12 @@ async function startGeoFollow() {
     mapHintEl.textContent = t('mapHintGeoHttpsOnly');
     return;
   }
-  // 【2026-07-27追加・ユーザー報告対応】権限が既に「拒否」で固定されていると、
-  // getCurrentPositionは許可ダイアログを一切出さずに即座にエラーコールバックへ抜ける
-  // (=タップしても何も起きないように見える、という報告と一致する)。Permissions API
-  // が使える環境では事前に状態を見て、対処法(ブラウザのサイト設定から許可し直す)を
-  // 具体的に案内する。未対応/失敗時は何もせず従来どおりgetCurrentPositionに任せる。
-  if (navigator.permissions && navigator.permissions.query) {
-    try {
-      const status = await navigator.permissions.query({ name: 'geolocation' });
-      console.log('[geo] permission state:', status.state);
-      if (status.state === 'denied') {
-        mapHintEl.textContent = t('mapHintGeoBlocked');
-        return;
-      }
-    } catch (e) { console.warn('[geo] permissions.query failed', e); }
-  }
+  // 【2026-07-27・撤回】権限拒否済みを事前検出するnavigator.permissions.query()の
+  // awaitを一度追加したが、ユーザー実機(iPhone Chrome、位置情報は「アプリ使用中許可」
+  // 済み)で「取得中...」のまま応答が無くなる不具合が出た。この端末では許可は既に
+  // 済んでおりこのチェック自体は無意味な上、awaitでクリックのユーザー操作(gesture)
+  // コンテキストが途切れ、直後のgetCurrentPositionがiOS側で正しく起動しなくなった
+  // 疑いが強いため撤去する。元の(動作実績のある)同期呼び出しに戻す。
   mapHintEl.textContent = t('mapHintGeoFetching');
   // 【2026-07-27追加・ユーザー報告対応(iPhone Chrome)】iOSでは、OS側の「位置情報サービス」
   // がOFF等の状態だと、getCurrentPositionのsuccess/errorどちらのコールバックも一切呼ばれずに
