@@ -361,8 +361,22 @@ async function startGeoFollow() {
     } catch (e) { console.warn('[geo] permissions.query failed', e); }
   }
   mapHintEl.textContent = t('mapHintGeoFetching');
+  // 【2026-07-27追加・ユーザー報告対応(iPhone Chrome)】iOSでは、OS側の「位置情報サービス」
+  // がOFF等の状態だと、getCurrentPositionのsuccess/errorどちらのコールバックも一切呼ばれずに
+  // 永久に固まる既知の不具合がある(渡しているtimeout: 10000オプションはこのケースでは
+  // 効かない)。ブラウザ組み込みのtimeoutに頼らず、こちら側でも見張りタイマーを持ち、
+  // 一定時間応答が無ければ手動でタイムアウト扱いにしてユーザーに分かる形で知らせる。
+  let geoFixSettled = false;
+  const geoManualTimeout = setTimeout(() => {
+    if (geoFixSettled) return;
+    geoFixSettled = true;
+    console.warn('[geo] getCurrentPosition did not respond within 12s (OS location services may be off)');
+    mapHintEl.textContent = t('mapHintGeoTimeout');
+  }, 12000);
   navigator.geolocation.getCurrentPosition(
     p => {
+      if (geoFixSettled) return; // 見張りタイマー発火後に遅れて応答が来た場合は無視
+      geoFixSettled = true; clearTimeout(geoManualTimeout);
       console.log('[geo] getCurrentPosition success', p.coords.latitude, p.coords.longitude);
       // 初回だけ既存のjumpToLatLon経由できちんと地形・タイル取得キュー等の後始末を済ませてから
       // 継続追従(watchPosition)を始める(その場しのぎの部分パッチではなく、実績のある
@@ -380,6 +394,8 @@ async function startGeoFollow() {
       mapHintEl.textContent = t('mapHintGeoTracking');
     },
     err => {
+      if (geoFixSettled) return;
+      geoFixSettled = true; clearTimeout(geoManualTimeout);
       console.warn('[geo] getCurrentPosition error', err.code, err.message);
       mapHintEl.textContent = t('mapHintGeoFailed',
         { reason: err.code === 1 ? t('geoPermissionDenied') : err.message });
