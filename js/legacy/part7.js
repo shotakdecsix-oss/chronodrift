@@ -334,6 +334,9 @@ function updateGeoBtnUI() {
   if (!geoBtnEl) return;
   geoBtnEl.classList.toggle('active', geoModeActive);
   geoBtnEl.title = geoModeActive ? t('geoBtnTitleOn') : t('geoBtnTitleOff');
+  // 【2026-07-27・ユーザー報告対応】背景色の変化(.active)だけでは追従中かどうか
+  // 分かりにくいとの報告のため、ボタンの文字自体もはっきり切り替える。
+  geoBtnEl.textContent = t(geoModeActive ? 'geoBtnLabelActive' : 'geoBtnLabel');
 }
 
 function startGeoFollow() {
@@ -374,6 +377,18 @@ function startGeoFollow() {
       // 「現在地・向きを保存してリロード/取り直す」経路にそのまま乗せる)。
       geoLastFixXZ = null; geoTargetYaw = null;
       onGeoFix(p);
+      // 【2026-07-27・ユーザー報告対応】ゲーム内の現在の原点(MID_LAT/MID_LON)から実際のGPS
+      // 座標が300km(RECENTER_DIST_M)超離れていると、jumpToLatLonは「現在地・向きを保存して
+      // location.reload()」する(jumpToLatLon冒頭のfar-jump分岐と全く同じ判定式)。
+      // reloadはJS実行環境を丸ごと作り直すため、この直後に張るwatchPosition/geoModeActive等の
+      // GPS追従状態も一緒に消えてしまい、「最初のジャンプだけ成功して追従はしない」不具合になる
+      // (実機報告どおり)。reload直前にフラグを保存しておき、起動ブートストラップ側
+      // (part9.js末尾)で検知して自動的にstartGeoFollowを呼び直し、追従を引き継がせる。
+      const _geoDist = Math.hypot((wrapLon(p.coords.longitude) - MID_LON) * SCALE * COS_LAT,
+        (p.coords.latitude - MID_LAT) * SCALE);
+      if (_geoDist > RECENTER_DIST_M) {
+        try { localStorage.setItem('iseharaResumeGeoFollow', '1'); } catch (e) {}
+      }
       jumpToLatLon(p.coords.latitude, p.coords.longitude);
       geoWatchId = navigator.geolocation.watchPosition(onGeoFix,
         (err) => console.warn('[geo] watchPosition error', err),

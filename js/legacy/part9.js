@@ -924,4 +924,16 @@ setInterval(saveLastPos, 10000);
   // 最終的なプレイヤー位置を中心に、NEAR(周辺・高解像度)とFAR(広域・低解像度)を両方取得
   loadNearTerrain(player.position.x, player.position.z);
   loadWideTerrain(player.position.x, player.position.z);
+
+  // 【2026-07-27・GPS追従モードの遠方ジャンプ再開】startGeoFollow(part7.js)が、遠方
+  // (300km超)ジャンプでのlocation.reloadを検知した時だけ立てておくフラグ。ここまでの
+  // resume処理(loadOSM内recenterOrigin)で既にジャンプ先へ原点が付け替わっているため、
+  // 起動直後にstartGeoFollowを呼び直せば今度は近距離ジャンプ扱いになりreloadは起きず、
+  // 継続追従(watchPosition)がそのまま定着する。
+  let resumeGeoFollow = false;
+  try { resumeGeoFollow = localStorage.getItem('iseharaResumeGeoFollow') === '1'; } catch (e) {}
+  if (resumeGeoFollow) {
+    try { localStorage.removeItem('iseharaResumeGeoFollow'); } catch (e) {}
+    if (typeof startGeoFollow === 'function') startGeoFollow();
+  }
 })();
