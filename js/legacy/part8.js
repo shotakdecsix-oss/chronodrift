@@ -588,21 +588,25 @@ const OSM_TILE_CLAUSES_ROAD = OSM_TILE_CLAUSES.filter(c => !OSM_TILE_CLAUSES_BUI
 const NEAR_SPLIT_TIER_R = 1;
 // 【2026-07-26・A/B用スイッチ】道路/建物クエリの分離(2026-07-24 c240b58で導入)を
 // その場で無効化し、導入前と同じ「1タイル=1複合クエリ」に戻すためのフラグ。
-//   window.SPLIT_NEAR_QUERIES = false;  → 分離オフ(導入前と同じ挙動)
-//   window.SPLIT_NEAR_QUERIES = true;   → 分離オン(現行の既定)
+//   window.SPLIT_NEAR_QUERIES = false;  → 分離オフ(統合クエリ。2026-07-27から既定)
+//   window.SPLIT_NEAR_QUERIES = true;   → 分離オン(旧既定。手動で試したい時用に残す)
 // 切り替えた後、マップジャンプするとキューがクリアされるので綺麗に比較できる。
-//
-// なぜこのスイッチが要るか: 「以前の方が快適だった」という実機報告に対し、素直に
-// js/legacy を旧コミットへ戻すとA/Bが成立しない。旧part8.jsはPOSTボディに
-// &priority= を付けないため、現行server.jsが未指定を PRIO_RANK.far として扱い
-// (scheduleUpstream)、FAR_INFLIGHT_MAX で絞られる。分離の有無とは無関係な理由で
-// 遅くなるので、犯人を取り違える。分離だけを外して比べる必要がある。
 //
 // 分離が重くする理屈: 近傍3x3の9枚が「道路」「建物」の2本に割れて18本になり、さらに
 // 建物ジョブは道路確定後にしか積まれない(queueTile内のroadReadyTiles分岐)ため、
-// 足元タイルの完成が1往復から2往復の直列になる。上流が1IP2スロットしかない状況では
-// 本数が倍になる影響が素直に出る。
-if (typeof window !== 'undefined' && window.SPLIT_NEAR_QUERIES === undefined) window.SPLIT_NEAR_QUERIES = true;
+// 足元タイルの完成が1往復から2往復の直列になる。この「1タイルぶんの往復レイテンシ」は
+// タイル単位の直列依存なので、上流の並列数(UPSTREAM_WORKERS)をいくら上げても解消しない。
+//
+// 【2026-07-27・ユーザー判断で既定を統合に変更】分離を入れた本来の狙いは往復削減ではなく
+// 「建物が多い密集地(東京駅・京橋八丁堀・香港・NY等)で道路が建物データの重さに巻き込まれ
+// ないようにする」ことだった。ただし分離を導入した2026-07-26時点は上流ワーカーが2本しか
+// 無く、枠の奪い合いも深刻だった。今はVK Maps移行でワーカー8本まで上げており
+// ([[project_isehara_game_overpass_concurrency_raised]]相当の変更)、分離の動機だった
+// 「枠不足」はかなり弱まっている。一方で分離コスト(往復倍増によるtile単位の直列レイテンシ)
+// は並列数に関係なく残るため、統合をデフォルトに戻す。密集地での事前検証はユーザー判断で
+// スキップ。もし東京駅・香港等で道路が再び建物待ちで遅くなる/504が増えるようなら、
+// window.SPLIT_NEAR_QUERIES = true で分離に戻して比較できる。
+if (typeof window !== 'undefined' && window.SPLIT_NEAR_QUERIES === undefined) window.SPLIT_NEAR_QUERIES = false;
 // 1リクエストにまとめる最大タイル数。スポーン直後・地図ジャンプ直後・急旋回時は
 // 一度に何十枚も新規タイルが必要になるが、Overpassは1ホスト1.1秒間隔の直列制限
 // (server.js)のため「1タイル=1リクエスト」だと平常時の10〜数十倍待たされていた。
