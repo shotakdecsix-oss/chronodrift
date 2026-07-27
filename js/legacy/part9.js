@@ -537,6 +537,7 @@ const GEO_POS_SMOOTH = 6;  // 位置追従の平滑化速度(1/秒。大きい�
 // GPS移動ベクトル頼りだった頃より応答を上げても(値自体が安定しているので)ジッターにならない。
 // 4→8に引き上げ、実際にスマホを振り向けた動きへの追従をきびきびさせる。
 const GEO_YAW_SMOOTH = 8;  // 向き追従の平滑化速度(1/秒)
+const GEO_CAM_RETURN_SMOOTH = 6; // 指を離した後、カメラがplayer.rotation.yへ戻る速度(1/秒)
 function geoOnUpdate(dt) {
   // 直近フィックス(geoAnchor)から、推定速度(geoVel)で経過時間ぶん外挿した点を目標にする。
   // GEO_EXTRAPOLATE_MAXを超えたら外挿をやめてその場で待機させる(信号ロスト時の暴走防止)。
@@ -553,8 +554,7 @@ function geoOnUpdate(dt) {
 
   // 向き: スマホのコンパス(geoCompassHeading、part7.js)が新しければ最優先で使う。
   // 取れていない/古い(GEO_COMPASS_STALE_MS超)場合はGPS移動ベクトル推定(geoTargetYaw)に
-  // フォールバックする。explore同様の角度差平滑で回頭し、三人称/一人称カメラも
-  // 進行方向へ追従させるためcamYawも合わせて更新する。
+  // フォールバックする。explore同様の角度差平滑で回頭する(体の向き=実際に歩いている方向)。
   let effectiveYaw = geoTargetYaw;
   if (geoCompassHeading !== null && geoCompassLastUpdate !== null &&
       (performance.now() - geoCompassLastUpdate) < GEO_COMPASS_STALE_MS) {
@@ -569,7 +569,20 @@ function geoOnUpdate(dt) {
     while (diff > Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
     player.rotation.y += diff * GEO_YAW_SMOOTH * dt;
-    camYaw = player.rotation.y;
+  }
+
+  // 【2026-07-27・ユーザー要望】カメラ(camYaw)は今まで毎フレームplayer.rotation.yへ強制
+  // 一致させていたため、explore同様のドラッグ操作(part7.jsのmousemove/touchmoveハンドラが
+  // 直接camYawを書き換える)がその場で打ち消され、指で視界を引っ張ることができなかった。
+  // ドラッグ中(mouseDown、または右側タッチのcamTouchIdが有効)はcamYawに一切触れず
+  // ハンドラの更新をそのまま反映させ、指を離した(ドラッグしていない)間だけ体の向き
+  // (=進行方向/コンパス)へなめらかに戻す。
+  const geoDragging = mouseDown || camTouchId !== null;
+  if (!geoDragging) {
+    let camDiff = player.rotation.y - camYaw;
+    while (camDiff > Math.PI) camDiff -= Math.PI * 2;
+    while (camDiff < -Math.PI) camDiff += Math.PI * 2;
+    camYaw += camDiff * GEO_CAM_RETURN_SMOOTH * dt;
   }
 
   // 床・重力(ジャンプ/BIRD/高度キープは対象外。歩行中に段差から落ちる程度は自然に追従させる)
