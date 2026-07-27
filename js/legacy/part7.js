@@ -546,6 +546,10 @@ geoBtnEl.addEventListener('click', () => {
   if (geoModeActive) stopGeoFollow(); else startGeoFollow();
 });
 const geoFollowBadgeEl = document.getElementById('geoFollowBadge');
+// 【2026-07-27・ユーザー要望】マップ画面を開いて「現在地」ボタンまで辿らなくても、
+// 常時表示のバッジ自体をワンタッチで追従解除できるようにする(bindTapButtonで
+// タッチ/クリックどちらでも即座に反応。他のHUDボタンと同じパターン)。
+if (geoFollowBadgeEl) bindTapButton(geoFollowBadgeEl, () => { if (geoModeActive) stopGeoFollow(); });
 
 // 【2026-07-23修正】引数名がグローバルのi18n関数t()と衝突し、この関数内で
 // t('gpsElevation',...)を呼ぶと引数(経過時間の数値)の方が優先されて

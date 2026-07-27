@@ -141,16 +141,19 @@ body {
 }
 
 /* 2026-07-27: GPS追従モード中バッジ(常時表示、右上のUI非表示トグルの下)。
-   .showが付いた時だけ表示し、目立つよう軽くパルスさせる。 */
+   .showが付いた時だけ表示し、目立つよう軽くパルスさせる。
+   2026-07-27(2): タップでワンタッチ解除できるようにcursor:pointer+pointer-events:allに変更。 */
 #geoFollowBadge {
   position:fixed; top:calc(var(--safe-top) + 52px); right:var(--safe-right);
-  border-radius:999px; padding:6px 14px; font-size:12px; z-index:45;
-  color:var(--text); white-space:nowrap; pointer-events:none;
+  border-radius:999px; padding:6px 14px; font-size:12px; font-family:inherit; z-index:45;
+  color:var(--text); white-space:nowrap; pointer-events:all; cursor:pointer;
   border-color:var(--accent);
   display:none;
   animation:geoFollowPulse 2s ease-in-out infinite;
+  transition:transform .1s;
 }
 #geoFollowBadge.show { display:block; }
+#geoFollowBadge:active { transform:scale(.94); }
 @keyframes geoFollowPulse {
   0%, 100% { box-shadow:var(--shadow), 0 0 0 0 rgba(139,123,255,0.55); }
   50% { box-shadow:var(--shadow), 0 0 0 6px rgba(139,123,255,0); }
@@ -327,7 +330,11 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 
 <!-- 2026-07-27: GPS追従モード中であることを常時示すバッジ(part7.js updateGeoBtnUIがトグル)。
      「現在地」ボタン自体はマップ画面を閉じると隠れるため、3D探索中でも見える位置に置く。 -->
-<div id="geoFollowBadge" class="glass" data-i18n="geoFollowBadgeLabel">🛰 GPS追従中</div>
+<!-- 【重要】<div>ではなく<button>にする。ドキュメント全体のtouchstartハンドラ(part7.js)が
+     `t.target.closest('button, input, #mapOverlay')` に一致する要素はカメラドラッグ/
+     ジョイスティックの取得対象から除外する作りのため、divのままだとタップがそちらに
+     奪われてワンタッチ解除が効かなくなる。 -->
+<button id="geoFollowBadge" type="button" class="glass" data-i18n="geoFollowBadgeLabel" data-i18n-title="geoFollowBadgeTitle" title="タップで解除">🛰 GPS追従中</button>
 
 <!-- 左: アイコンレール -->
 <nav id="hudRail">
