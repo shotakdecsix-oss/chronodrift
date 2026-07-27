@@ -342,6 +342,7 @@ body {
   background:rgba(10,20,40,0.85); border:1px solid #40c0ff; border-radius:8px; padding:10px 12px;
 }
 #routeInfo { color:#c8ecff; font-size:12px; text-align:center; }
+#routeThrottleHint { color:#ffcc66; font-size:11px; text-align:center; }
 .routeSpeedRow { display:flex; align-items:center; gap:8px; color:#c8ecff; font-size:12px; }
 #routeSpeedSlider { flex:1; }
 .routeControlBtnRow { display:flex; gap:8px; }
@@ -541,6 +542,9 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
     </div>
     <div id="routeControls">
       <div id="routeInfo"></div>
+      <!-- 2026-07-28: タイル生成が追いついていない間、経路シムが自動減速/停止している旨を表示
+           (part10.js routeSimOnUpdate)。落ちる不具合対策として無人走行を自己制御するための表示。 -->
+      <div id="routeThrottleHint" style="display:none;">⏳ 生成待ちのため減速中...</div>
       <div class="routeSpeedRow">
         <span>速度</span>
         <input id="routeSpeedSlider" type="range" min="2" max="40" step="1" value="10">

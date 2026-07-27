@@ -189,11 +189,34 @@ function clearRouteLine() {
   }
 }
 
+// 【2026-07-28・ユーザー報告「経路シム中に落ちる(タブごと)」対策】
+// WASD/BIRDでの移動は人間が操作するため、必ず立ち止まる・振り返る・引き返す間(たい)が入り、
+// タイル取得キュー(osmTileQueue、part8.js)が追いつく余裕が生まれる。経路シムは無人で
+// 何分も休みなく一方向へ進み続けるため、この「間」が構造的に存在せず、キューが積み上がる
+// 一方になりやすい(BIRDモードの先読み拡張(_fwdKMax、part8.js)は速度の分だけ先読み距離を
+// 伸ばす対策だったが、それでも生成自体の処理速度は変わらないため、根本的な解決にはならない)。
+// 静的コードレビューでは実機クラッシュの直接原因(メモリリーク等)を確証できなかった過去の経緯
+// ([[project_isehara_game_reverse_donut_retry_cap]]参照)もあるため、原因追及よりも「生成が
+// 追いついていない時は経路シム側が自発的に減速・停止して追いつかせる」自己制御を優先する。
+const ROUTE_QUEUE_BACKLOG_SOFT = 60;  // これを超えたら減速し始める
+const ROUTE_QUEUE_BACKLOG_HARD = 150; // これを超えたら完全停止(キューが捌けるまで進めない)
+
 // ======= ModeRegistry連携: 経路シム中の毎フレーム更新 =======
 // GPS追従モード(geoOnUpdate、part9.js)と同じ考え方:ドラッグ中(mouseDown/camTouchId)は
 // camYawに触れず、離した間だけ進行方向へなめらかに戻す(指で視界を振り向ける操作を邪魔しない)。
 function routeSimOnUpdate(dt) {
-  if (!routePaused) routeProgress = Math.min(routeTotalDist, routeProgress + routeSpeed * dt);
+  let _throttled = false;
+  if (!routePaused) {
+    const backlog = (typeof osmTileQueue !== 'undefined') ? osmTileQueue.length : 0;
+    let speedFactor = 1;
+    if (backlog > ROUTE_QUEUE_BACKLOG_HARD) { speedFactor = 0; _throttled = true; }
+    else if (backlog > ROUTE_QUEUE_BACKLOG_SOFT) {
+      speedFactor = 1 - (backlog - ROUTE_QUEUE_BACKLOG_SOFT) / (ROUTE_QUEUE_BACKLOG_HARD - ROUTE_QUEUE_BACKLOG_SOFT);
+      _throttled = true;
+    }
+    routeProgress = Math.min(routeTotalDist, routeProgress + routeSpeed * speedFactor * dt);
+  }
+  if (routeThrottleHintEl) routeThrottleHintEl.style.display = _throttled ? 'block' : 'none';
   const pt = advanceRouteProgress(routeProgress);
   if (pt) {
     player.position.x = pt.x;
@@ -251,6 +274,7 @@ const routeHintEl = document.getElementById('routeHint');
 const routeSearchGroupEl = document.getElementById('routeSearchGroup');
 const routeControlsEl = document.getElementById('routeControls');
 const routeInfoEl = document.getElementById('routeInfo');
+const routeThrottleHintEl = document.getElementById('routeThrottleHint');
 const routeSpeedSliderEl = document.getElementById('routeSpeedSlider');
 const routeSpeedLabelEl = document.getElementById('routeSpeedLabel');
 const routePlayPauseBtnEl = document.getElementById('routePlayPauseBtn');

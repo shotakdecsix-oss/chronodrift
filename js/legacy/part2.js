@@ -743,7 +743,14 @@ const poleP = makePool(new THREE.CylinderGeometry(0.11, 0.16, 8, 6),
   MODE === 'marchen' ? new THREE.MeshLambertMaterial({ color: 0xff9bb8 }) :
   MODE === 'space'   ? new THREE.MeshLambertMaterial({ color: 0x223344, emissive: 0x2266ff, emissiveIntensity: 0.9 }) :
                        new THREE.MeshLambertMaterial({ color: 0x776a5c }), 3000, 'poleP');
-const TREE_MAX = USES_MEIJI_LANDUSE ? 5000 : 3500; // 明治・江戸は里山・並木で木が主役
+// 【2026-07-28・ユーザー要望】以前は5000/3500で、経路シムのように長距離を移動し続けると
+// このプールが枯渇して「以降このセッションでは木が一切生成されない」状態に恒久的に陥っていた
+// (P8-aのコメント参照。森=rebuildForestは移動のたび作り直すので対象外、街路樹側だけの問題)。
+// インスタンスは4x4行列(64byte)+色(12byte)程度/本なので上限を大きくしてもGPU負荷は
+// 実際に配置された本数(mesh.count)分にしかならず、上限を大きくする分には安価。
+// 抜本的な解決(距離に応じた本当のリサイクル)ではなく延命だが、通常プレイはもちろん
+// かなり長い経路シムでも現実的に枯渇しない規模まで引き上げる。
+const TREE_MAX = USES_MEIJI_LANDUSE ? 40000 : 30000; // 明治・江戸は里山・並木で木が主役
 const treeTrunkP = makePool(new THREE.CylinderGeometry(0.14, 0.24, 1.6, 5), new THREE.MeshLambertMaterial({ color: 0x5a4028 }), TREE_MAX);
 // 木の樹冠 treeTopPools は TREE_GREENS 定義後(下方)で作る(instanceColor を使わない単色プール)
 // 自販機: 江戸=樽/井戸(木の円筒) / 宇宙=発光キオスク

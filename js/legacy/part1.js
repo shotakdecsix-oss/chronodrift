@@ -777,7 +777,32 @@ function landuseTypeAt(x, z) {
 // 【重要】unloadFarRoadsで遠方アンロードされた道路(r.mesh===null)は、このタイミング
 // (=プレイヤー付近のチャンクが生成された=近くまで戻ってきた)でメッシュを作り直して復元する。
 function rebuildRoadMesh(r) {
-  if (r.type === 'motorway') { if (r.mesh) rebuildMotorwayMesh(r); return; } // 高架はアンロード対象外(常にmesh有り)
+  if (r.type === 'motorway') {
+    if (r.mesh) { rebuildMotorwayMesh(r); return; }
+    // 【2026-07-28・経路シムでのクラッシュ対策】以前は高架(motorway)を距離アンロード対象外に
+    // していた(理由:当時は橋脚をInstancedMeshで表現しており個別解放できなかったため)。
+    // その後「橋脚は挙動が不安定」として橋脚自体を廃止し、高架は橋脚なしの独立Mesh1本に
+    // なった(part3.js addMotorway参照)ため、この除外理由は既に解消済み。一方、経路シムは
+    // 無人で長時間・長距離を走り続けるため、高架(OSRM drivingルートで多用される)が
+    // 距離アンロードの対象外のまま永久にGPUメモリへ残り続け、クラッシュの一因になっていた
+    // ([[project_isehara_game_route_sim_crash_mitigation.md]]の実機コンソールログで
+    // GPUプロセスのメモリ肥大を確認)。ここで他の道路と同じ「r.mesh===nullから作り直す」
+    // 経路を用意し、unloadFarRoads側もmotorwayを対象に含める(MOTORWAY_UNLOAD_DIST参照)。
+    const geo = makeMotorwayGeo(r.x1, r.z1, r.x2, r.z2);
+    if (!geo) return;
+    const mesh = new THREE.Mesh(geo, realRoadMat('motorway', 24));
+    mesh.renderOrder = 1;
+    scene.add(mesh);
+    r.mesh = mesh;
+    if (r.slope) {
+      // 既存のslopeオブジェクト(motorwaySlopesに入っている実体)を書き換える。
+      // 新規オブジェクトに差し替えるとmotorwaySlopes側が古い(孤立した)実体を参照したまま
+      // 重複が増え続けてしまうため、参照は変えずフィールドだけ更新する。
+      r.slope.y1 = getGroundY(r.x1, r.z1) + MWY_H;
+      r.slope.y2 = getGroundY(r.x2, r.z2) + MWY_H;
+    }
+    return;
+  }
   const geo = makeRoadGeo(r.x1, r.z1, r.x2, r.z2, r.rw, r.yOff, r.bridgeY);
   if (!geo) return;
   // 橋区間: 見た目のジオメトリと同じタイミングで「乗れる床」(bridgeSlopes)も
@@ -877,7 +902,9 @@ function processRoadMeshQueue() {
     // プレイヤーが近づけばチャンク再生成(rebuildRoadsNearChunk)やNEAR更新
     // (rebuildRoadsInBounds)が再キューするので、恒久的に欠けることはない。
     // 細街路(road/tertiary)はさらに短いMINOR_ROAD_MESH_DISTで切る(メッシュ総数対策)。
-    const _rlim2 = isMinorRoadType(r.type) ? MINOR_ROAD_MESH_DIST * MINOR_ROAD_MESH_DIST : lim2;
+    // 高架(motorway)は逆にunloadFarRoadsと同じMOTORWAY_UNLOAD_DIST(長め)を使う。
+    const _rlim2 = r.type === 'motorway' ? MOTORWAY_UNLOAD_DIST * MOTORWAY_UNLOAD_DIST
+      : isMinorRoadType(r.type) ? MINOR_ROAD_MESH_DIST * MINOR_ROAD_MESH_DIST : lim2;
     if (mx * mx + mz * mz > _rlim2) { r._dirty = false; continue; }
     if (r.mesh && !r._dirty) continue; // 既に構築済みで地形も変わっていない
     rebuildRoadMesh(r);
@@ -893,8 +920,13 @@ function processRoadMeshQueue() {
 // ここでは建物と違い、roadRecords/roadGrid(=isOnRoad判定・ミニマップ・踏切検出が
 // 恒久的に参照する軽量データ)自体は消さず、GPU側の重いMesh/ジオメトリだけを距離に応じて
 // 破棄・復元する(復元は上のrebuildRoadMeshが、プレイヤーが近づいてチャンクが再生成される
-// タイミングで自動的に行う)。高架(motorway)は橋脚がInstancedMeshで個別解放できないため
-// 対象外とする(高速道路は本数が少なく、影響は小さい)。
+// タイミングで自動的に行う)。
+// 【2026-07-28修正】高架(motorway)は当初「橋脚がInstancedMeshで個別解放できない」ため
+// アンロード対象外だったが、その後橋脚自体を撤去(part3.js addMotorway参照、挙動が不安定
+// だったため)し、高架は橋脚なしの独立Mesh1本になったため除外理由は解消済み。経路シムが
+// 無人で長距離を走り続けると、OSRM drivingルートで多用される高架が対象外のまま永久に
+// GPUメモリへ残り続けクラッシュの一因になっていたため、他の道路と同じくアンロード対象に
+// 含めた(ただしMOTORWAY_UNLOAD_DISTで通常の道路よりずっと長く保持する)。
 // ======= 【2026-07-16】描写範囲・パフォーマンスプリセット =======
 // ⚙ボタン(index.html #perfCtrl、切替処理はpart7.js)で3段階から選択。localStorageに保存し、
 // リロードで反映(距離系はconstで各所に焼き込まれるため、モード切替と同じリロード方式)。
@@ -938,6 +970,11 @@ const PERF = {
 }[PERF_PRESET];
 const ROAD_UNLOAD_DIST = PERF.roadUnload;
 const MINOR_ROAD_MESH_DIST = PERF.minorRoadDist;
+// 【2026-07-28・経路シムのクラッシュ対策】高架(motorway)も他の道路と同じくアンロード対象に
+// するが、通常のROAD_UNLOAD_DISTよりずっと長い保持距離にする(遠くからでもスカイラインとして
+// 見える高速道路が、普通に探索している範囲ではまず消えないようにするため)。経路シムのように
+// 何十kmも一方向へ進み続けるケースでだけ、実際に距離アンロードが効いてGPUメモリを解放する。
+const MOTORWAY_UNLOAD_DIST = ROAD_UNLOAD_DIST * 4;
 // 【2026-07-20】未舗装(type:'unpaved'。part8.js参照)も細街路と同じ扱いにする。
 // 舗装/未舗装で分岐する前は全て'road'だったため元々ここに含まれていた枠で、
 // 分岐後にここを更新し忘れると農道・山道が幹線扱いの遠距離まで描画され続けてしまう。
@@ -950,12 +987,14 @@ function unloadFarRoads(force) {
   const px = player.position.x, pz = player.position.z;
   const d2 = ROAD_UNLOAD_DIST * ROAD_UNLOAD_DIST;
   const dMinor2 = MINOR_ROAD_MESH_DIST * MINOR_ROAD_MESH_DIST;
+  const dMotorway2 = MOTORWAY_UNLOAD_DIST * MOTORWAY_UNLOAD_DIST;
   for (const r of roadRecords) {
-    if (r.type === 'motorway') continue; // 高架は対象外
     const mx = (r.x1 + r.x2) / 2, mz = (r.z1 + r.z2) / 2;
     const dx = mx - px, dz = mz - pz;
     const dd = dx * dx + dz * dz;
-    const lim2r = isMinorRoadType(r.type) ? dMinor2 : d2;
+    // 【2026-07-28】高架(motorway)も対象に含める(理由は上のMOTORWAY_UNLOAD_DIST参照)。
+    // ただし他の道路よりずっと長い距離まで保持する。
+    const lim2r = r.type === 'motorway' ? dMotorway2 : isMinorRoadType(r.type) ? dMinor2 : d2;
     // 【2026-07-16】範囲内なのにメッシュが無い道路はここで再キューして復元する。
     // 以前はチャンク再生成(960m)頼みだったため、細街路の保持距離(1100m)との間に
     // 「再接近しても細い道路が生成されない帯」ができていた(実機報告)。
