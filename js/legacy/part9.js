@@ -400,8 +400,8 @@ function updateMemDiag() {
   // 展開しないと読めない(実機ログ提供時に「…」で潰れた)。1行の文字列で出す。
   const sgnN = (v) => (v > 0 ? '+' + v : String(v));
   console.log('[mem] ' + Object.keys(now).map(k => k + ' ' + now[k] + (d ? '(' + sgnN(d[k]) + ')' : '')).join(' ')
-    + ' | dormEvicted/win ' + _dormantEvicted);
-  _dormantEvicted = 0;
+    + ' | evicted/win dorm ' + _dormantEvicted + ' road ' + _roadEvicted);
+  _dormantEvicted = 0; _roadEvicted = 0;
   if (debugTileOverlayOn) {
     const el = _memHud();
     el.style.display = 'block';
@@ -917,6 +917,7 @@ function animate() {
   //  建物総数キャップ(PERF.bMax)+細街路メッシュ距離制限で達成済み)
   // 道路・線路も同様に、遠方のものはGPUメッシュだけ解放する(記録データは残す)
   unloadFarRoads();
+  evictFarRoads(); // 遠方の道路レコード自体を捨てる(part1.js、roadRecordsの無制限増加対策)
   // 公園・水面・田畑・キャンパスの面メッシュも同じ方式(遠方GPU解放/再接近で再構築)。
   // 【2026-07-17】以前はこれだけ一度作ったら二度と解放されなかった(CODE_REVIEW_20260717 P8)。
   unloadFarAreaPolys();

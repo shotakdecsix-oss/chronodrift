@@ -871,7 +871,7 @@ function sortNewEntriesByDistanceToPlayer(arr, fromIdx, getXZ) {
 //   重いメッシュ生成はこのキューで1フレームあたり時間バジェット内だけ処理する。
 const pendingRoadMeshes = [];
 function queueRoadMesh(r) {
-  if (r._q) return; // 二重投入防止
+  if (r._q || r._dropped) return; // 二重投入防止 / 距離破棄済みレコード(evictFarRoads参照)は作らない
   r._q = true;
   pendingRoadMeshes.push(r);
 }
@@ -897,6 +897,9 @@ function processRoadMeshQueue() {
     if ((i & 7) === 0 && performance.now() - t0 > roadBudgetMs) break;
     const r = pendingRoadMeshes[i++];
     r._q = false;
+    // 【2026-07-28】キュー投入後にevictFarRoadsで距離破棄されたレコード。ここで作ってしまうと
+    // roadRecordsに居ないメッシュがsceneに残り、二度とアンロードされない孤児になる。
+    if (r._dropped) continue;
     const mx = (r.x1 + r.x2) / 2 - px, mz = (r.z1 + r.z2) / 2 - pz;
     // 遠方(unloadFarRoadsの解放距離の外)はどうせすぐ解放されるので作らない。
     // プレイヤーが近づけばチャンク再生成(rebuildRoadsNearChunk)やNEAR更新
@@ -1012,6 +1015,61 @@ function unloadFarRoads(force) {
       r.railWhite = null;
     }
   }
+}
+
+// ======= 道路レコードの距離アンロード =======
+// 【2026-07-28・2回目の実測([mem]計器)で判明した本命】
+// dormantの距離破棄を入れた後の走行ログでは、dormantは1500〜9000で振動して落ち着き、
+// geo(約19000)・tex(約890)・heapMBも頭打ち/振動になった。その中で唯一きれいに単調増加して
+// いたのが roadRec(= roadRecords.length)で、86,537 → 193,476 まで伸び、末尾では2秒あたり
+// +13,000(≒6,500件/秒)のペースだった。10分走れば数百万件に達する計算で、レンダラ側の
+// 800MB超という実測値とも桁が合う。
+//
+// 原因はdormantと同じ構造。unloadFarRoads は r.mesh を破棄してnullにするだけで、
+// roadRecords 配列と roadGrid(40m四方の空間ハッシュ。1本の線分が複数セルに登録される)から
+// レコードそのものを消す処理はどこにも無い。「軽量データは永久保持・GPUリソースだけ距離で
+// 解放」という既存方針そのものだが、経路シムは無人で何十kmも走るためこの前提が崩れる。
+// (さらにunloadFarRoadsは1.5秒ごとにroadRecords全件を走査するので、件数の増加はメモリ
+//  だけでなくCPUコストにも効いてくる。)
+//
+// 対策: 十分遠い道路はレコードごと捨てる。距離はメッシュの保持距離より外側に取り、
+// 「まだ描画されている・すぐ引き返せる」ものは絶対に捨てない。
+// 【トレードオフ】捨てた範囲へ引き返すと、そのタイルは取得済み扱いのままなので道路が
+// 復活しない(地形は残る)。KEEP距離は通常の探索範囲のはるか外なので実用上は起きないが、
+// 経路シムで10km以上走ってから戻ると起こりうる。クラッシュより軽い劣化として許容する。
+const ROAD_RECORD_KEEP_DIST = Math.max(6000, ROAD_UNLOAD_DIST * 2);
+// 高架は遠景のスカイラインとしてMOTORWAY_UNLOAD_DISTまでメッシュを保持するので、
+// レコードはそれより確実に外側まで残す(でないと保持距離内なのに復元できなくなる)。
+const ROAD_RECORD_KEEP_DIST_MOTORWAY = MOTORWAY_UNLOAD_DIST * 1.3;
+const ROAD_RECORD_SOFT_MIN = 20000; // これ以下なら走査自体しない(通常プレイでは常にここで抜ける)
+let _roadEvictFrame = 0;
+let _roadEvicted = 0; // [mem]ログ用(直近ウィンドウの累計)
+function evictFarRoads(force) {
+  _roadEvictFrame++;
+  if (!force && _roadEvictFrame % 300 !== 0) return; // ~5秒ごと(全件走査+グリッド再構築なので低頻度)
+  if (roadRecords.length < ROAD_RECORD_SOFT_MIN) return;
+  const px = player.position.x, pz = player.position.z;
+  const keep2 = ROAD_RECORD_KEEP_DIST * ROAD_RECORD_KEEP_DIST;
+  const keepMtw2 = ROAD_RECORD_KEEP_DIST_MOTORWAY * ROAD_RECORD_KEEP_DIST_MOTORWAY;
+  let w = 0; // 生存分を前詰めするコンパクション(spliceの繰り返しを避ける)
+  for (let i = 0; i < roadRecords.length; i++) {
+    const r = roadRecords[i];
+    const mx = (r.x1 + r.x2) / 2 - px, mz = (r.z1 + r.z2) / 2 - pz;
+    if (mx * mx + mz * mz <= (r.type === 'motorway' ? keepMtw2 : keep2)) { roadRecords[w++] = r; continue; }
+    // ここに来る時点でunloadFarRoadsが既にメッシュを解放しているはずだが、念のため。
+    if (r.mesh) { scene.remove(r.mesh); r.mesh.geometry.dispose(); r.mesh = null; }
+    if (r.railWhite) { scene.remove(r.railWhite); r.railWhite.geometry.dispose(); r.railWhite = null; }
+    // pendingRoadMeshes に既に積まれている参照はここでは消せない(配列の途中を突くのは高コスト)。
+    // 代わりに印を付けておき、processRoadMeshQueue / queueRoadMesh 側で無視させる。
+    r._dropped = true;
+    _roadEvicted++;
+  }
+  if (w === roadRecords.length) return;
+  roadRecords.length = w;
+  // roadGridは1レコードが複数セルに入るため個別削除が面倒かつ高コスト。生存分だけで作り直す
+  // (5秒に1回・生存数万件のO(n)なので、部分削除より単純で確実)。
+  roadGrid.clear();
+  for (const r of roadRecords) roadGridAdd(r);
 }
 
 // 矩形範囲(ワールド座標)にかかる道路を、現在の地形に合わせてまとめて再構築する。
