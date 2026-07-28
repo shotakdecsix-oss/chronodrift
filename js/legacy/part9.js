@@ -380,6 +380,56 @@ function _memHud() {
 // 5巡ぶん個数ばかり見ていて空振りしていた原因はここだと判断し、実バイト数を直接数える。
 // scene全体の走査になるので低頻度(~10秒ごと)に限定する。
 let _gpuBytesFrame = 0;
+// 【2026-07-28・「シーンに居ないのにGPUに残っている分」を実バイトで測る計器】
+// これまでの[gpuBytes]はscene.traverse、つまり【今シーンに居るオブジェクトだけ】を数えていた。
+// dispose漏れしたジオメトリは定義上シーンから外れているので、その計器には最初から映らない
+// (renderer.info.memory.geometries と uniqGeo の差 6,354 がまさにそれ)。差の【個数】は
+// 分かっても【バイト数】が分からないままだったので、WebGLの層で直接測る。
+// やり方: rendererのGLコンテキストの bindBuffer / bufferData / deleteBuffer をラップして、
+// 実際にGPUへ確保されたバイト数を加算し、削除されたら減算する。THREEが解放し忘れた分は
+// 減算されないまま残るので、glBufMB がシーン走査の geoMB を大きく上回っていれば
+// 「dispose漏れが本丸」と確定できる。逆に両者がほぼ一致するならリークは無く、
+// GPUメモリの正体はWebGLの外(ドローイングバッファ等)だと確定できる。
+// 描画そのものには一切干渉しない(元の関数をそのまま呼ぶだけ)。
+let _glBufBytes = 0, _glBufCount = 0;
+function installGlByteTracker() {
+  try {
+    const gl = renderer.getContext();
+    if (!gl || gl.__byteTracked) return;
+    gl.__byteTracked = true;
+    const sizes = new Map();   // WebGLBuffer -> バイト数
+    // 【性能上の注意】bindBufferは1フレームに数万回呼ばれる最ホットパスなのでラップしない。
+    // bufferData(=アップロード時のみ)の中でバインド中のバッファを問い合わせる。
+    // この種のバインディング取得はChromeのコマンドバッファがクライアント側にキャッシュ
+    // しているためGPUとの同期は発生しない。
+    const BIND_PNAME = new Map([
+      [gl.ARRAY_BUFFER, gl.ARRAY_BUFFER_BINDING],
+      [gl.ELEMENT_ARRAY_BUFFER, gl.ELEMENT_ARRAY_BUFFER_BINDING],
+    ]);
+    const _data = gl.bufferData.bind(gl);
+    gl.bufferData = function (target, src, usage, srcOffset, length) {
+      const r = arguments.length >= 4 ? _data(target, src, usage, srcOffset, length) : _data(target, src, usage);
+      const pn = BIND_PNAME.get(target);
+      const buf = pn === undefined ? null : gl.getParameter(pn);
+      if (buf) {
+        const n = typeof src === 'number' ? src : (src && src.byteLength) || 0;
+        const prev = sizes.get(buf) || 0;
+        _glBufBytes += n - prev;
+        if (!prev) _glBufCount++;
+        sizes.set(buf, n);
+      }
+      return r;
+    };
+    const _del = gl.deleteBuffer.bind(gl);
+    gl.deleteBuffer = function (buf) {
+      const prev = sizes.get(buf);
+      if (prev !== undefined) { _glBufBytes -= prev; _glBufCount--; sizes.delete(buf); }
+      return _del(buf);
+    };
+  } catch (e) { console.warn('[gpuBytes] GLトラッカーを設置できませんでした', e); }
+}
+installGlByteTracker();
+
 function logGpuBytes() {
   if (++_gpuBytesFrame % 600 !== 0) return; // ~10秒ごと
   const seenGeo = new Set(), seenTex = new Set();
@@ -417,7 +467,20 @@ function logGpuBytes() {
   const MB = (v) => (v / 1048576).toFixed(1);
   const kinds = [...byKind.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
     .map(([k, v]) => k + ':' + MB(v)).join(' ');
+  // 【2026-07-28】シーンの中身とは別に、既定ドローイングバッファ(常時GPU常駐の固定費)も出す。
+  // ここが数百MB台なら、これまで「原因不明の95%」だったGPUメモリの正体はこれ(part1.js GFX参照)。
+  let fb = '';
+  try {
+    const gl = renderer.getContext();
+    const dw = gl.drawingBufferWidth, dh = gl.drawingBufferHeight;
+    const smp = GFX.aa ? (gl.getParameter(gl.SAMPLES) || 4) : 1;
+    // MSAAカラー + MSAA深度ステンシル + 解決後カラー(それぞれ4B/px)
+    const fbBytes = dw * dh * 4 * (smp * 2 + 1);
+    fb = ' | drawBuf ' + dw + 'x' + dh + ' dpr' + renderer.getPixelRatio().toFixed(2)
+       + ' aa:' + (GFX.aa ? smp + 'x' : 'off') + ' fbMB ' + MB(fbBytes);
+  } catch (e) {}
   console.log('[gpuBytes] geoMB ' + MB(geoBytes) + ' texMB ' + MB(texBytes)
+    + ' | glBufMB ' + MB(_glBufBytes) + '(' + _glBufCount + '本, 未解放差 ' + MB(_glBufBytes - geoBytes) + ')' + fb
     + ' meshes ' + meshCount + ' uniqGeo ' + seenGeo.size + ' uniqTex ' + seenTex.size
     + ' | 分類上位MB ' + kinds
     + ' | 最大 ' + top.slice(0, 3).map(t => t.kind + '(' + t.n + '頂点,' + MB(t.b) + 'MB)').join(' '));
@@ -1037,6 +1100,7 @@ animate();
 
 // ======= RESIZE =======
 window.addEventListener('resize', () => {
+  renderer.setPixelRatio(gfxPixelRatio()); // ウィンドウが大きくなった時にドローイングバッファが青天井にならないよう毎回計算し直す(part1.js GFX参照)
   renderer.setSize(window.innerWidth, window.innerHeight);
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();

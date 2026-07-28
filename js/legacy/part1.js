@@ -395,8 +395,41 @@ const canvas = document.getElementById('canvas');
 // カメラ〜地形間の距離が伸びるほど、地形と海面のような近接した2枚のポリゴンがz-fighting
 // (どちらが手前か毎フレーム入れ替わってちらつく)しやすくなる。対数深度バッファは全体に精度を
 // 均等に配分するため、この「高度が上がるほどちらつきが悪化する」症状に直接効く。
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// 【2026-07-28・GPUメモリ2GB問題】ここが「アプリのジオメトリ・テクスチャではないGPUメモリ」の
+// 最有力候補。既定のドローイングバッファは常にGPUに常駐し、しかも
+//   ・antialias:true → WebGLのバックバッファがマルチサンプル(Chrome/ANGLEでは通常4x)になり、
+//     カラーと深度ステンシルの両方が4倍のメモリを占める
+//   ・setPixelRatio(min(dpr,2)) → 高DPI/大画面ではピクセル数が最大4倍
+// が掛け算になる。例: 2560x1440のウィンドウ・dpr=2 なら 5120x2880 = 1474万px で
+//   MSAAカラー 14.7M×4B×4 = 236MB / MSAA深度ステンシル 236MB / 解決後カラー 59MB ≈ 530MB。
+// 4Kや150%スケーリングだと1GB近くに達する。これは【シーンの中身と無関係な固定費】なので、
+// PERFプリセットをliteに下げても距離を縮めても1バイトも減らない = 「liteでも落ちる」
+// 「データ量を減らす対策が原理的に効かない」という実測と完全に一致する。
+// 対策: MSAAを既定でオフ、かつドローイングバッファの総ピクセル数に上限を設ける
+// (解像度そのものではなく面積で抑えるので、縦長・横長どちらでも効く)。
+// A/B用に localStorage で上書きできる。DevToolsから setGfx(true) / setGfx(false, 4000000) など。
+const GFX = (() => {
+  let aa = false, maxPx = 2000000; // 2.0Mpx ≒ 1920x1080相当
+  try {
+    const a = localStorage.getItem('gfxAA'); if (a !== null) aa = (a === '1');
+    const m = parseFloat(localStorage.getItem('gfxMaxPx')); if (Number.isFinite(m) && m >= 200000) maxPx = m;
+  } catch (e) {}
+  return { aa, maxPx };
+})();
+function gfxPixelRatio() {
+  const w = Math.max(1, window.innerWidth), h = Math.max(1, window.innerHeight);
+  const areaCap = Math.sqrt(GFX.maxPx / (w * h));
+  return Math.max(0.5, Math.min(window.devicePixelRatio || 1, 2, areaCap));
+}
+window.setGfx = (aa, maxPx) => {
+  try {
+    localStorage.setItem('gfxAA', aa ? '1' : '0');
+    if (maxPx) localStorage.setItem('gfxMaxPx', String(maxPx));
+  } catch (e) {}
+  location.reload();
+};
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: GFX.aa, logarithmicDepthBuffer: true });
+renderer.setPixelRatio(gfxPixelRatio());
 renderer.setSize(window.innerWidth, window.innerHeight);
 // 影を無効化 — 3000m範囲を1024pxで描く影は約3m/texelでほぼ視認できず、
 // シャドウパスで全建物を毎フレーム二重描画するコストだけが残るため
