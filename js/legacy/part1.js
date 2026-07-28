@@ -70,15 +70,12 @@ const I18N = {
     mapSearchBtnLabel: '🔎 検索',
     geoBtnLabel: '📡 現在地',
     jumpHistorySummary: '🕘 履歴',
-    helpBody: 'PC: WASD移動 / Shiftダッシュ / Spaceジャンプ / ドラッグ回転 / Cで高度キープ切替 / Bで🐦BIRDモード切替(浮遊・3倍速、Space上昇/Ctrl下降)<br>スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ / 🔓で高度キープ切替 / 🐦でBIRDモード切替(⤴上昇/⤵下降)',
+    helpBody: 'PC: WASD移動 / Shiftダッシュ / Spaceジャンプ / ドラッグ回転 / Cで高度キープ切替<br>スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ / 🔓で高度キープ切替',
     closeBtn: '閉じる',
     statusInitial: '🗺 伊勢原マップ読み込み中...',
     debugLegendHtml: '🩺左から地形/道路線路/建物の3本<span style="background:#555555"></span>未取得<span style="background:#3388dd"></span>待ち<span style="background:#dd3333"></span>取得中<span style="background:#ffaa22"></span>生成中<span style="background:#33cc55"></span>完了<span style="background:#9b3fd4"></span>諦め(未着)',
     altKeepTitleOff: '高度キープ(空中でタップ)',
     altKeepTitleOn: '高度キープ中(タップで解除)',
-    birdBtnTitleOff: 'BIRDモード(浮遊・3倍速)',
-    birdBtnTitleOn: 'BIRDモード中(タップで解除)',
-    birdDownBtnTitle: '下降(BIRDモード中)',
     // ---- 動的メッセージ(part4/6/7/8.js) ----
     mapHintJumpTo: '📍 {name} へジャンプ！',
     mapHintSearching: '🔎 「{q}」を検索中...',
@@ -89,18 +86,6 @@ const I18N = {
     mapHintGeoJump: '📍 現在地へジャンプ！',
     mapHintGeoFailed: '⚠️ 現在地を取得できませんでした({reason})',
     geoPermissionDenied: '位置情報の利用が許可されていません',
-    // 【2026-07-27・GPS追従モード(モードA)】現在地ボタンをトグル化した際の追加文言
-    geoBtnTitleOff: 'GPS追従開始(実際に歩くとゲーム内も追従します)',
-    geoBtnTitleOn: 'GPS追従中(タップで解除)',
-    // 【2026-07-27】背景色の変化だけでは分かりにくいとのユーザー報告のため、
-    // 追従中はボタンの文字自体も変える(altKeepBtn等と同じ「状態で表示を差し替える」方式)。
-    geoBtnLabelActive: '🛰 追従中',
-    geoFollowBadgeLabel: '🛰 GPS追従中',
-    geoFollowBadgeTitle: 'タップで解除',
-    mapHintGeoTracking: '📡 GPS追従中(現在地ボタンでいつでも解除できます)',
-    mapHintGeoStopped: '📡 GPS追従を解除しました',
-    mapHintGeoBlocked: '⚠️ このサイトで位置情報がブロックされています。ブラウザのアドレスバー付近の🔒(サイト情報)アイコン→位置情報の設定を「許可」に変更してから、もう一度お試しください',
-    mapHintGeoTimeout: '⚠️ 位置情報の取得がタイムアウトしました。iPhoneの「設定→プライバシーとセキュリティ→位置情報サービス」がON、「設定→Chrome→位置情報」が「次回または共有時に確認」になっているか確認し、それでも直らなければアプリを完全に閉じて開き直してください',
     gpsElevation: '標高 {elev}m',
     gpsOpenGoogleMaps: 'Googleマップで開く',
     meijiLanduseLabel: '明治期土地利用',
@@ -181,15 +166,12 @@ const I18N = {
     jumpHistorySummary: '🕘 History',
     mapSearchBtnLabel: '🔎 Search',
     geoBtnLabel: '📡 My location',
-    helpBody: 'PC: WASD to move / Shift to dash / Space to jump / drag to rotate view / C to toggle altitude hold / B to toggle 🐦BIRD mode (float, 3x speed, Space up / Ctrl down)<br>Mobile: left stick to move (tilt further to speed up) / swipe right side to rotate view / ⤴ to jump / 🔓 to toggle altitude hold / 🐦 to toggle BIRD mode (⤴ up / ⤵ down)',
+    helpBody: 'PC: WASD to move / Shift to dash / Space to jump / drag to rotate view / C to toggle altitude hold<br>Mobile: left stick to move (tilt further to speed up) / swipe right side to rotate view / ⤴ to jump / 🔓 to toggle altitude hold',
     closeBtn: 'Close',
     statusInitial: '🗺 Loading Isehara map...',
     debugLegendHtml: '🩺From left: terrain / road+rail / building<span style="background:#555555"></span>not fetched<span style="background:#3388dd"></span>waiting<span style="background:#dd3333"></span>fetching<span style="background:#ffaa22"></span>generating<span style="background:#33cc55"></span>done<span style="background:#9b3fd4"></span>gave up (unreached)',
     altKeepTitleOff: 'Altitude hold (tap while airborne)',
     altKeepTitleOn: 'Altitude hold on (tap to release)',
-    birdBtnTitleOff: 'BIRD mode (float, 3x speed)',
-    birdBtnTitleOn: 'BIRD mode on (tap to release)',
-    birdDownBtnTitle: 'Descend (while in BIRD mode)',
     // ---- 動的メッセージ(part4/6/7/8.js) ----
     mapHintJumpTo: '📍 Jumping to {name}!',
     mapHintSearching: '🔎 Searching for "{q}"...',
@@ -200,16 +182,6 @@ const I18N = {
     mapHintGeoJump: '📍 Jumping to your location!',
     mapHintGeoFailed: '⚠️ Could not get your location ({reason})',
     geoPermissionDenied: 'Location permission was denied',
-    // 【2026-07-27・GPS follow mode (Mode A)】extra strings for the toggled location button
-    geoBtnTitleOff: 'Start GPS follow (walk outside and your character follows)',
-    geoBtnTitleOn: 'GPS follow is on (tap to stop)',
-    geoBtnLabelActive: '🛰 Following',
-    geoFollowBadgeLabel: '🛰 GPS Following',
-    geoFollowBadgeTitle: 'Tap to stop',
-    mapHintGeoTracking: '📡 Following your GPS location (tap the location button to stop anytime)',
-    mapHintGeoStopped: '📡 GPS follow stopped',
-    mapHintGeoBlocked: '⚠️ Location access is blocked for this site. Tap the 🔒 (site info) icon near the address bar, allow Location, then try again',
-    mapHintGeoTimeout: '⚠️ Location request timed out. On iPhone, check Settings → Privacy & Security → Location Services is ON and Settings → Chrome → Location is set to "Ask Next Time or When I Share"; if it still doesn\'t work, fully close and reopen the app',
     gpsElevation: 'Elevation {elev}m',
     gpsOpenGoogleMaps: 'Open in Google Maps',
     meijiLanduseLabel: 'Meiji-era land use',
@@ -259,7 +231,6 @@ function applyI18n() {
   if (typeof refreshPerfLabel === 'function') refreshPerfLabel();
   if (typeof updateCamDirBtn === 'function') updateCamDirBtn();
   if (typeof updateAltKeepBtn === 'function') updateAltKeepBtn();
-  if (typeof updateGeoBtnUI === 'function') updateGeoBtnUI();
   if (typeof updateLangButtons === 'function') updateLangButtons();
   if (typeof refreshMeijiCredit === 'function') refreshMeijiCredit();
   if (typeof refreshDeployInfo === 'function') refreshDeployInfo();
@@ -777,32 +748,7 @@ function landuseTypeAt(x, z) {
 // 【重要】unloadFarRoadsで遠方アンロードされた道路(r.mesh===null)は、このタイミング
 // (=プレイヤー付近のチャンクが生成された=近くまで戻ってきた)でメッシュを作り直して復元する。
 function rebuildRoadMesh(r) {
-  if (r.type === 'motorway') {
-    if (r.mesh) { rebuildMotorwayMesh(r); return; }
-    // 【2026-07-28・経路シムでのクラッシュ対策】以前は高架(motorway)を距離アンロード対象外に
-    // していた(理由:当時は橋脚をInstancedMeshで表現しており個別解放できなかったため)。
-    // その後「橋脚は挙動が不安定」として橋脚自体を廃止し、高架は橋脚なしの独立Mesh1本に
-    // なった(part3.js addMotorway参照)ため、この除外理由は既に解消済み。一方、経路シムは
-    // 無人で長時間・長距離を走り続けるため、高架(OSRM drivingルートで多用される)が
-    // 距離アンロードの対象外のまま永久にGPUメモリへ残り続け、クラッシュの一因になっていた
-    // ([[project_isehara_game_route_sim_crash_mitigation.md]]の実機コンソールログで
-    // GPUプロセスのメモリ肥大を確認)。ここで他の道路と同じ「r.mesh===nullから作り直す」
-    // 経路を用意し、unloadFarRoads側もmotorwayを対象に含める(MOTORWAY_UNLOAD_DIST参照)。
-    const geo = makeMotorwayGeo(r.x1, r.z1, r.x2, r.z2);
-    if (!geo) return;
-    const mesh = new THREE.Mesh(geo, realRoadMat('motorway', 24));
-    mesh.renderOrder = 1;
-    scene.add(mesh);
-    r.mesh = mesh;
-    if (r.slope) {
-      // 既存のslopeオブジェクト(motorwaySlopesに入っている実体)を書き換える。
-      // 新規オブジェクトに差し替えるとmotorwaySlopes側が古い(孤立した)実体を参照したまま
-      // 重複が増え続けてしまうため、参照は変えずフィールドだけ更新する。
-      r.slope.y1 = getGroundY(r.x1, r.z1) + MWY_H;
-      r.slope.y2 = getGroundY(r.x2, r.z2) + MWY_H;
-    }
-    return;
-  }
+  if (r.type === 'motorway') { if (r.mesh) rebuildMotorwayMesh(r); return; } // 高架はアンロード対象外(常にmesh有り)
   const geo = makeRoadGeo(r.x1, r.z1, r.x2, r.z2, r.rw, r.yOff, r.bridgeY);
   if (!geo) return;
   // 橋区間: 見た目のジオメトリと同じタイミングで「乗れる床」(bridgeSlopes)も
@@ -871,7 +817,7 @@ function sortNewEntriesByDistanceToPlayer(arr, fromIdx, getXZ) {
 //   重いメッシュ生成はこのキューで1フレームあたり時間バジェット内だけ処理する。
 const pendingRoadMeshes = [];
 function queueRoadMesh(r) {
-  if (r._q || r._dropped) return; // 二重投入防止 / 距離破棄済みレコード(evictFarRoads参照)は作らない
+  if (r._q) return; // 二重投入防止
   r._q = true;
   pendingRoadMeshes.push(r);
 }
@@ -897,17 +843,12 @@ function processRoadMeshQueue() {
     if ((i & 7) === 0 && performance.now() - t0 > roadBudgetMs) break;
     const r = pendingRoadMeshes[i++];
     r._q = false;
-    // 【2026-07-28】キュー投入後にevictFarRoadsで距離破棄されたレコード。ここで作ってしまうと
-    // roadRecordsに居ないメッシュがsceneに残り、二度とアンロードされない孤児になる。
-    if (r._dropped) continue;
     const mx = (r.x1 + r.x2) / 2 - px, mz = (r.z1 + r.z2) / 2 - pz;
     // 遠方(unloadFarRoadsの解放距離の外)はどうせすぐ解放されるので作らない。
     // プレイヤーが近づけばチャンク再生成(rebuildRoadsNearChunk)やNEAR更新
     // (rebuildRoadsInBounds)が再キューするので、恒久的に欠けることはない。
     // 細街路(road/tertiary)はさらに短いMINOR_ROAD_MESH_DISTで切る(メッシュ総数対策)。
-    // 高架(motorway)は逆にunloadFarRoadsと同じMOTORWAY_UNLOAD_DIST(長め)を使う。
-    const _rlim2 = r.type === 'motorway' ? MOTORWAY_UNLOAD_DIST * MOTORWAY_UNLOAD_DIST
-      : isMinorRoadType(r.type) ? MINOR_ROAD_MESH_DIST * MINOR_ROAD_MESH_DIST : lim2;
+    const _rlim2 = isMinorRoadType(r.type) ? MINOR_ROAD_MESH_DIST * MINOR_ROAD_MESH_DIST : lim2;
     if (mx * mx + mz * mz > _rlim2) { r._dirty = false; continue; }
     if (r.mesh && !r._dirty) continue; // 既に構築済みで地形も変わっていない
     rebuildRoadMesh(r);
@@ -923,13 +864,8 @@ function processRoadMeshQueue() {
 // ここでは建物と違い、roadRecords/roadGrid(=isOnRoad判定・ミニマップ・踏切検出が
 // 恒久的に参照する軽量データ)自体は消さず、GPU側の重いMesh/ジオメトリだけを距離に応じて
 // 破棄・復元する(復元は上のrebuildRoadMeshが、プレイヤーが近づいてチャンクが再生成される
-// タイミングで自動的に行う)。
-// 【2026-07-28修正】高架(motorway)は当初「橋脚がInstancedMeshで個別解放できない」ため
-// アンロード対象外だったが、その後橋脚自体を撤去(part3.js addMotorway参照、挙動が不安定
-// だったため)し、高架は橋脚なしの独立Mesh1本になったため除外理由は解消済み。経路シムが
-// 無人で長距離を走り続けると、OSRM drivingルートで多用される高架が対象外のまま永久に
-// GPUメモリへ残り続けクラッシュの一因になっていたため、他の道路と同じくアンロード対象に
-// 含めた(ただしMOTORWAY_UNLOAD_DISTで通常の道路よりずっと長く保持する)。
+// タイミングで自動的に行う)。高架(motorway)は橋脚がInstancedMeshで個別解放できないため
+// 対象外とする(高速道路は本数が少なく、影響は小さい)。
 // ======= 【2026-07-16】描写範囲・パフォーマンスプリセット =======
 // ⚙ボタン(index.html #perfCtrl、切替処理はpart7.js)で3段階から選択。localStorageに保存し、
 // リロードで反映(距離系はconstで各所に焼き込まれるため、モード切替と同じリロード方式)。
@@ -973,11 +909,6 @@ const PERF = {
 }[PERF_PRESET];
 const ROAD_UNLOAD_DIST = PERF.roadUnload;
 const MINOR_ROAD_MESH_DIST = PERF.minorRoadDist;
-// 【2026-07-28・経路シムのクラッシュ対策】高架(motorway)も他の道路と同じくアンロード対象に
-// するが、通常のROAD_UNLOAD_DISTよりずっと長い保持距離にする(遠くからでもスカイラインとして
-// 見える高速道路が、普通に探索している範囲ではまず消えないようにするため)。経路シムのように
-// 何十kmも一方向へ進み続けるケースでだけ、実際に距離アンロードが効いてGPUメモリを解放する。
-const MOTORWAY_UNLOAD_DIST = ROAD_UNLOAD_DIST * 4;
 // 【2026-07-20】未舗装(type:'unpaved'。part8.js参照)も細街路と同じ扱いにする。
 // 舗装/未舗装で分岐する前は全て'road'だったため元々ここに含まれていた枠で、
 // 分岐後にここを更新し忘れると農道・山道が幹線扱いの遠距離まで描画され続けてしまう。
@@ -990,14 +921,12 @@ function unloadFarRoads(force) {
   const px = player.position.x, pz = player.position.z;
   const d2 = ROAD_UNLOAD_DIST * ROAD_UNLOAD_DIST;
   const dMinor2 = MINOR_ROAD_MESH_DIST * MINOR_ROAD_MESH_DIST;
-  const dMotorway2 = MOTORWAY_UNLOAD_DIST * MOTORWAY_UNLOAD_DIST;
   for (const r of roadRecords) {
+    if (r.type === 'motorway') continue; // 高架は対象外
     const mx = (r.x1 + r.x2) / 2, mz = (r.z1 + r.z2) / 2;
     const dx = mx - px, dz = mz - pz;
     const dd = dx * dx + dz * dz;
-    // 【2026-07-28】高架(motorway)も対象に含める(理由は上のMOTORWAY_UNLOAD_DIST参照)。
-    // ただし他の道路よりずっと長い距離まで保持する。
-    const lim2r = r.type === 'motorway' ? dMotorway2 : isMinorRoadType(r.type) ? dMinor2 : d2;
+    const lim2r = isMinorRoadType(r.type) ? dMinor2 : d2;
     // 【2026-07-16】範囲内なのにメッシュが無い道路はここで再キューして復元する。
     // 以前はチャンク再生成(960m)頼みだったため、細街路の保持距離(1100m)との間に
     // 「再接近しても細い道路が生成されない帯」ができていた(実機報告)。
@@ -1015,61 +944,6 @@ function unloadFarRoads(force) {
       r.railWhite = null;
     }
   }
-}
-
-// ======= 道路レコードの距離アンロード =======
-// 【2026-07-28・2回目の実測([mem]計器)で判明した本命】
-// dormantの距離破棄を入れた後の走行ログでは、dormantは1500〜9000で振動して落ち着き、
-// geo(約19000)・tex(約890)・heapMBも頭打ち/振動になった。その中で唯一きれいに単調増加して
-// いたのが roadRec(= roadRecords.length)で、86,537 → 193,476 まで伸び、末尾では2秒あたり
-// +13,000(≒6,500件/秒)のペースだった。10分走れば数百万件に達する計算で、レンダラ側の
-// 800MB超という実測値とも桁が合う。
-//
-// 原因はdormantと同じ構造。unloadFarRoads は r.mesh を破棄してnullにするだけで、
-// roadRecords 配列と roadGrid(40m四方の空間ハッシュ。1本の線分が複数セルに登録される)から
-// レコードそのものを消す処理はどこにも無い。「軽量データは永久保持・GPUリソースだけ距離で
-// 解放」という既存方針そのものだが、経路シムは無人で何十kmも走るためこの前提が崩れる。
-// (さらにunloadFarRoadsは1.5秒ごとにroadRecords全件を走査するので、件数の増加はメモリ
-//  だけでなくCPUコストにも効いてくる。)
-//
-// 対策: 十分遠い道路はレコードごと捨てる。距離はメッシュの保持距離より外側に取り、
-// 「まだ描画されている・すぐ引き返せる」ものは絶対に捨てない。
-// 【トレードオフ】捨てた範囲へ引き返すと、そのタイルは取得済み扱いのままなので道路が
-// 復活しない(地形は残る)。KEEP距離は通常の探索範囲のはるか外なので実用上は起きないが、
-// 経路シムで10km以上走ってから戻ると起こりうる。クラッシュより軽い劣化として許容する。
-const ROAD_RECORD_KEEP_DIST = Math.max(6000, ROAD_UNLOAD_DIST * 2);
-// 高架は遠景のスカイラインとしてMOTORWAY_UNLOAD_DISTまでメッシュを保持するので、
-// レコードはそれより確実に外側まで残す(でないと保持距離内なのに復元できなくなる)。
-const ROAD_RECORD_KEEP_DIST_MOTORWAY = MOTORWAY_UNLOAD_DIST * 1.3;
-const ROAD_RECORD_SOFT_MIN = 20000; // これ以下なら走査自体しない(通常プレイでは常にここで抜ける)
-let _roadEvictFrame = 0;
-let _roadEvicted = 0; // [mem]ログ用(直近ウィンドウの累計)
-function evictFarRoads(force) {
-  _roadEvictFrame++;
-  if (!force && _roadEvictFrame % 300 !== 0) return; // ~5秒ごと(全件走査+グリッド再構築なので低頻度)
-  if (roadRecords.length < ROAD_RECORD_SOFT_MIN) return;
-  const px = player.position.x, pz = player.position.z;
-  const keep2 = ROAD_RECORD_KEEP_DIST * ROAD_RECORD_KEEP_DIST;
-  const keepMtw2 = ROAD_RECORD_KEEP_DIST_MOTORWAY * ROAD_RECORD_KEEP_DIST_MOTORWAY;
-  let w = 0; // 生存分を前詰めするコンパクション(spliceの繰り返しを避ける)
-  for (let i = 0; i < roadRecords.length; i++) {
-    const r = roadRecords[i];
-    const mx = (r.x1 + r.x2) / 2 - px, mz = (r.z1 + r.z2) / 2 - pz;
-    if (mx * mx + mz * mz <= (r.type === 'motorway' ? keepMtw2 : keep2)) { roadRecords[w++] = r; continue; }
-    // ここに来る時点でunloadFarRoadsが既にメッシュを解放しているはずだが、念のため。
-    if (r.mesh) { scene.remove(r.mesh); r.mesh.geometry.dispose(); r.mesh = null; }
-    if (r.railWhite) { scene.remove(r.railWhite); r.railWhite.geometry.dispose(); r.railWhite = null; }
-    // pendingRoadMeshes に既に積まれている参照はここでは消せない(配列の途中を突くのは高コスト)。
-    // 代わりに印を付けておき、processRoadMeshQueue / queueRoadMesh 側で無視させる。
-    r._dropped = true;
-    _roadEvicted++;
-  }
-  if (w === roadRecords.length) return;
-  roadRecords.length = w;
-  // roadGridは1レコードが複数セルに入るため個別削除が面倒かつ高コスト。生存分だけで作り直す
-  // (5秒に1回・生存数万件のO(n)なので、部分削除より単純で確実)。
-  roadGrid.clear();
-  for (const r of roadRecords) roadGridAdd(r);
 }
 
 // 矩形範囲(ワールド座標)にかかる道路を、現在の地形に合わせてまとめて再構築する。
@@ -1383,58 +1257,6 @@ function reactivateNearbyDormantBuildings() {
         if (arr.length === 0) dormantGrid.delete(gx + ',' + gz);
       }
     }
-  }
-}
-
-// ======= dormantの距離アンロード =======
-// 【2026-07-28・経路シムのクラッシュ実測(PC Chrome、[mem]計器)で判明】
-// renderer.info の geometries(約18000)・textures(約1080)は数分走っても頭打ちになる一方、
-// dormantCount だけが 0 → 22000 超へ単調増加し、末尾では toDormant/2s が 4000 件を超えて
-// いた(evicted は数十〜数百件しかなく、revive はプレイヤー近傍セルしか対象にしない)。
-// つまりGPU側はもう漏れておらず、際限なく増えるのは「軽量データは永久保持」という設計の
-// dormantGrid だけ、というのが実測の結論。
-// 通常のWASD探索では行動範囲が狭く問題化しなかったが、経路シムは無人で何十kmも一方向へ
-// 進み続けるため、二度と戻らない土地の建物記述子を全部抱え続けることになる。
-//
-// 対策: プレイヤーから十分遠いセルは丸ごと捨てる。捨てる距離は道路のアンロード距離
-// (ROAD_UNLOAD_DIST=2500m)より十分外側に取り、「まだ見えている・すぐ戻れる」範囲の
-// 建物は絶対に捨てない。加えて総数の絶対上限も設け、上限超過時は遠いセルから落とす。
-// 【トレードオフ】捨てたセルへ後から戻ると、そのタイルは取得済み扱いのままなので建物が
-// 復活しない(地形・道路は残る)。KEEP距離を大きめに取っているので通常の探索では起きないが、
-// 経路シムで数km走ってから引き返した場合は起こりうる。クラッシュより軽い劣化として許容する。
-const DORMANT_KEEP_DIST = Math.max(4000, ROAD_UNLOAD_DIST * 1.6);
-const DORMANT_MAX = 60000; // これを超えたら遠いセルから落とす(絶対上限)
-let _dormantEvictFrame = 0;
-let _dormantEvicted = 0; // [mem]ログ用(直近ウィンドウの累計)
-function evictFarDormant() {
-  _dormantEvictFrame++;
-  if (_dormantEvictFrame % 90 !== 0) return; // unloadFarBuildingsと同じ周期
-  if (dormantCount === 0) return;
-  const px = player.position.x, pz = player.position.z;
-  const keep2 = DORMANT_KEEP_DIST * DORMANT_KEEP_DIST;
-  // 第1段: KEEP距離の外のセルを捨てる。セル中心で判定(セルは200m四方なので誤差は無視できる)
-  for (const [key, arr] of dormantGrid) {
-    const c = key.split(','), cx = (+c[0] + 0.5) * DORMANT_CELL, cz = (+c[1] + 0.5) * DORMANT_CELL;
-    const dx = cx - px, dz = cz - pz;
-    if (dx * dx + dz * dz <= keep2) continue;
-    dormantCount -= arr.length;
-    _dormantEvicted += arr.length;
-    dormantGrid.delete(key);
-  }
-  // 第2段: それでも上限を超えている(=KEEP距離内が異常に密)場合、遠いセルから落として上限に収める
-  if (dormantCount <= DORMANT_MAX) return;
-  const cells = [];
-  for (const [key, arr] of dormantGrid) {
-    const c = key.split(','), cx = (+c[0] + 0.5) * DORMANT_CELL, cz = (+c[1] + 0.5) * DORMANT_CELL;
-    const dx = cx - px, dz = cz - pz;
-    cells.push({ key, n: arr.length, d2: dx * dx + dz * dz });
-  }
-  cells.sort((a, b) => b.d2 - a.d2); // 遠い順
-  for (const c of cells) {
-    if (dormantCount <= DORMANT_MAX) break;
-    dormantCount -= c.n;
-    _dormantEvicted += c.n;
-    dormantGrid.delete(c.key);
   }
 }
 
@@ -1765,39 +1587,6 @@ player.add(leftArm);
 const rightArm = leftArm.clone();
 rightArm.position.set(0.42, 1.15, 0);
 player.add(rightArm);
-
-// ======= BIRDモード用の見た目(翼・くちばし) =======
-// 【2026-07-27・ユーザー要望】BIRDモード中は腕の代わりに翼を、顔にくちばしを見せる。
-// 新規モデルは作らず既存パーツと同じ「単純プリミティブ」路線を踏襲する(ConeGeometryを
-// 扁平に潰して翼のシルエットにする)。既定は非表示(visible=false)で、表示切替は
-// refreshCharacterVisibility()(part7.js、setViewMode/setBirdModeの両方から呼ばれる)が
-// 一元管理する。ここではジオメトリの生成のみ。
-const wingMat = new THREE.MeshLambertMaterial({ color: 0x5a4a2a, side: THREE.DoubleSide });
-function _makeWing() {
-  const wing = new THREE.Mesh(new THREE.ConeGeometry(0.55, 0.95, 4), wingMat);
-  wing.scale.set(1, 0.1, 0.55); // Y方向に潰して翼のように平たくする
-  wing.castShadow = true;
-  return wing;
-}
-const leftWing = _makeWing();
-leftWing.position.set(-0.4, 1.2, 0);
-leftWing.rotation.z = Math.PI / 2 + 0.25; // 横へ広げる
-leftWing.rotation.y = 0.1;
-leftWing.visible = false;
-player.add(leftWing);
-const rightWing = _makeWing();
-rightWing.position.set(0.4, 1.2, 0);
-rightWing.rotation.z = -(Math.PI / 2 + 0.25);
-rightWing.rotation.y = -0.1;
-rightWing.visible = false;
-player.add(rightWing);
-
-const beakMat = new THREE.MeshLambertMaterial({ color: 0xf0a020 });
-const beak = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.22, 6), beakMat);
-beak.position.set(0, 1.62, 0.28);
-beak.rotation.x = Math.PI / 2;
-beak.visible = false;
-player.add(beak);
 
 player.position.set(0, 0, 0);
 

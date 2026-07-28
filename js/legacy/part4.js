@@ -36,11 +36,23 @@ function decorateRoad(x1, z1, x2, z2, type, w, rec) {
   if (minor) {
     // 電柱・電線は撤去済み(2026-07-15。ただの装飾でリソースの無駄という判断。
     // 経緯はpart2.js冒頭のコメント参照)。
-    // 【2026-07-28・ユーザー要望で撤去】自販機。vendPプール自体はpart2.jsに残しているが
-    // (signBoardP撤去時と同じ方針)、poolAdd呼び出しをやめたので以降生成されない。
+    // 自販機(江戸では樽/井戸)
+    if (Math.random() < 0.13) {
+      const t = 0.2 + Math.random() * 0.6;
+      const vx = x1 + dx * t + px * (w / 2 + 1.2);
+      const vz = z1 + dz * t + pz * (w / 2 + 1.2);
+      poolAdd(vendP, vx, getGroundY(vx, vz) + PROP_VEND_Y, vz, ry + Math.PI / 2, 1, 1, 1,
+              PROP_VEND_COLORS[(Math.random() * 3) | 0]);
+    }
   } else {
-    // 【2026-07-28・ユーザー要望で撤去】ガードレール。guardPプール自体はpart2.jsに残している
-    // (signBoardP撤去時と同じ方針)が、poolAdd呼び出しをやめたので以降生成されない。
+    // 幹線(secondary以上): ガードレール(8m毎、両側)
+    for (let s = 4; s < len - 4; s += 8) {
+      for (const side of [-1, 1]) {
+        const gx = x1 + nx * s + px * side * (w / 2 + 0.4);
+        const gz = z1 + nz * s + pz * side * (w / 2 + 0.4);
+        poolAdd(guardP, gx, getGroundY(gx, gz) + 0.7, gz, ry, 8, 1, 1, PROP_GUARD_C);
+      }
+    }
     // 信号機(長い区間にたまに。江戸モードでは出さない)
     if (PROP_SIGNALS && len > 60 && Math.random() < 0.1) {
       const sx = x1 + dx * 0.5 + px * (w / 2 + 0.8), sz = z1 + dz * 0.5 + pz * (w / 2 + 0.8);
@@ -716,8 +728,11 @@ function handleAreaFeature(el) {
     if (span < 400 && areaPolyBudgetOK('park')) buildTerrainFollowingAreaPoly(pts, lawnMat, 0.14, 20, false);
     scatterTreesIn(poly, 170, 40);
     const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
-    // 【2026-07-28・ユーザー要望で撤去】ベンチ。benchPプール自体はpart2.jsに残している
-    // (signBoardP撤去時と同じ方針)が、poolAdd呼び出しをやめたので以降生成されない。
+    for (let i = 0; i < 3; i++) { // ベンチ
+      const bx = cx + (Math.random() - 0.5) * (maxX - minX) * 0.5;
+      const bz = cz + (Math.random() - 0.5) * (maxZ - minZ) * 0.5;
+      if (pointInPolygon(bx, bz, pts)) poolAdd(benchP, bx, getGroundY(bx, bz) + 0.35, bz, Math.random() * Math.PI);
+    }
     if (pointInPolygon(cx, cz, pts)) { // 公園灯
       const gy = getGroundY(cx, cz);
       poolAdd(poleP, cx, gy + 2, cz, 0, 0.6, 0.5, 0.6);
