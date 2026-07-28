@@ -717,12 +717,70 @@ const CROSS_MAT = new THREE.MeshBasicMaterial({ color: 0xff0000 });    // 病院
 // 上限(max)を超えた分は追加されないため、負荷は上限で頭打ちになる。
 const _dummy = new THREE.Object3D();
 const _tmpColor = new THREE.Color();
+// 【2026-07-28】作ったプールは全部ここに登録し、compactPoolsが遠方のインスタンスを
+// 回収できるようにする(下のcompactPoolsのコメント参照)。
+const _allPools = [];
 function makePool(geo, mat, max, name) {
   const m = new THREE.InstancedMesh(geo, mat, max);
   m.count = 0;
   m.frustumCulled = false; // インスタンスが広域に散るため全体カリング無効(1ドローコールなので安い)
   scene.add(m);
-  return { mesh: m, max, n: 0, name: name || null };
+  const pool = { mesh: m, max, n: 0, name: name || null };
+  _allPools.push(pool);
+  return pool;
+}
+
+// ======= 【2026-07-28】遠方インスタンスの回収(プール枯渇の解消) =======
+// これまでプールはセッション累計の使い切りで、遠くへ移動してもリサイクルされなかった。
+// 一度上限に達すると以降どこへ行っても小物が生成されず、「後から訪れた地域だけ
+// 街灯も信号も木も無い」状態が永久に続いていた(実機ログでlampP/signalP/scrubP/街路樹が
+// 実際に枯渇していた)。森(rebuildForest)だけが唯一リサイクルされていた。
+// インスタンス行列から座標を読めるので、プレイヤーから遠いインスタンスを詰めて捨て、
+// 空いた枠を新しい土地に回す。
+// 【発火条件】枯渇が近いプールだけ(9割以上埋まっている時)。通常のプレイでは何もしない。
+// 【保持距離】道路メッシュの表示距離以上を確保するので、見えている範囲の小物は消えない。
+// 【戻ってきた時】そのタイルが再取得対象(reviveStaleTiles)になれば addRoad /
+// handleAreaFeature が再実行され、小物も一緒に作り直される。
+const PROP_KEEP_DIST = Math.max(2500, typeof ROAD_UNLOAD_DIST === 'number' ? ROAD_UNLOAD_DIST : 2500);
+function compactPool(pool, px, pz, keep2) {
+  if (pool.noCompact || pool.n === 0) return 0;
+  const m = pool.mesh;
+  const arr = m.instanceMatrix.array;            // Matrix4を並べたFloat32Array(平行移動は12,13,14)
+  const col = m.instanceColor ? m.instanceColor.array : null;
+  let w = 0;
+  for (let i = 0; i < pool.n; i++) {
+    const o = i * 16;
+    const dx = arr[o + 12] - px, dz = arr[o + 14] - pz;
+    if (dx * dx + dz * dz > keep2) continue;     // 遠いので捨てる
+    if (w !== i) {
+      arr.copyWithin(w * 16, o, o + 16);
+      if (col) col.copyWithin(w * 3, i * 3, i * 3 + 3);
+    }
+    w++;
+  }
+  const removed = pool.n - w;
+  if (removed === 0) return 0;
+  pool.n = w;
+  m.count = w;
+  m.instanceMatrix.needsUpdate = true;
+  if (col) m.instanceColor.needsUpdate = true;
+  pool._warned = false; // 枠が空いたので、次に枯渇したらまた警告を出す
+  return removed;
+}
+let _poolCompactFrame = 0;
+function compactPools() {
+  _poolCompactFrame++;
+  if (_poolCompactFrame % 180 !== 0) return; // ~3秒ごと
+  if (typeof worldPosSettled !== 'undefined' && !worldPosSettled) return;
+  const px = player.position.x, pz = player.position.z;
+  const keep2 = PROP_KEEP_DIST * PROP_KEEP_DIST;
+  let total = 0, pools = 0;
+  for (const p of _allPools) {
+    if (p.n < p.max * 0.9) continue; // 枯渇が近いプールだけ触る
+    const r = compactPool(p, px, pz, keep2);
+    if (r) { total += r; pools++; }
+  }
+  if (total) console.log('[poolCompact] ' + pools + 'プールから遠方の小物' + total + '件を回収しました(保持' + PROP_KEEP_DIST + 'm)');
 }
 // 注意: 同じプールでは color を「常に渡す」か「常に渡さない」かを統一する
 // (instanceColor バッファは初期値0=黒のため混在させると未設定分が黒くなる)
@@ -838,6 +896,10 @@ function plantTree(x, z) {
   if (MODE === 'space') return; // 宇宙: 大気が無いため植生(三角錐のクリスタル樹)は生やさない
   if (forestTrunkP.n >= forestTrunkP.max) return; // 幹が上限なら木ごと追加しない(浮いた樹冠防止)
   const gy = getGroundY(x, z);
+// 森はrebuildForest(part9.js)が移動のたび作り直すので、compactPoolsの対象から外す
+// (二重管理になり、作り直した直後に回収されて木が消えるのを防ぐ)。
+forestTrunkP.noCompact = true;
+forestLeafPools.forEach(p => { p.noCompact = true; });
   const r1 = _fhash(Math.floor(x * 7.3), Math.floor(z * 7.3));
   const s = 0.9 + r1 * 1.3;
   const rot = _fhash(Math.floor(x * 3.1) + 7, Math.floor(z * 5.7) + 3) * 6.283;

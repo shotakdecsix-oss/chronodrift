@@ -222,6 +222,46 @@ function tileStateKey(tx, tz, kind) {
 // (ミニマップには道路が残るのに3Dでは見えない、という報告と厳密に一致する)
 let initialWorldLoaded = false;
 const seenOSMWays = new Set();      // 処理済みway ID(タイル境界をまたぐ要素の二重生成防止)
+// 【2026-07-28・恒久欠落の解消】距離アンロードで道路レコードやdormant建物を「恒久破棄」した
+// あと、そのタイルはqueuedTiles/roadReadyTilesに残ったままなので二度と再取得されず、
+// 戻ってくると「タイルは緑なのに道路も建物も無い」状態が永続していた。
+// 再取得できるようにするには、取得済みフラグを落とすだけでは足りない:
+//   ・seenOSMWaysにway IDが残っていると、再取得しても全部「処理済み」で素通りされる
+//   ・かといってway IDだけ消すと、まだ生きているレコードの上に同じ道路がもう1本生成される
+// そこで「そのタイルの残存レコードを全部消す」と「フラグとway IDを落とす」を
+// 必ずセットで(原子的に)行う。way IDはタイル単位で覚えておく必要があるので記録する。
+const tileWays = new Map();      // "tx,tz" -> [wayId, ...]
+const tileRelations = new Map(); // "tx,tz" -> [relationId, ...]
+const staleTiles = new Set(); // 一部を恒久破棄したタイル。接近時にreviveStaleTilesが作り直す
+function osmTileKeyOfXZ(x, z) {
+  return Math.floor(x / OSM_TILE_M) + ',' + Math.floor(z / OSM_TILE_M);
+}
+function markTileStale(x, z) { staleTiles.add(osmTileKeyOfXZ(x, z)); }
+// そのタイルを「一度も取得していない」状態へ完全に戻す。
+// 【重要】呼ぶ側で、そのタイルに属する生存レコード(道路・建物・dormant)を先に全部
+// 消しておくこと。残っていると再取得で二重生成になる。
+function resetTileForRefetch(key) {
+  const ways = tileWays.get(key);
+  if (ways) { for (const id of ways) seenOSMWays.delete(id); tileWays.delete(key); }
+  // 【2026-07-28】building relation(マルチポリゴンの建物・スタジアム等)も取り消す。
+  // これを忘れると、タイルを再取得しても synthesizeBuildingRelationWays が
+  // 「処理済み」として合成をスキップし、relation由来の建物だけ永久に欠ける。
+  const rels = tileRelations.get(key);
+  if (rels) { for (const id of rels) seenOSMRelations.delete(id); tileRelations.delete(key); }
+  queuedTiles.delete(key);
+  roadReadyTiles.delete(key);
+  buildingReadyTiles.delete(key);
+  buildingQueuedTiles.delete(key);
+  for (const k of [key, key + '|road', key + '|building']) {
+    gaveUpTiles.delete(k);
+    osmTileFailCount.delete(k);
+    osmTileHardFailCount.delete(k);
+    osmTileNextRetryAt.delete(k);
+    osmTileQueuedAt.delete(k);
+    osmTileTimeoutBoost.delete(k);
+  }
+  staleTiles.delete(key);
+}
 const seenOSMRelations = new Set(); // 処理済みbuilding relation ID(下記synthesizeBuildingRelationWays参照)
 const pendingBuildings = [];        // タイル取得分の建物はフレーム分割して生成
 let pendingBuildingIdx = 0;
@@ -259,8 +299,13 @@ function processStationNodes(elements) {
     const isStation = el.tags.railway === 'station' || el.tags.railway === 'halt' || el.tags.public_transport === 'station';
     if (!isStation) return;
     const name = el.tags.name || el.tags['name:ja'] || '駅';
-    if (seenStations.has(name)) return;
-    seenStations.add(name);
+    // 【2026-07-28】以前は駅【名】で重複排除していたため、同名駅(日本では珍しくない。
+    // 「本町」「大手町」「中央」等)が別の街に存在しても2つ目以降は永久に生成されなかった。
+    // OSMのノードIDで判定する(同じ駅が複数タイルの応答に跨って現れる本来の重複排除は
+    // IDでも同じように効く)。IDが無い異常データだけ名前+座標にフォールバックする。
+    const stKey = el.id != null ? 'n' + el.id : name + '@' + Math.round(el.lat * 1e4) + ',' + Math.round(el.lon * 1e4);
+    if (seenStations.has(stKey)) return;
+    seenStations.add(stKey);
     const pos = latLonToXZ(el.lat, el.lon);
     addStation(pos.x, pos.z, name);
   });
@@ -510,7 +555,34 @@ function processTileData(data, tileCount) {
     polyGridAdd(landuseGrid, _luEntry);
   });
   // 最後にway IDを記録(カテゴリ別の3パスが終わってから)
-  data.elements.forEach(el => { if (el.type === 'way') seenOSMWays.add(el.id); });
+  // 【2026-07-28】どのタイルのwayかも一緒に覚える(resetTileForRefetchで消せるようにするため)。
+  // 所属タイルは要求元ではなくway自身の座標で決める(タイルをまたぐwayは代表点側に属させる)。
+  data.elements.forEach(el => {
+    // relation(building/stadiumのマルチポリゴン)も所属タイルを覚えておく
+    if (el.type === 'relation' && el.id != null && seenOSMRelations.has(el.id)) {
+      const rg = el.bounds
+        ? { lat: (el.bounds.minlat + el.bounds.maxlat) / 2, lon: (el.bounds.minlon + el.bounds.maxlon) / 2 }
+        : (el.members && el.members.find(m => m.geometry && m.geometry[0]) || {}).geometry?.[0];
+      if (rg) {
+        const rp = latLonToXZ(rg.lat, rg.lon);
+        const rk = osmTileKeyOfXZ(rp.x, rp.z);
+        let ra = tileRelations.get(rk);
+        if (!ra) { ra = []; tileRelations.set(rk, ra); }
+        ra.push(el.id);
+      }
+      return;
+    }
+    if (el.type !== 'way' || el.id == null) return;
+    seenOSMWays.add(el.id);
+    const g = (el.geometry && el.geometry[0]) ||
+      (el.bounds ? { lat: (el.bounds.minlat + el.bounds.maxlat) / 2, lon: (el.bounds.minlon + el.bounds.maxlon) / 2 } : null);
+    if (!g) return;
+    const pxz = latLonToXZ(g.lat, g.lon);
+    const k = osmTileKeyOfXZ(pxz.x, pxz.z);
+    let arr = tileWays.get(k);
+    if (!arr) { arr = []; tileWays.set(k, arr); }
+    arr.push(el.id);
+  });
 }
 
 // キューに空きワーカー枠がある限り、並行してタイルを取得していく

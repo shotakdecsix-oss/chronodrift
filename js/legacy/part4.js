@@ -194,8 +194,15 @@ const areaPolyBudget = { park: 400, water: 400, farm: 250, campus: 400 }; // 面
 // 予算が尽きた事実を可視化する(以前は静かに回避判定のみへフォールバックし気づけなかった)。
 // 種類ごとに初回だけコンソールへ警告し、ログが埋もれないようにする。
 const _areaPolyWarned = new Set();
+// 【2026-07-28】予算を「セッション累計の使い切り」から「今生きている面メッシュの数」へ変える。
+// タイル再取得(dropTileRemnants)で面レコードを落とした時に予算を返せるようにするため、
+// どの種別で確保したかを直後に作られるentryへ引き継ぐ。areaPolyBudgetOK() は必ず
+// buildAreaPoly / buildTerrainFollowingAreaPoly の直前でしか呼ばれない前提。
+let _areaPolyKindPending = null;
+function areaPolyTakePendingKind() { const k = _areaPolyKindPending; _areaPolyKindPending = null; return k; }
+function areaPolyRefund(kind) { if (kind && areaPolyBudget[kind] != null) areaPolyBudget[kind]++; }
 function areaPolyBudgetOK(kind) {
-  if (areaPolyBudget[kind] > 0) { areaPolyBudget[kind]--; return true; }
+  if (areaPolyBudget[kind] > 0) { areaPolyBudget[kind]--; _areaPolyKindPending = kind; return true; }
   if (!_areaPolyWarned.has(kind)) {
     _areaPolyWarned.add(kind);
     console.warn(`[areaPolyBudget] "${kind}"の面メッシュ予算を使い切りました。以降は回避判定・ミニマップ表示のみ機能します。`);
@@ -417,7 +424,7 @@ function buildAreaPoly(pts, mat, yOff, holes) {
   // kind/pts/holes/matを保持しておくのは、遠方でGPU解放した後に再接近時、記録から
   // 再構築できるようにするため(道路のrebuildRoadMesh/unloadFarRoadsと同じ考え方。
   // CODE_REVIEW_20260717 P8: 以前はここで一度作ったら二度と解放されなかった)。
-  const entry = { mesh: null, kind: 'flat', pts, holes, mat, yOff, minX, maxX, minZ, maxZ };
+  const entry = { mesh: null, kind: 'flat', areaKind: areaPolyTakePendingKind(), pts, holes, mat, yOff, minX, maxX, minZ, maxZ };
   _instantiateAreaPolyMesh(entry);
   areaPolyMeshes.push(entry);
   polyGridAdd(areaPolyGrid, entry);
@@ -433,10 +440,63 @@ function buildAreaPoly(pts, mat, yOff, holes) {
 function buildTerrainFollowingAreaPoly(pts, mat, yOff, cellSize, worldUV) {
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
   pts.forEach(p => { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); });
-  const entry = { mesh: null, kind: 'terrain', pts, mat, yOff, cellSize, worldUV, minX, maxX, minZ, maxZ };
-  if (!_instantiateAreaPolyMesh(entry)) return; // 細すぎる/境界だけのポリゴンはフォールバックなしで諦める
+  const entry = { mesh: null, kind: 'terrain', areaKind: areaPolyTakePendingKind(), pts, mat, yOff, cellSize, worldUV, minX, maxX, minZ, maxZ };
+  // 【2026-07-28】細すぎるポリゴンで諦める時、以前は確保した予算が返らず垂れ流しだった
+  if (!_instantiateAreaPolyMesh(entry)) { areaPolyRefund(entry.areaKind); return; }
   areaPolyMeshes.push(entry);
   polyGridAdd(areaPolyGrid, entry);
+}
+
+// ======= 【2026-07-28】タイル再取得にあわせた面レコードの破棄 =======
+// 公園・水面・田畑・キャンパスの面レコードと、建物回避ポリゴン・土地利用ポリゴンは
+// 距離では破棄されない(=データが失われることはない)。ただしタイルを再取得すると
+// 同じポリゴンがもう一度積まれ、面メッシュが二重に張られてz-fightingを起こす。
+// dropTileRemnants(part1.js)から呼ばれ、そのタイルに属する記録だけを落とす。
+// 判定はポリゴンの外接矩形の中心。タイルをまたぐ大きなポリゴン(湾・大河川など)は
+// 中心が属する側のタイルにだけ紐づくので、二重にも消え残りにもならない。
+function dropAreaRecordsInTile(tx, tz, tileM) {
+  const x0 = tx * tileM, x1 = x0 + tileM, z0 = tz * tileM, z1 = z0 + tileM;
+  const inTile = (e) => {
+    const cx = (e.minX + e.maxX) / 2, cz = (e.minZ + e.maxZ) / 2;
+    return cx >= x0 && cx < x1 && cz >= z0 && cz < z1;
+  };
+  let dropped = 0;
+  // (1) 面メッシュ(表示中ならGPUも解放する)
+  let w = 0;
+  for (const e of areaPolyMeshes) {
+    if (inTile(e)) {
+      if (e.mesh) { scene.remove(e.mesh); e.mesh.geometry.dispose(); e.mesh = null; } // matは共有なのでdisposeしない
+      areaPolyRefund(e.areaKind); // 予算を返す(再取得でまた確保される)
+      dropped++; continue;
+    }
+    areaPolyMeshes[w++] = e;
+  }
+  if (w !== areaPolyMeshes.length) {
+    areaPolyMeshes.length = w;
+    areaPolyGrid.clear();
+    for (const e of areaPolyMeshes) polyGridAdd(areaPolyGrid, e); // 個別削除より作り直しの方が単純で確実(道路のroadGridと同じ方針)
+  }
+  // (2) 建物回避ポリゴン
+  w = 0;
+  for (const e of avoidPolygons) { if (inTile(e)) { dropped++; continue; } avoidPolygons[w++] = e; }
+  if (w !== avoidPolygons.length) {
+    avoidPolygons.length = w;
+    avoidGrid.clear();
+    for (const e of avoidPolygons) polyGridAdd(avoidGrid, e);
+  }
+  // (3) 土地利用ポリゴン(森の描画・地表色の判定に使う)
+  if (typeof landusePolygons !== 'undefined' && Array.isArray(landusePolygons)) {
+    w = 0;
+    for (const e of landusePolygons) { if (inTile(e)) { dropped++; continue; } landusePolygons[w++] = e; }
+    if (w !== landusePolygons.length) {
+      landusePolygons.length = w;
+      if (typeof landuseGrid !== 'undefined' && landuseGrid) {
+        landuseGrid.clear();
+        for (const e of landusePolygons) polyGridAdd(landuseGrid, e);
+      }
+    }
+  }
+  return dropped;
 }
 
 // ======= 面メッシュの距離ベースGPU解放・再構築 =======
@@ -449,6 +509,7 @@ const AREA_POLY_UNLOAD_DIST = PERF.roadUnload; // 道路と同程度の距離ま
 let _areaPolyUnloadFrame = 0;
 // force=true: 90フレーム周期を待たず即座に判定する(「今すぐ整理」ボタン用)
 function unloadFarAreaPolys(force) {
+  if (!worldPosSettled) return; // 開始位置が確定するまで距離を根拠に捨てない(part1.js worldPosSettled参照)
   _areaPolyUnloadFrame++;
   if (!force && _areaPolyUnloadFrame % 90 !== 0) return; // 道路・建物と同様、~1.5秒ごとで十分
   if (areaPolyMeshes.length === 0) return;

@@ -1093,6 +1093,8 @@ function animate() {
   unloadFarBuildings();
   reactivateNearbyDormantBuildings(); // 逆に、近づいた遠景建物は生成キューへ復帰させる
   evictFarDormant(); // 二度と戻らない遠方のdormant記述子を捨てる(part1.js、無人長距離走行対策)
+  reviveStaleTiles(); // 恒久破棄したタイルへ戻ってきたら、残りかすを消して再取得可能に戻す(part1.js)
+  compactPools(); // 枯渇寸前のインスタンスプールから遠方の小物を回収する(part2.js)
   scanGateWaitQueues(); // 【2026-07-21・Fable5診断(b)】ゲート待ち隔離キューの低頻度スキャン
   // (2026-07-16: 高度LOD(updateAltitudeLOD)は撤去 — 40m/300mまで絞ってもクラッシュ防止に
   //  効かないことが実証され、上空の「スカスカ感」の害だけが残ったため。クラッシュの実対策は

@@ -909,6 +909,11 @@ function sortNewEntriesByDistanceToPlayer(arr, fromIdx, getXZ) {
 // 距離を根拠に「捨てる/遠方送りにする」判断は、この旗が立つまで絶対に行わない
 // (part8.jsの投入時の振り分け、evictFarDormantの恒久削除がこれを見る)。
 let worldPosSettled = false;
+// 【安全網】位置情報の許可が降りない・ユーザーがプロンプトを無視した場合、ブートストラップの
+// await startLocP が長時間解決しないことが実機で確認されている(Chromeは複数回無視されると
+// 権限プロンプト自体をブロックする)。旗が立たないままだとアンロード処理が全部止まり、
+// 際限なく積み上がって逆にクラッシュを早める。15秒経ったら位置は確定したものとみなす。
+setTimeout(() => { worldPosSettled = true; }, 15000);
 const pendingRoadMeshes = [];
 function queueRoadMesh(r) {
   if (r._q || r._dropped) return; // 二重投入防止 / 距離破棄済みレコード(evictFarRoads参照)は作らない
@@ -1025,6 +1030,7 @@ const isMinorRoadType = (t) => t === 'road' || t === 'tertiary' || t === 'unpave
 let _roadUnloadFrame = 0;
 // force=true: 90フレーム周期を待たず即座に判定する(「今すぐ整理」ボタン用)
 function unloadFarRoads(force) {
+  if (!worldPosSettled) return; // 開始位置が確定するまで距離を根拠に捨てない(part1.js worldPosSettled参照)
   _roadUnloadFrame++;
   if (!force && _roadUnloadFrame % 90 !== 0) return; // 建物と同様、毎フレームやる必要はない(~1.5秒ごと)
   const px = player.position.x, pz = player.position.z;
@@ -1085,6 +1091,7 @@ const ROAD_RECORD_SOFT_MIN = 20000; // これ以下なら走査自体しない(�
 let _roadEvictFrame = 0;
 let _roadEvicted = 0; // [mem]ログ用(直近ウィンドウの累計)
 function evictFarRoads(force) {
+  if (!worldPosSettled) return; // 開始位置が確定するまで距離を根拠に捨てない(part1.js worldPosSettled参照)
   _roadEvictFrame++;
   if (!force && _roadEvictFrame % 300 !== 0) return; // ~5秒ごと(全件走査+グリッド再構築なので低頻度)
   if (roadRecords.length < ROAD_RECORD_SOFT_MIN) return;
@@ -1092,10 +1099,20 @@ function evictFarRoads(force) {
   const keep2 = ROAD_RECORD_KEEP_DIST * ROAD_RECORD_KEEP_DIST;
   const keepMtw2 = ROAD_RECORD_KEEP_DIST_MOTORWAY * ROAD_RECORD_KEEP_DIST_MOTORWAY;
   let w = 0; // 生存分を前詰めするコンパクション(spliceの繰り返しを避ける)
+  // 【2026-07-28】どのタイルが「全滅した」かを同じ1パスで数える。全滅したタイルだけは
+  // 取得済みフラグを落として再取得可能に戻す(1本でも生き残っていると再取得で二重生成に
+  // なるため、生存0のタイルに限る)。この距離(6000m超)では建物もdormantも既に消えている
+  // ので、道路の全滅=そのタイルには何も残っていない、と見なせる。
+  const _tileSurv = new Map(), _tileDropped = new Set();
   for (let i = 0; i < roadRecords.length; i++) {
     const r = roadRecords[i];
     const mx = (r.x1 + r.x2) / 2 - px, mz = (r.z1 + r.z2) / 2 - pz;
-    if (mx * mx + mz * mz <= (r.type === 'motorway' ? keepMtw2 : keep2)) { roadRecords[w++] = r; continue; }
+    const _tk = osmTileKeyOfXZ((r.x1 + r.x2) / 2, (r.z1 + r.z2) / 2);
+    if (mx * mx + mz * mz <= (r.type === 'motorway' ? keepMtw2 : keep2)) {
+      _tileSurv.set(_tk, (_tileSurv.get(_tk) || 0) + 1);
+      roadRecords[w++] = r; continue;
+    }
+    _tileDropped.add(_tk);
     // ここに来る時点でunloadFarRoadsが既にメッシュを解放しているはずだが、念のため。
     if (r.mesh) { scene.remove(r.mesh); r.mesh.geometry.dispose(); r.mesh = null; }
     if (r.railWhite) { scene.remove(r.railWhite); r.railWhite.geometry.dispose(); r.railWhite = null; }
@@ -1106,6 +1123,9 @@ function evictFarRoads(force) {
   }
   if (w === roadRecords.length) return;
   roadRecords.length = w;
+  for (const tk of _tileDropped) {
+    if (!_tileSurv.get(tk)) dropTileRemnants(tk); // 残りかす(dormant等)も消してから取得済みフラグを落とす
+  }
   // roadGridは1レコードが複数セルに入るため個別削除が面倒かつ高コスト。生存分だけで作り直す
   // (5秒に1回・生存数万件のO(n)なので、部分削除より単純で確実)。
   roadGrid.clear();
@@ -1264,6 +1284,7 @@ let _lastRealKeepDist = BUILDING_UNLOAD_DIST_REAL;
 let _freedThisCycle = 0;
 // force=true: 90フレーム周期を待たず即座に判定する(「今すぐ整理」ボタン用。CODE_REVIEW P8関連)
 function unloadFarBuildings(force) {
+  if (!worldPosSettled) return; // 開始位置が確定するまで距離を根拠に捨てない(part1.js worldPosSettled参照)
   _buildingUnloadFrame++;
   if (!force && _buildingUnloadFrame % 90 !== 0) return; // 毎フレームやる必要はない(~1.5秒ごと)
   if (buildingRecords.length === 0) return;
@@ -1354,6 +1375,7 @@ function unloadFarBuildings(force) {
 // (境界を跨いだ直後1.5秒以内に生成されれば体感上ポップインは気にならない)。
 let _dormantCheckFrame = 0;
 function reactivateNearbyDormantBuildings() {
+  if (!worldPosSettled) return; // 開始位置が確定するまで距離を根拠に捨てない(part1.js worldPosSettled参照)
   _dormantCheckFrame++;
   if (_dormantCheckFrame % 90 !== 0) return;
   if (dormantCount === 0) return;
@@ -1460,6 +1482,7 @@ function evictFarDormant() {
     if (dx * dx + dz * dz <= keep2) continue;
     dormantCount -= arr.length;
     _dormantEvicted += arr.length;
+    for (const b of arr) markTileStale(b.x, b.z); // 再接近時に作り直せるよう印を付ける
     dormantGrid.delete(key);
   }
   // 第2段: それでも上限を超えている(=KEEP距離内が異常に密)場合、遠いセルから落として上限に収める
@@ -1475,8 +1498,75 @@ function evictFarDormant() {
     if (dormantCount <= DORMANT_MAX) break;
     dormantCount -= c.n;
     _dormantEvicted += c.n;
+    const arr2 = dormantGrid.get(c.key);
+    if (arr2) for (const b of arr2) markTileStale(b.x, b.z); // 同上
     dormantGrid.delete(c.key);
   }
+}
+
+// ======= 【2026-07-28】恒久破棄したタイルの作り直し =======
+// 距離アンロード(evictFarDormantの上限超過分など)で建物だけを捨てたタイルは、道路レコードが
+// 生き残っているため上のevictFarRoadsの「全滅判定」には掛からない。放っておくと
+// 「タイルは取得済み・道路はある・建物だけ永久に無い」状態が固定される(密集地では
+// dormant上限60,000への張り付きで2秒あたり1〜2万件がここに落ちている)。
+// プレイヤーが戻ってきたら、そのタイルの残存レコードを全部消してから取得済みフラグを落とし、
+// 通常のタイル取得に拾わせて作り直す。
+// 【距離の選び方】道路メッシュの表示距離(ROAD_UNLOAD_DIST)より外側で行う。手前でやると
+// 目の前の道路が一度消えて再生成される(ちらつく)ため。
+const STALE_REVIVE_DIST = Math.max(5000, ROAD_UNLOAD_DIST * 1.5);
+// そのタイルに属する残存レコードを全部消してから、再取得可能な状態へ戻す。
+// 【重要】resetTileForRefetchを単体で呼んではいけない(残存レコードがあると二重生成になる)。
+function dropTileRemnants(tk) {
+  // dormant: タイル内のセルを消す
+  const parts = tk.split(',');
+  const tx = parseInt(parts[0], 10), tz = parseInt(parts[1], 10);
+  const c0x = Math.floor(tx * OSM_TILE_M / DORMANT_CELL), c1x = Math.ceil((tx + 1) * OSM_TILE_M / DORMANT_CELL);
+  const c0z = Math.floor(tz * OSM_TILE_M / DORMANT_CELL), c1z = Math.ceil((tz + 1) * OSM_TILE_M / DORMANT_CELL);
+  for (let gx = c0x; gx < c1x; gx++) for (let gz = c0z; gz < c1z; gz++) {
+    const k = gx + ',' + gz;
+    const arr = dormantGrid.get(k);
+    if (!arr) continue;
+    dormantCount -= arr.length;
+    _dormantEvicted += arr.length;
+    dormantGrid.delete(k);
+  }
+  // 面レコード(公園・水面・田畑・キャンパス/回避ポリゴン/土地利用)も落とす。
+  // 残したまま再取得すると同じポリゴンが二重に積まれ、面メッシュが重なってz-fightingする。
+  if (typeof dropAreaRecordsInTile === 'function') dropAreaRecordsInTile(tx, tz, OSM_TILE_M);
+  resetTileForRefetch(tk);
+}
+let _staleReviveFrame = 0;
+function reviveStaleTiles() {
+  _staleReviveFrame++;
+  if (_staleReviveFrame % 90 !== 0) return;
+  if (!worldPosSettled || staleTiles.size === 0) return;
+  const px = player.position.x, pz = player.position.z;
+  const lim2 = STALE_REVIVE_DIST * STALE_REVIVE_DIST;
+  const targets = new Set();
+  for (const tk of staleTiles) {
+    const p2 = tk.split(',');
+    const cx = (parseInt(p2[0], 10) + 0.5) * OSM_TILE_M, cz = (parseInt(p2[1], 10) + 0.5) * OSM_TILE_M;
+    const dx = cx - px, dz = cz - pz;
+    if (dx * dx + dz * dz <= lim2) targets.add(tk);
+  }
+  if (targets.size === 0) return;
+  // 対象タイルの道路レコードを1パスでまとめて落とす(タイルごとに全件走査しない)
+  let w = 0, dropped = 0;
+  for (let i = 0; i < roadRecords.length; i++) {
+    const r = roadRecords[i];
+    if (!targets.has(osmTileKeyOfXZ((r.x1 + r.x2) / 2, (r.z1 + r.z2) / 2))) { roadRecords[w++] = r; continue; }
+    if (r.mesh) { scene.remove(r.mesh); r.mesh.geometry.dispose(); r.mesh = null; }
+    if (r.railWhite) { scene.remove(r.railWhite); r.railWhite.geometry.dispose(); r.railWhite = null; }
+    r._dropped = true;
+    dropped++;
+  }
+  if (dropped > 0) {
+    roadRecords.length = w;
+    roadGrid.clear();
+    for (const r of roadRecords) roadGridAdd(r);
+  }
+  for (const tk of targets) dropTileRemnants(tk);
+  console.log('[staleTile] ' + targets.size + 'タイルを作り直します(道路レコード' + dropped + '本を破棄して再取得)');
 }
 
 // ======= 【2026-07-21・Fable5診断(b)】ゲート待ち建物の隔離キュー =======
