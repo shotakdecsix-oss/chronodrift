@@ -449,6 +449,23 @@ try {
 //       ・大きく下がる → 1.5GBの正体はこのページのWebGL資源。バッファ/テクスチャ削減を続ける
 //       ・ほとんど下がらない → WebGLの外(コンポジタ・他タブ・ドライバ)。探す場所が変わる
 //     画面は真っ黒になるが、リロードすれば戻る。
+// 【2026-07-28・レンダラプロセスOOMの二分探索】DevToolsを開かなくても3〜4分で
+// レンダラが0.8GB→1.5GBまで伸びて落ちる。V8ヒープ(heapTotMB)は465〜759MBで振動しており
+// 上限4076MBには全く届いていないので、伸びているのはV8の外。
+// 犯人が「毎フレームの描画」側か「世界の生成・破棄」側かを、コンソールから切り分ける。
+//   freezeWorld()  … 生成・破棄・タイル取得を全部止める(描画だけ続く)
+//   freezeRender() … renderer.render を止める(生成・破棄だけ続く)
+// タスクマネージャでレンダラの伸びが【止まった方が無実】。伸び続けた方に犯人がいる。
+let _freezeWorld = false, _freezeRender = false;
+window.freezeWorld = (on) => {
+  _freezeWorld = (on !== false);
+  console.warn('[freeze] 世界の生成/破棄/タイル取得を', _freezeWorld ? '停止しました' : '再開しました');
+};
+window.freezeRender = (on) => {
+  _freezeRender = (on !== false);
+  console.warn('[freeze] 描画(renderer.render)を', _freezeRender ? '停止しました(画面は止まります)' : '再開しました');
+};
+
 window.killGL = () => {
   const before = { buf: _glBufCount, bufMB: (_glBufBytes / 1048576).toFixed(1) };
   renderer.forceContextLoss();
@@ -908,7 +925,7 @@ function animate() {
   if (_roadSortFrame % 30 === 0) {
     sortNewEntriesByDistanceToPlayer(pendingRoadMeshes, 0, r => ({ x: (r.x1 + r.x2) / 2, z: (r.z1 + r.z2) / 2 }));
   }
-  processRoadMeshQueue(); // 道路メッシュもフレーム分割(密集タイル到着時のフリーズ防止)
+  if (!_freezeWorld) processRoadMeshQueue(); // 道路メッシュもフレーム分割(密集タイル到着時のフリーズ防止)
   // タイル取得分の建物もフレーム分割(20棟/フレーム)で生成。
   // 【重要】以前はここでNEAR地形の準備状況を一切見ていなかった。チャンク生成側
   // (processChunkQueue/chunkNearTerrainReady)だけをゲートしても、実際の建物の大半は
@@ -996,6 +1013,7 @@ function animate() {
   const _buildFrameDeadline = performance.now() + (_rush ? 14 : 8); // 初期ラッシュ中は時間予算も拡大
   // 【2026-07-21・ユーザー要望】診断用: このフレームの予算スナップショットを保存
   // (定期ログで「予算自体が絞られているのか」を見えるようにする)。
+  if (_freezeWorld) _buildBudget = 0; // 二分探索用(window.freezeWorld)
   _lastBuildBudget = _buildBudget;
   _lastRoadBacklogForGate = _roadBacklogForGate;
   _lastCurTileRush = _curTileRush;
@@ -1071,6 +1089,7 @@ function animate() {
   }
   // 実OSM建物が距離に関係なく無限に溜まり続けメモリ・描画負荷が際限なく増える
   // (長時間プレイでの重量化→クラッシュ)のを防ぐため、遠方の建物を解放する
+  if (!_freezeWorld) { // 二分探索用(window.freezeWorld)。ここから下の維持処理をまとめて止める
   unloadFarBuildings();
   reactivateNearbyDormantBuildings(); // 逆に、近づいた遠景建物は生成キューへ復帰させる
   evictFarDormant(); // 二度と戻らない遠方のdormant記述子を捨てる(part1.js、無人長距離走行対策)
@@ -1089,6 +1108,7 @@ function animate() {
   // 遠景標高グリッドをプレイヤーに追従(遠くへジャンプしても実地形・標高が出る)
   checkWideTerrain();
   checkNearTerrain(); // プレイヤー周辺の高解像度グリッドも追従させる
+  } // ← if (!_freezeWorld)
   checkAddressDisplay(); // 現在地の住所表示(市区町村+町名)を移動に応じて更新
 
   // 山の森(プレイヤー周囲だけ・移動で作り直し)
@@ -1118,7 +1138,7 @@ function animate() {
   }
   updateFarMesh(); // 200mグリッドをまたいだ時だけ再サンプリング(それ以外は即return)
 
-  renderer.render(scene, camera);
+  if (!_freezeRender) renderer.render(scene, camera); // 二分探索用(window.freezeRender)
   drawMinimap();
   updateGPS(t);
 }
