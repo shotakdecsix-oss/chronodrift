@@ -430,6 +430,32 @@ function installGlByteTracker() {
 }
 installGlByteTracker();
 
+// 【2026-07-28】クラッシュの「種類」を確定させるための2つの仕掛け。
+// (1) WebGLコンテキストロストの検知。GPUプロセス側でメモリ不足やドライバのリセットが
+//     起きると、タブが死ぬ直前にこのイベントが飛ぶことがある。飛んでいれば原因はGPU側、
+//     飛ばずにいきなりタブごと消えるならレンダラプロセス側(JSヒープ等)。
+//     preventDefault()しないとTHREEは復帰を試みないので、あえて何もせず記録だけする。
+try {
+  renderer.domElement.addEventListener('webglcontextlost', (e) => {
+    console.error('[GL] webglcontextlost が発生しました(GPU側で資源が失われた)', e.statusMessage || '');
+    try { document.title = '!! GL CONTEXT LOST !!'; } catch (_) {}
+  });
+  renderer.domElement.addEventListener('webglcontextrestored', () => console.warn('[GL] webglcontextrestored'));
+} catch (e) {}
+
+// (2) 決定的な切り分け用: DevToolsのコンソールから killGL() を叩くと、このページが
+//     確保しているWebGL資源を【全部】解放する(コンテキストごと破棄)。直後にChromeの
+//     タスクマネージャ(Shift+Esc)でGPUプロセスのメモリを見て、
+//       ・大きく下がる → 1.5GBの正体はこのページのWebGL資源。バッファ/テクスチャ削減を続ける
+//       ・ほとんど下がらない → WebGLの外(コンポジタ・他タブ・ドライバ)。探す場所が変わる
+//     画面は真っ黒になるが、リロードすれば戻る。
+window.killGL = () => {
+  const before = { buf: _glBufCount, bufMB: (_glBufBytes / 1048576).toFixed(1) };
+  renderer.forceContextLoss();
+  console.warn('[killGL] WebGLコンテキストを破棄しました。破棄前:', before,
+    '/ 今すぐ Shift+Esc でGPUプロセスのメモリを確認してください(数秒で反映されます)');
+};
+
 function logGpuBytes() {
   if (++_gpuBytesFrame % 600 !== 0) return; // ~10秒ごと
   const seenGeo = new Set(), seenTex = new Set();
@@ -500,6 +526,16 @@ function updateMemDiag() {
   const mem = renderer.info.memory, rnd = renderer.info.render;
   const heapMB = (performance.memory && performance.memory.usedJSHeapSize)
     ? Math.round(performance.memory.usedJSHeapSize / 1048576) : -1;
+  // 【2026-07-28・実測でクラッシュはGPUではなくレンダラプロセスのOOMと判明】
+  // レンダラは0.8GB→1.5GBへ単調増加して落ちるのに、usedJSHeapSizeは317〜789MBで振動していた。
+  // usedは「今生きているオブジェクト」しか表さないので、V8が確保したまま返さない領域
+  // (totalJSHeapSize)が見えていなかった。10MB級のOverpass応答をJSON.parseする山谷の激しい
+  // 確保を繰り返すと、usedが下がってもtotalは下がらずプロセスRSSだけ伸び続ける。
+  // used / total / limit を並べて出し、どれが1.5GBに向かっているのかを一発で見えるようにする。
+  const heapTotMB = (performance.memory && performance.memory.totalJSHeapSize)
+    ? Math.round(performance.memory.totalJSHeapSize / 1048576) : -1;
+  const heapLimMB = (performance.memory && performance.memory.jsHeapSizeLimit)
+    ? Math.round(performance.memory.jsHeapSizeLimit / 1048576) : -1;
   const now = {
     geo: mem.geometries, tex: mem.textures,
     prog: renderer.info.programs ? renderer.info.programs.length : -1,
@@ -517,7 +553,7 @@ function updateMemDiag() {
     ways: (typeof seenOSMWays !== 'undefined' ? seenOSMWays.size : -1),
     stn: (typeof stationLabels !== 'undefined' ? stationLabels.length : -1),
     roadG: roadGrid.size,
-    dbgPlanes: debugTilePlanes.size, tileQ: osmTileQueue.length, heapMB,
+    dbgPlanes: debugTilePlanes.size, tileQ: osmTileQueue.length, heapMB, heapTotMB, heapLimMB,
   };
   // 前回との差分。クラッシュ前に「何が一貫して増え続けているか」を一目で見るための主目的。
   const d = _memDiagPrev ? {} : null;
