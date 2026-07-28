@@ -26,6 +26,8 @@ const CACHE_DIR = path.join(__dirname, 'cache');
 const MIN_INTERVAL_MS = 1100;                     // 上流レート制限 (1req/秒 + 余裕)
 const UPSTREAM_TIMEOUT_MS = 45000;
 const MAX_ATTEMPTS = 3;
+// 【2026-07-28】上流1応答あたりの受信バイト上限(OOM保険)。詳細はfetchUpstreamのonRes参照。
+const MAX_UPSTREAM_BYTES = 48 * 1024 * 1024;
 // 【2026-07-25・詰まり検出→強制打ち切り】(当時はレーン方式。現在は優先度付き待ち行列+
 // ワーカー2本。下のscheduleUpstream参照)並列度を上げても、全ワーカーが同時に「遅いが
 // 最終的には応答する」リクエストで埋まってしまえば根本的には同じ「詰まり」が起きる
@@ -534,7 +536,13 @@ const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 function cachePath(apiDir, upstreamUrl) {
   const h = crypto.createHash('sha1').update(upstreamUrl).digest('hex');
-  return path.join(CACHE_DIR, apiDir, h + '.json');
+  // 【2026-07-28・Render OOM対策】拡張子は付けない。<base>.meta(数百バイトのJSON)と
+  // <base>.body(上流の生バイトそのまま)の2ファイルに分ける。従来は1つの.jsonに
+  // {url,cachedAt,contentType,body:"<10MBの文字列>"} をまとめており、
+  //  ・HIT時: ファイル全体をJSON.parse = 本文の2〜3倍のメモリを毎回確保
+  //  ・MISS時: JSON.stringifyで本文をもう1本まるごと複製(しかもエスケープ展開)
+  // が発生していた。分離すればHITはmetaの極小parse+本文のBuffer読みだけで済む。
+  return path.join(CACHE_DIR, apiDir, h);
 }
 
 /* ---------- ディスクキャッシュの有効期限・容量上限 ---------- */
@@ -571,7 +579,7 @@ async function sweepCacheDir() {
       let names;
       try { names = await fsp.readdir(sub); } catch (e) { continue; }
       for (const name of names) {
-        if (!name.endsWith('.json')) continue; // 書き込み中の.tmpは対象外
+        if (name.endsWith('.tmp')) continue; // 書き込み中の一時ファイルは対象外(.meta/.body/旧.jsonはすべて対象)
         const fp = path.join(sub, name);
         try {
           const st = await fsp.stat(fp);
@@ -592,6 +600,22 @@ async function sweepCacheDir() {
     log(`cache sweep failed: ${e.message}`);
   }
 }
+// 【2026-07-28】Renderの "Ran out of memory (used over 512MB)" は何のイベントも残さず
+// プロセスが即死するため、事後に原因を追えるよう常時RSSを記録しておく。
+// 60秒ごと、かつ前回から±20MB以上動いた時だけ出す(ログを埋め尽くさない)。
+let _lastRssMB = 0;
+setInterval(() => {
+  const m = process.memoryUsage();
+  const rssMB = Math.round(m.rss / 1048576);
+  if (Math.abs(rssMB - _lastRssMB) < 20) return;
+  _lastRssMB = rssMB;
+  let queued = 0;
+  for (const q of hostQueues.values()) queued += q.length;
+  let running = 0;
+  for (const n of hostRunning.values()) running += n;
+  log(`[rss] ${rssMB}MB (heap ${Math.round(m.heapUsed / 1048576)}/${Math.round(m.heapTotal / 1048576)} ext ${Math.round(m.external / 1048576)} buf ${Math.round((m.arrayBuffers || 0) / 1048576)}) upstream running ${running} queued ${queued} inflight ${inflight.size}`);
+}, 60000);
+
 setInterval(sweepCacheDir, CACHE_SWEEP_INTERVAL_MS);
 sweepCacheDir(); // 起動直後にも一度実行(前回デプロイの残骸が万一あっても早期に整理する)
 
@@ -800,7 +824,22 @@ function _httpsRequestToAddress(urlStr, opts, address) {
     // 永久に呼ばれない(=このPromiseがハードタイムアウトまで解決しない)。分岐して呼ぶ。
     const onRes = (res) => {
       const chunks = [];
-      res.on('data', (c) => chunks.push(c));
+      // 【2026-07-28】1本の応答がインスタンス(512MB)を単独で殺さないための保険。
+      // 通常のタイルまとめクエリは数百KB〜10MB程度。ここに掛かるのは異常系だけなので、
+      // 掛かった場合は上流失敗として扱い(呼び出し側が次のミラー/再試行へ回す)、
+      // ログに残して後から閾値を見直せるようにする。
+      let received = 0;
+      res.on('data', (c) => {
+        received += c.length;
+        if (received > MAX_UPSTREAM_BYTES) {
+          log(`  upstream body too large (>${Math.round(MAX_UPSTREAM_BYTES / 1048576)}MB) ${urlStr} -- aborting`);
+          chunks.length = 0;
+          res.destroy();
+          settle(reject, new Error('upstream body too large'));
+          return;
+        }
+        chunks.push(c);
+      });
       res.on('end', () => settle(resolve, {
         status: res.statusCode,
         contentType: res.headers['content-type'] || 'application/json',
@@ -1062,6 +1101,53 @@ function readRequestBody(req) {
   });
 }
 
+/* ---------- Overpass応答の検証(JSON.parseを使わない) ----------
+ * 【2026-07-28・Render 512MB OOMの主因】従来はキャッシュ可否を判定するためだけに
+ * upstream応答を丸ごと JSON.parse していた。10MBのOverpass JSONはV8上のオブジェクト
+ * グラフにすると数十〜100MB超になり、VK Maps向けにワーカーを8本へ増やした結果
+ * (HOST_LIMITS)、同時に数本走っただけで無料インスタンスの512MBを超えていた
+ * (Renderのイベント: 7/26〜7/28に "Ran out of memory" が多発)。
+ * 判定に必要なのは「elements配列の要素数」と「count要素のtotal」「remarkの有無」だけ
+ * なので、Bufferを1回走査するだけで済ませる(追加メモリはほぼゼロ)。
+ */
+function scanOverpassElementCount(buf) {
+  const iEl = buf.indexOf('"elements"');
+  if (iEl < 0) return null;
+  const lb = buf.indexOf(0x5b /* [ */, iEl);
+  if (lb < 0) return null;
+  let depth = 0, inStr = false, esc = false, count = 0;
+  for (let p = lb + 1, n = buf.length; p < n; p++) {
+    const c = buf[p];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === 0x5c /* \\ */) esc = true;
+      else if (c === 0x22 /* " */) inStr = false;
+      continue;
+    }
+    if (c === 0x22) { inStr = true; continue; }
+    if (c === 0x7b /* { */) { if (depth === 0) count++; depth++; }
+    else if (c === 0x5b) depth++;
+    else if (c === 0x7d /* } */) depth--;
+    else if (c === 0x5d /* ] */) { if (depth === 0) break; depth--; } // elements配列の終端
+  }
+  return count;
+}
+// クライアント(part8.js:buildOSMBatchQuery)は必ず `out count;out geom;` の順で投げるため、
+// count要素は常にelements配列の先頭に来る。先頭だけを覗いてtotalを読む。
+function scanOverpassDeclaredTotal(buf) {
+  const iEl = buf.indexOf('"elements"');
+  if (iEl < 0) return null;
+  const head = buf.toString('utf8', iEl, Math.min(buf.length, iEl + 900));
+  if (!/"type"\s*:\s*"count"/.test(head)) return null;
+  const m = head.match(/"total"\s*:\s*"?(\d+)/);
+  return m ? parseInt(m[1], 10) : null;
+}
+function scanOverpassBadRemark(buf) {
+  const i = buf.indexOf('"remark"');
+  if (i < 0) return false;
+  return /timed out|timeout|out of memory/i.test(buf.toString('utf8', i, Math.min(buf.length, i + 600)));
+}
+
 /* ---------- プロキシ本体 (キャッシュ + 同時リクエスト合流) ---------- */
 const inflight = new Map();
 // 【2026-07-21・マップジャンプ後の詰まり対策】cacheKeySourceごとに「まだ結果を待っている
@@ -1114,15 +1200,18 @@ async function handleApi(req, res, apiKey) {
 
   // 1) キャッシュヒット → 即応答
   // 【2026-07-26・Phase4】期限切れなら例外を投げてmiss扱いに落とす(下の(2)で上書き取得)。
+  // 【2026-07-28】metaは数百バイトなのでparseしても安全。本文はBufferのまま読んで
+  // そのままソケットへ流す(文字列化もparseもしない = 本文サイズ以上のメモリを使わない)。
   try {
-    const cached = JSON.parse(await fsp.readFile(file, 'utf8'));
+    const meta = JSON.parse(await fsp.readFile(file + '.meta', 'utf8'));
     const ttlMs = CACHE_TTL_MS_BY_DIR[api.dir];
-    const cachedAtMs = Date.parse(cached.cachedAt);
+    const cachedAtMs = Date.parse(meta.cachedAt);
     if (ttlMs && Number.isFinite(cachedAtMs) && (Date.now() - cachedAtMs) > ttlMs) {
       throw new Error('cache expired');
     }
-    res.writeHead(200, { 'Content-Type': cached.contentType, 'X-Cache': 'HIT', 'X-Proxy-Health': 'ok' });
-    res.end(cached.body);
+    const body = await fsp.readFile(file + '.body');
+    res.writeHead(200, { 'Content-Type': meta.contentType, 'X-Cache': 'HIT', 'X-Proxy-Health': 'ok' });
+    res.end(body);
     log(`HIT  ${apiKey} ${(reqBody || rest).slice(0, 60)}...`);
     return;
   } catch (_) { /* miss (期限切れ含む) */ }
@@ -1164,9 +1253,12 @@ async function handleApi(req, res, apiKey) {
         : await fetchUpstream(upstreamUrl, upstreamOpts);
       log(`MISS ${apiKey} -> upstream ${up.status} (${Date.now() - t0}ms)`);
       if (up.status === 200) {
-        const bodyStr = up.body.toString('utf8');
-        let parsed;
-        try { parsed = JSON.parse(bodyStr); } catch (e) { throw new Error('upstream returned non-JSON'); }
+        // 【2026-07-28・OOM対策】ここで body.toString() / JSON.parse を行わない。
+        // Bufferのまま検証し、Bufferのままキャッシュに書き、Bufferのまま返す。
+        const buf = up.body;
+        let head = 0;
+        while (head < buf.length && (buf[head] === 0x20 || buf[head] === 0x0a || buf[head] === 0x0d || buf[head] === 0x09)) head++;
+        if (buf[head] !== 0x7b /* { */ && buf[head] !== 0x5b /* [ */) throw new Error('upstream returned non-JSON');
         // 【重要・2026-07-16】Overpassはエラーもremarkも出さずに部分応答を200で返すことが
         // ある(無言の部分応答)。従来は200+有効JSONなら無条件で永久キャッシュしていたため、
         // 一度部分応答を掴むと以降の再試行が全てHITで同じ欠損データを返し続けていた
@@ -1175,28 +1267,34 @@ async function handleApi(req, res, apiKey) {
         // キャッシュせずそのまま返す(クライアント側の同じ検証が失敗→再試行し、
         // 次回はキャッシュ未汚染のまま上流に再問い合わせできる)。
         let cacheable = true;
-        if (api.dir === 'overpass' && parsed && Array.isArray(parsed.elements)) {
-          if (parsed.remark && /timed out|timeout|out of memory/i.test(parsed.remark)) cacheable = false;
-          const countEl = parsed.elements.find((el) => el.type === 'count');
-          if (countEl) {
-            const declared = parseInt(countEl.tags && countEl.tags.total, 10);
-            const received = parsed.elements.filter((el) => el.type !== 'count').length;
-            if (!Number.isFinite(declared) || received < declared) cacheable = false;
-          } else if (/out[+%20]{1,3}count/i.test(reqBody)) {
-            cacheable = false; // count要素を要求したのに無い=出力先頭から切り捨てられている
+        if (api.dir === 'overpass') {
+          const total = scanOverpassElementCount(buf);
+          if (total === null) {
+            cacheable = false; // elements配列が見当たらない = まともな応答ではない
+          } else {
+            if (scanOverpassBadRemark(buf)) cacheable = false;
+            const declared = scanOverpassDeclaredTotal(buf);
+            if (declared !== null) {
+              if ((total - 1) < declared) cacheable = false; // -1はcount要素自身
+            } else if (/out[+%20]{1,3}count/i.test(reqBody)) {
+              cacheable = false; // count要素を要求したのに無い=出力先頭から切り捨てられている
+            }
           }
         }
         if (cacheable) {
           await fsp.mkdir(path.dirname(file), { recursive: true });
-          const tmp = file + '.tmp';
-          await fsp.writeFile(tmp, JSON.stringify({ url: upstreamUrl, cachedAt: new Date().toISOString(), contentType: up.contentType, body: bodyStr }));
-          await fsp.rename(tmp, file);
+          const tmpB = file + '.body.tmp';
+          const tmpM = file + '.meta.tmp';
+          await fsp.writeFile(tmpB, buf);
+          await fsp.writeFile(tmpM, JSON.stringify({ url: upstreamUrl, cachedAt: new Date().toISOString(), contentType: up.contentType, bytes: buf.length }));
+          await fsp.rename(tmpB, file + '.body');
+          await fsp.rename(tmpM, file + '.meta'); // metaは必ず本文の後(先に出来ると本文欠落でHITしてしまう)
         } else {
           log(`SKIP-CACHE ${apiKey} incomplete overpass response`);
         }
-        return { status: 200, contentType: up.contentType, body: bodyStr };
+        return { status: 200, contentType: up.contentType, body: buf };
       }
-      return { status: up.status, contentType: up.contentType, body: up.body.toString('utf8') };
+      return { status: up.status, contentType: up.contentType, body: up.body };
     })();
     inflight.set(cacheKeySource, p);
     const cleanup = () => inflight.delete(cacheKeySource);
