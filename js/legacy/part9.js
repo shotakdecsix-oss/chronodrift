@@ -388,8 +388,16 @@ function updateMemDiag() {
     sceneCh: scene.children.length,
     bRec: buildingRecords.length, dormant: dormantCount,
     roadRec: roadRecords.length, roadMesh, motorwayMesh,
-    areaMesh, chunks: chunkMeshes.size, facade: facadeCache.size,
+    areaMesh, areaRec: areaPolyMeshes.length,
+    chunks: chunkMeshes.size, facade: facadeCache.size,
     dormCells: dormantGrid.size,
+    // 【2026-07-28・3巡目】geo/tex/roadRec/dormantを抑えても落ちるため、まだ計器の無い
+    // 「永久に増えうる配列・Set」を一通り出す。どれか1つだけが単調増加していればそれが次の的。
+    pendB: pendingBuildings.length, pendRoad: pendingRoadMeshes.length,
+    coll: collisionBoxes.length, mmB: minimapBuildings.length,
+    ways: (typeof seenOSMWays !== 'undefined' ? seenOSMWays.size : -1),
+    stn: (typeof stationLabels !== 'undefined' ? stationLabels.length : -1),
+    roadG: roadGrid.size,
     dbgPlanes: debugTilePlanes.size, tileQ: osmTileQueue.length, heapMB,
   };
   // 前回との差分。クラッシュ前に「何が一貫して増え続けているか」を一目で見るための主目的。
