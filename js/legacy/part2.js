@@ -352,6 +352,36 @@ function setBoxFacadeUVs(geo, colsX, colsZ, floors) {
     uv.setXY(f * 4 + i, 0.02 + uv.getX(f * 4 + i) * 0.03, 0.92 + uv.getY(f * 4 + i) * 0.03);
 }
 
+// 【2026-07-28・GPUメモリの真犯人対策】建物本体はこれまで1棟ごとに new THREE.BoxGeometry(w,h,d)
+// していた。実測すると1バッファ平均667バイト・総本数33,132本で、実データは22MBしかないのに
+// GPUプロセスは約2GB。1本あたり約64KB = D3D11/ANGLEがバッファ1個ごとに確保する最小単位に
+// ちょうど一致する。つまり【GPUメモリのコストはバイト数ではなく"バッファの本数"で決まっていた】。
+// 「データ量を減らす」対策が5巡すべて空振りしたのはこれが理由。
+// 対策: 屋根(下の GABLE_GEO 等)と同じく単位サイズの共有ジオメトリ+mesh.scaleに寄せる。
+// 建物ごとに違うのはUVのタイル繰り返し数だけなので、その組み合わせでキャッシュする。
+// 繰り返し数は見た目に効かない程度に量子化して、キャッシュの種類数を数百に抑える。
+const _facadeBoxCache = new Map();
+const _UV_STEPS = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64];
+function _quantUVStep(n) {
+  n = Math.max(1, Math.round(n));
+  let best = _UV_STEPS[0];
+  for (const st of _UV_STEPS) if (Math.abs(st - n) < Math.abs(best - n)) best = st;
+  return best;
+}
+function sharedFacadeBoxGeo(colsX, colsZ, floors) {
+  const cx = _quantUVStep(colsX), cz = _quantUVStep(colsZ), fl = _quantUVStep(floors);
+  const key = cx + '|' + cz + '|' + fl;
+  let g = _facadeBoxCache.get(key);
+  if (!g) {
+    g = new THREE.BoxGeometry(1, 1, 1);
+    setBoxFacadeUVs(g, cx, cz, fl);
+    g.userData.shared = true; // アンロード時にdisposeしない印
+    _facadeBoxCache.set(key, g);
+  }
+  return g;
+}
+function facadeBoxCacheSize() { return _facadeBoxCache.size; }
+
 // ======= 屋根ジオメトリ(単位サイズ・全建物で共有し scale で変形) =======
 // 旧実装は建物ごとに new ConeGeometry していた → 共有ジオメトリ+scaleでGPUメモリと生成コストを削減。
 // userData.shared=true はチャンクアンロード時に dispose しない印(下の updateChunks 参照)

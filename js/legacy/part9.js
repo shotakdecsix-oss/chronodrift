@@ -480,7 +480,9 @@ function logGpuBytes() {
        + ' aa:' + (GFX.aa ? smp + 'x' : 'off') + ' fbMB ' + MB(fbBytes);
   } catch (e) {}
   console.log('[gpuBytes] geoMB ' + MB(geoBytes) + ' texMB ' + MB(texBytes)
-    + ' | glBufMB ' + MB(_glBufBytes) + '(' + _glBufCount + '本, 未解放差 ' + MB(_glBufBytes - geoBytes) + ')' + fb
+    + ' | glBuf ' + _glBufCount + '本/' + MB(_glBufBytes) + 'MB 平均' + Math.round(_glBufBytes / Math.max(1, _glBufCount))
+    + 'B 推定GPU実消費' + MB(_glBufCount * 65536) + 'MB' // 1本あたりD3D11の最小確保単位64KBを掛けた推定値
+    + ' boxGeo' + (typeof facadeBoxCacheSize === 'function' ? facadeBoxCacheSize() : -1) + fb
     + ' meshes ' + meshCount + ' uniqGeo ' + seenGeo.size + ' uniqTex ' + seenTex.size
     + ' | 分類上位MB ' + kinds
     + ' | 最大 ' + top.slice(0, 3).map(t => t.kind + '(' + t.n + '頂点,' + MB(t.b) + 'MB)').join(' '));

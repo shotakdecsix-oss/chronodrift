@@ -354,20 +354,23 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
   // 内接する楕円(共有の単位円柱UNIT_CYL_SMOOTHをw,h,dへ引き伸ばす)に変える。
   // 共有ジオメトリなのでBoxGeometryのように毎棟生成しない(メモリ・GPU負荷は増えない)。
   const isStadiumBody = type === 'stadium';
+  // 【2026-07-28】本体ジオメトリは1棟ごとに new せず、単位サイズの共有ジオメトリ+scaleにする。
+  // GPUメモリはバイト数ではなくWebGLバッファの【本数】で決まっていた(1本あたり約64KBの
+  // 最小確保単位が効く)ため、本数を減らすことが唯一効く対策になる。詳細はpart2.js
+  // sharedFacadeBoxGeo のコメント参照。
+  const tw = kind === 'ind' ? 8 : 3.6; // 窓タイル1枚の実幅
   const geo = isMushroom
     ? new THREE.CylinderGeometry(minWD * 0.42, minWD * 0.5, h, 10)
     : isStadiumBody ? UNIT_CYL_SMOOTH
-    : new THREE.BoxGeometry(w, h, d);
-  if (kind) { // 側面に窓タイルを並べ、天面/底面は無地領域へ
-    const tw = kind === 'ind' ? 8 : 3.6; // 1タイルの実幅
-    setBoxFacadeUVs(geo,
-      kind === 'house' ? 1 : Math.max(1, Math.round(w / tw)),
-      kind === 'house' ? 1 : Math.max(1, Math.round(d / tw)),
-      kind === 'house' ? 1 : floors);
-  }
+    : kind ? sharedFacadeBoxGeo( // 側面に窓タイルを並べ、天面/底面は無地領域へ
+        kind === 'house' ? 1 : Math.max(1, Math.round(w / tw)),
+        kind === 'house' ? 1 : Math.max(1, Math.round(d / tw)),
+        kind === 'house' ? 1 : floors)
+    : UNIT_BOX;
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(x, gy + h/2, z);
-  if (isStadiumBody) mesh.scale.set(w, h, d); // 単位円柱(半径0.5・高さ1)をフットプリント寸法へ
+  // キノコ型だけは実寸で生成しているのでscale不要。それ以外(箱・スタジアムの単位円柱)は実寸へ。
+  if (!isMushroom) mesh.scale.set(w, h, d);
   mesh.renderOrder = 2;
   scene.add(mesh);
   parts.push(mesh);
