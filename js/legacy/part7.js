@@ -292,9 +292,166 @@ mapSearchInput.addEventListener('keydown', e => {
 });
 mapSearchInput.addEventListener('keyup', e => e.stopPropagation());
 
-// ======= スマホ等の位置情報から現在地ジャンプ =======
+// ======= スマホ等の位置情報から現在地ジャンプ / GPS追従モード(モードA) =======
 // Geolocation API は HTTPS(secure context)必須。LANのhttpアクセスでは使えない旨を案内する
-document.getElementById('geoBtn').addEventListener('click', () => {
+//
+// 【2026-07-27・GPS追従モード実装(FEATURE_GEO_NAV_MODES.md モードA)】
+// 「現在地」ボタンを、1回きりのgetCurrentPositionジャンプから、watchPositionによる
+// 継続追従のトグルへ拡張する。WASD自由移動(explore)とはModeRegistryで排他的に切り替わり、
+// 実処理(位置の平滑追従・回頭・床/重力・カメラ)はgeoOnUpdate(part9.js)側にある。
+//
+// 設計判断(ユーザー確認済み):
+//  - 向き(heading)はDevice Orientation(コンパス)を使わず、直近のGPS移動ベクトルから推定する。
+//    iOSのrequestPermission()許可ダイアログが不要になり実装もシンプルになる。GPSジッターで
+//    向きが暴れないよう、GEO_HEADING_MIN_DIST未満の移動では向きを更新しない(静止中は保持)。
+//  - GPS誤差で建物にめり込むケースを許容し、GPSモード中は水平衝突判定(wouldCollide)を
+//    行わない(geoOnUpdate側で素通し)。実座標への追従を優先する。
+let geoModeActive = false;
+let geoWatchId = null;
+let geoLastFixXZ = null;              // 直近のGPS点(向き推定の差分元。ジッター閾値を超えた時だけ更新)。{x, z}
+let geoTargetYaw = null;              // 移動ベクトルから推定した向き(未確定はnull)
+const GEO_HEADING_MIN_DIST = 3;       // この距離(m)未満の移動では向きを更新しない(ジッター対策)
+
+// 【2026-07-27・連続移動化(ユーザー要望)】以前はgeoTargetX/Zという「最新フィックスの生座標」
+// へ指数平滑で追従するだけだった。watchPositionのフィックスは数秒おきにしか来ないため、
+// フィックスの瞬間だけ動いてあとは静止する「ワープ→停止」を繰り返すように見えていた。
+// 直近2フィックスから速度を推定し(geoVelX/Z)、次のフィックスが来るまでの間も推定速度で
+// 前進させ続ける(dead reckoning)ことで、実際に連続して歩いているような動きにする。
+// geoAnchor*は「直近フィックスの位置・キャプチャ時刻」、geoOnUpdate(part9.js)側が
+// 毎フレーム geoAnchor + geoVel*経過時間 で外挿した点を平滑追従の目標にする。
+let geoAnchorX = 0, geoAnchorZ = 0, geoAnchorTime = null;
+let geoVelX = 0, geoVelZ = 0;          // 推定水平速度(m/s)
+const GEO_MAX_SPEED = 8;               // 速度推定の上限(m/s)。GPS誤差による瞬間的な暴走を抑える(早歩き〜軽いジョグ程度まで許容)
+const GEO_EXTRAPOLATE_MAX = 5;         // 新しいフィックスが来ないまま外挿し続ける秒数の上限(信号ロスト時の暴走防止)
+
+// 【2026-07-27・向きをスマホのコンパスに変更(ユーザー要望)】GPS移動ベクトルからの推定は
+// フィックスが数秒おきにしか来ない上に短距離では誤差が大きく、視界が安定しないとの報告。
+// Device Orientation(コンパス)は静止中も含め高頻度・連続的に向きが取れるため、これを
+// 取得できている間は優先して使い、取れない場合(未対応ブラウザ・許可拒否・PCでのテスト等)は
+// 従来のGPS移動ベクトル推定(geoTargetYaw)にフォールバックする(geoOnUpdate、part9.js側で判定)。
+let geoCompassHeading = null;   // 真北基準・時計回りの度数(0-360)。未取得はnull
+let geoCompassLastUpdate = null; // 最後にイベントを受け取ったperformance.now()時刻
+let geoOrientationHandler = null; // addEventListenerで登録した関数の参照(stopGeoFollowでの解除用)
+const GEO_COMPASS_STALE_MS = 2000; // この時間イベントが来なければコンパス値を「古い」として使わない
+// 【2026-07-27・ユーザー報告】実機で「視界が進行方向に対して逆向き」になる不具合が出た。
+// webkitCompassHeading/alphaは「スマホを平らに持った時の天面が指す向き」を基準にした値で、
+// 縦持ち(画面を自分に向けてナビ的に構える)の実際の使い方では、素の値と実際に向いている
+// 向きが180°ずれるケースが多い。定数化しておき、実機フィードバックで調整しやすくする。
+const GEO_COMPASS_OFFSET_DEG = 180;
+
+// iOS 13+はDeviceOrientationEvent.requestPermission()をユーザー操作(タップ)起点で呼ぶ必要がある。
+// startGeoFollow(geoBtnのクリックハンドラから同期的に呼ばれる)の冒頭で呼ぶことでこれを満たす。
+// Android等はrequestPermission自体が存在しないため、そのままリスナー登録するだけでよい。
+function requestDeviceOrientation() {
+  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    DeviceOrientationEvent.requestPermission().then(state => {
+      if (state === 'granted') attachOrientationListener();
+      else console.warn('[geo] device orientation permission not granted:', state);
+    }).catch(e => console.warn('[geo] device orientation permission request failed', e));
+  } else if (window.DeviceOrientationEvent) {
+    attachOrientationListener();
+  } else {
+    console.warn('[geo] DeviceOrientationEvent not supported; falling back to GPS-vector heading only');
+  }
+}
+function attachOrientationListener() {
+  if (geoOrientationHandler) return; // 二重登録防止(既に追従中に再度呼ばれた場合など)
+  geoOrientationHandler = (event) => {
+    let heading = null;
+    if (typeof event.webkitCompassHeading === 'number' && !isNaN(event.webkitCompassHeading)) {
+      // iOS(Safari/WebKit系。Chrome for iOSも同じエンジン): 真北基準・時計回りでそのまま使える
+      heading = event.webkitCompassHeading;
+    } else if (event.absolute && typeof event.alpha === 'number') {
+      // Android等: absolute=trueの時だけalphaが真北基準。alphaは反時計回りなので変換する
+      heading = (360 - event.alpha) % 360;
+    }
+    if (heading === null) return;
+    geoCompassHeading = heading;
+    geoCompassLastUpdate = performance.now();
+  };
+  // iOSはwebkitCompassHeadingが通常のdeviceorientationイベントに乗る。Android等はabsolute=trueが
+  // 保証されるdeviceorientationabsoluteを優先し、無い環境だけdeviceorientationにフォールバックする。
+  if ('ondeviceorientationabsolute' in window) {
+    window.addEventListener('deviceorientationabsolute', geoOrientationHandler, true);
+  } else {
+    window.addEventListener('deviceorientation', geoOrientationHandler, true);
+  }
+}
+function detachOrientationListener() {
+  if (!geoOrientationHandler) return;
+  window.removeEventListener('deviceorientationabsolute', geoOrientationHandler, true);
+  window.removeEventListener('deviceorientation', geoOrientationHandler, true);
+  geoOrientationHandler = null;
+  geoCompassHeading = null; geoCompassLastUpdate = null;
+}
+
+// 【2026-07-27・真因修正】ここで pos.coords から { lat, lon } を分割代入していたが、
+// Geolocation APIのGeolocationCoordinatesのプロパティ名は latitude / longitude であり、
+// lat / lon は存在しない(xzToLatLon等が返す自前オブジェクトのキー名と取り違えていた)。
+// 結果 lat/lon が undefined → 末尾の playerMarker.setLatLng([undefined, undefined]) で
+// Leafletが "Invalid LatLng object" をthrowし、getCurrentPositionのsuccessコールバックが
+// この行で静かに中断。以降の jumpToLatLon / watchPosition / updateGeoBtnUI が実行されず、
+// 「📡 現在地を取得中...」のまま止まる不具合の真因だった(clearTimeoutは既に済んでいるため
+// 見張りタイマーも発火しない)。leafletMap未初期化の回だけthrowを免れてジャンプが成功して
+// いたのが「一度だけ成功した」現象の正体。
+function onGeoFix(pos) {
+  const lat = pos.coords.latitude, lon = pos.coords.longitude;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    console.warn('[geo] invalid coords', pos && pos.coords);
+    return;
+  }
+  const { x, z } = latLonToXZ(lat, lon);
+  const now = performance.now();
+
+  // 速度推定(dead reckoning用)。直近フィックスからの単純な有限差分だが、GPS誤差による
+  // 瞬間的な暴走を防ぐためGEO_MAX_SPEEDで上限クランプする。極端に短い間隔(重複フィックス等)
+  // は分母が小さくノイズが増幅されるため速度推定に使わない(位置・向きの更新は別途行う)。
+  if (geoAnchorTime !== null) {
+    const dtSec = (now - geoAnchorTime) / 1000;
+    if (dtSec > 0.15) {
+      let vx = (x - geoAnchorX) / dtSec, vz = (z - geoAnchorZ) / dtSec;
+      const speed = Math.hypot(vx, vz);
+      if (speed > GEO_MAX_SPEED) { const s = GEO_MAX_SPEED / speed; vx *= s; vz *= s; }
+      geoVelX = vx; geoVelZ = vz;
+    }
+  }
+  geoAnchorX = x; geoAnchorZ = z; geoAnchorTime = now;
+
+  if (geoLastFixXZ) {
+    const dx = x - geoLastFixXZ.x, dz = z - geoLastFixXZ.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist >= GEO_HEADING_MIN_DIST) {
+      // 【2026-07-28修正・ユーザー報告(経路シムで同じ症状が出て発覚)】camYawの前方ベクトルは
+      // (-sin(camYaw), -cos(camYaw))(part9.js updatePlayerCamera/exploreOnUpdate参照)。
+      // geoTargetYawはこの後camYawに反映される(geoOnUpdate)ため、実際の移動方向(dx,dz)を
+      // 向かせるには atan2(-dx, -dz) が正しい。以前のatan2(dx,dz)は180°逆(視界が進行方向と
+      // 逆向き)になっていたが、コンパスが使える端末ではこちらの分岐に来ないため気づかれずに
+      // 残っていた(GEO_COMPASS_OFFSET_DEG=180のコンパス側だけ正しく補正済みだった)。
+      geoTargetYaw = Math.atan2(-dx, -dz);
+      geoLastFixXZ = { x, z };
+    }
+  } else {
+    geoLastFixXZ = { x, z };
+  }
+  if (leafletMap && playerMarker) playerMarker.setLatLng([lat, lon]);
+}
+
+function updateGeoBtnUI() {
+  if (geoBtnEl) {
+    geoBtnEl.classList.toggle('active', geoModeActive);
+    geoBtnEl.title = geoModeActive ? t('geoBtnTitleOn') : t('geoBtnTitleOff');
+    // 【2026-07-27・ユーザー報告対応】背景色の変化(.active)だけでは追従中かどうか
+    // 分かりにくいとの報告のため、ボタンの文字自体もはっきり切り替える。
+    geoBtnEl.textContent = t(geoModeActive ? 'geoBtnLabelActive' : 'geoBtnLabel');
+  }
+  // 【2026-07-27・ユーザー要望】マップ画面を閉じて3D探索に戻ると「現在地」ボタン自体が
+  // 画面外(マップオーバーレイの中)に隠れ、GPS追従中かどうかが常時は分からなかった。
+  // 画面上に常時見える小さなバッジを追加し、追従中だけ表示する(UI非表示モードでも
+  // addressDisplayと同格の重要情報として残す。非表示リストに加えていない)。
+  if (geoFollowBadgeEl) geoFollowBadgeEl.classList.toggle('show', geoModeActive);
+}
+
+function startGeoFollow() {
   if (!('geolocation' in navigator)) {
     mapHintEl.textContent = t('mapHintGeoUnsupported');
     return;
@@ -303,18 +460,102 @@ document.getElementById('geoBtn').addEventListener('click', () => {
     mapHintEl.textContent = t('mapHintGeoHttpsOnly');
     return;
   }
+  // 【2026-07-27・向きをスマホのコンパスに変更】iOSのDeviceOrientationEvent.requestPermission()は
+  // ユーザー操作(タップ)起点で同期的に呼ぶ必要があるため、このクリックハンドラの中で
+  // 真っ先に呼ぶ(geolocationの許可プロンプトより先でも後でも問題ないが、awaitを挟まず
+  // タップ直後に呼ぶことが重要)。取得できなければgeoOnUpdate側でGPS移動ベクトルに
+  // フォールバックするので、許可されなくてもGPS追従自体は従来どおり動く。
+  requestDeviceOrientation();
+  // 【2026-07-27・撤回】権限拒否済みを事前検出するnavigator.permissions.query()の
+  // awaitを一度追加したが、ユーザー実機(iPhone Chrome、位置情報は「アプリ使用中許可」
+  // 済み)で「取得中...」のまま応答が無くなる不具合が出た。この端末では許可は既に
+  // 済んでおりこのチェック自体は無意味な上、awaitでクリックのユーザー操作(gesture)
+  // コンテキストが途切れ、直後のgetCurrentPositionがiOS側で正しく起動しなくなった
+  // 疑いが強いため撤去する。元の(動作実績のある)同期呼び出しに戻す。
   mapHintEl.textContent = t('mapHintGeoFetching');
+  // 【2026-07-27追加・ユーザー報告対応(iPhone Chrome)】iOSでは、OS側の「位置情報サービス」
+  // がOFF等の状態だと、getCurrentPositionのsuccess/errorどちらのコールバックも一切呼ばれずに
+  // 永久に固まる既知の不具合がある(渡しているtimeout: 10000オプションはこのケースでは
+  // 効かない)。ブラウザ組み込みのtimeoutに頼らず、こちら側でも見張りタイマーを持ち、
+  // 一定時間応答が無ければ手動でタイムアウト扱いにしてユーザーに分かる形で知らせる。
+  let geoFixSettled = false;
+  const geoManualTimeout = setTimeout(() => {
+    if (geoFixSettled) return;
+    geoFixSettled = true;
+    console.warn('[geo] getCurrentPosition did not respond within 12s (OS location services may be off)');
+    mapHintEl.textContent = t('mapHintGeoTimeout');
+  }, 12000);
   navigator.geolocation.getCurrentPosition(
     p => {
-      mapHintEl.textContent = t('mapHintGeoJump');
+      if (geoFixSettled) return; // 見張りタイマー発火後に遅れて応答が来た場合は無視
+      geoFixSettled = true; clearTimeout(geoManualTimeout);
+      console.log('[geo] getCurrentPosition success', p.coords.latitude, p.coords.longitude);
+      // 【2026-07-27追加】このコールバック内で例外が出ると、位置情報の取得自体は成功して
+      // いるのに画面は「取得中...」のまま固まり、実機(Macが無くWeb Inspectorも使えない)
+      // では原因が全く分からない。以後は例外を握ってその場でメッセージに出す。
+      try {
+      // 初回だけ既存のjumpToLatLon経由できちんと地形・タイル取得キュー等の後始末を済ませてから
+      // 継続追従(watchPosition)を始める(その場しのぎの部分パッチではなく、実績のある
+      // 「現在地・向きを保存してリロード/取り直す」経路にそのまま乗せる)。
+      geoLastFixXZ = null; geoTargetYaw = null;
+      geoAnchorTime = null; geoVelX = 0; geoVelZ = 0;
+      onGeoFix(p);
+      // 【2026-07-27・ユーザー報告対応】ゲーム内の現在の原点(MID_LAT/MID_LON)から実際のGPS
+      // 座標が300km(RECENTER_DIST_M)超離れていると、jumpToLatLonは「現在地・向きを保存して
+      // location.reload()」する(jumpToLatLon冒頭のfar-jump分岐と全く同じ判定式)。
+      // reloadはJS実行環境を丸ごと作り直すため、この直後に張るwatchPosition/geoModeActive等の
+      // GPS追従状態も一緒に消えてしまい、「最初のジャンプだけ成功して追従はしない」不具合になる
+      // (実機報告どおり)。reload直前にフラグを保存しておき、起動ブートストラップ側
+      // (part9.js末尾)で検知して自動的にstartGeoFollowを呼び直し、追従を引き継がせる。
+      const _geoDist = Math.hypot((wrapLon(p.coords.longitude) - MID_LON) * SCALE * COS_LAT,
+        (p.coords.latitude - MID_LAT) * SCALE);
+      if (_geoDist > RECENTER_DIST_M) {
+        try { localStorage.setItem('iseharaResumeGeoFollow', '1'); } catch (e) {}
+      }
       jumpToLatLon(p.coords.latitude, p.coords.longitude);
+      geoWatchId = navigator.geolocation.watchPosition(onGeoFix,
+        (err) => console.warn('[geo] watchPosition error', err),
+        { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 });
+      geoModeActive = true;
+      if (window.ModeRegistry) ModeRegistry.switchMode('geo');
+      updateGeoBtnUI();
+      mapOverlay.classList.remove('active');
+      mapHintEl.textContent = t('mapHintGeoTracking');
+      } catch (e) {
+        console.error('[geo] error after fix', e);
+        mapHintEl.textContent = '⚠ GPS: ' + (e && e.message ? e.message : e);
+      }
     },
     err => {
+      if (geoFixSettled) return;
+      geoFixSettled = true; clearTimeout(geoManualTimeout);
+      console.warn('[geo] getCurrentPosition error', err.code, err.message);
       mapHintEl.textContent = t('mapHintGeoFailed',
         { reason: err.code === 1 ? t('geoPermissionDenied') : err.message });
     },
     { enableHighAccuracy: true, timeout: 10000 });
+}
+
+function stopGeoFollow() {
+  if (geoWatchId !== null) { navigator.geolocation.clearWatch(geoWatchId); geoWatchId = null; }
+  geoModeActive = false;
+  geoLastFixXZ = null; geoTargetYaw = null;
+  geoAnchorTime = null; geoVelX = 0; geoVelZ = 0;
+  detachOrientationListener();
+  if (window.ModeRegistry) ModeRegistry.switchMode('explore');
+  updateGeoBtnUI();
+  mapHintEl.textContent = t('mapHintGeoStopped');
+}
+
+const geoBtnEl = document.getElementById('geoBtn');
+geoBtnEl.addEventListener('click', () => {
+  if (geoModeActive) stopGeoFollow(); else startGeoFollow();
 });
+const geoFollowBadgeEl = document.getElementById('geoFollowBadge');
+// 【2026-07-27・ユーザー要望】マップ画面を開いて「現在地」ボタンまで辿らなくても、
+// 常時表示のバッジ自体をワンタッチで追従解除できるようにする(bindTapButtonで
+// タッチ/クリックどちらでも即座に反応。他のHUDボタンと同じパターン)。
+if (geoFollowBadgeEl) bindTapButton(geoFollowBadgeEl, () => { if (geoModeActive) stopGeoFollow(); });
 
 // 【2026-07-23修正】引数名がグローバルのi18n関数t()と衝突し、この関数内で
 // t('gpsElevation',...)を呼ぶと引数(経過時間の数値)の方が優先されて
@@ -372,6 +613,11 @@ function findSpawnNear(x0, z0) {
 let viewMode = 0;
 let camYaw = 0, camPitch = 0.25;
 const camDist = 15, camHeight = 8; // meters
+// 【2026-07-27】BIRDモードのON/OFF状態。setViewMode(下)の初期呼び出し(setViewMode(0))が
+// このファイルの後方にあるBIRD操作系のセクションより先に実行されるため、参照される変数
+// だけをここ(setViewMode定義より前)へ引き上げておく(操作系のイベント登録自体は後方の
+// 元の場所のまま)。
+let birdMode = false;
 // 【2026-07-21修正】以前はここが ['👁 一人称', '👁 三人称', '🗺 上空'] で、上のviewMode
 // コメント(0=三人称, 1=一人称, 2=上空。実際のカメラ分岐(part9.js)もこの並びで判定して
 // いる)と先頭2つの順序が入れ替わっていた。起動直後(viewMode=0=本来は三人称)なのに
@@ -395,16 +641,24 @@ function refreshViewLabel() {
 // 【2026-07-21】上空視点専用の🗺(旧mapBtn)を撤去し、視点切替1ボタンに統合したのに伴い、
 // 「もう一方のボタンをactiveにする」ための分岐も不要になった(常にこのボタン自身が
 // 現在のモードを示す)。
-function setViewMode(mode) {
-  viewMode = mode % 3;
-  refreshViewLabel();
+// 【2026-07-27・BIRDモード対応で切り出し】以前はsetViewMode内に直接書かれていたが、
+// BIRDモードのON/OFF(腕⇔翼の差し替え)でも同じ「一人称では全部隠す」の判定を再利用したい
+// ため、共通関数に分離した。setViewMode・setBirdModeの両方から呼ぶ。
+function refreshCharacterVisibility() {
   const showBody = (viewMode !== 1); // hide body in first-person
-  body.visible = leftArm.visible = rightArm.visible =
-  head.visible = leftLeg.visible = rightLeg.visible =
+  body.visible = head.visible = leftLeg.visible = rightLeg.visible =
   leftShoe.visible = rightShoe.visible = showBody;
+  // BIRDモード中は腕の代わりに翼・くちばしを見せる(いずれも一人称では非表示)
+  leftArm.visible = rightArm.visible = showBody && !birdMode;
+  leftWing.visible = rightWing.visible = beak.visible = showBody && birdMode;
   // 帽子/髪型は表示状態(showBody)と選択中の性別の両方を満たす時だけ見せる
   hatBrim.visible = hatTop.visible = showBody && charSex !== 'girl';
   girlHairTop.visible = girlPonyL.visible = girlPonyR.visible = showBody && charSex === 'girl';
+}
+function setViewMode(mode) {
+  viewMode = mode % 3;
+  refreshViewLabel();
+  refreshCharacterVisibility();
 }
 
 bindTapButton(document.getElementById('viewBtn'), () => setViewMode(viewMode + 1));
@@ -839,6 +1093,51 @@ if (altKeepBtn) {
 }
 // PC: Cキーでトグル(押しっぱなし対策にe.repeatで無視)
 document.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'c' && !e.repeat) setAltLocked(!altLocked); });
+
+// ======= BIRDモード(浮遊・水平3倍速・上下自由・視界のピッチに連動)=======
+// 【2026-07-27・ユーザー要望】通常の重力・地形追従・接地判定を丸ごと無視する。
+// 上下移動は2系統を合算する: (1) 視界のピッチ(camPitch)に連動した前後移動分
+// (下を向いて前進すれば降下、上を向いて前進すれば上昇。exploreOnUpdate側でforward/rightの
+// 内積からピッチ付きの移動ベクトルを再合成する)、(2) 従来どおりの上昇(hopHeld/⤴/Space)・
+// 下降(birdDescendHeld/⤵/Ctrl)ボタン(視線を変えずに真上/真下へ動きたい時のため残す)。
+// 水平速度は通常の速度式(joystick加速・Shiftダッシュ込み)の結果をそのままBIRD_SPEED_MULT
+// 倍する(exploreOnUpdate、part9.js側)。birdMode=falseに戻せば従来どおりに戻る。
+let birdDescendHeld = false;
+const BIRD_SPEED_MULT = 3;         // 水平速度の倍率(ユーザー要望どおり3倍)
+const BIRD_VSPEED = RISE_SPEED * 3; // ボタンでの上昇/下降速度。通常のホバー上昇(RISE_SPEED)と同じ倍率で揃える
+const birdBtn = document.getElementById('birdBtn');
+function updateBirdBtn() {
+  if (!birdBtn) return;
+  birdBtn.title = birdMode ? t('birdBtnTitleOn') : t('birdBtnTitleOff');
+  birdBtn.classList.toggle('active', birdMode);
+}
+function setBirdMode(v) {
+  if (birdMode === v) return;
+  birdMode = v;
+  updateBirdBtn();
+  refreshCharacterVisibility(); // 腕⇔翼・くちばしの表示切替(見た目も鳥っぽくする)
+  if (birdDownBtn) birdDownBtn.style.display = birdMode ? '' : 'none';
+  if (!birdMode) birdDescendHeld = false; // OFFにした瞬間に下降キー押しっぱなしが残らないように
+}
+if (birdBtn) { bindTapButton(birdBtn, () => setBirdMode(!birdMode)); updateBirdBtn(); }
+document.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'b' && !e.repeat) setBirdMode(!birdMode); });
+
+const birdDownBtn = document.getElementById('birdDownBtn');
+if (birdDownBtn) {
+  // hopBtn(上昇)と同じ passive:false + preventDefault() パターン(長押し時のiOS/Android
+  // テキスト選択吹き出しでtouchend/mouseupが途中発火するのを防ぐ)。
+  birdDownBtn.addEventListener('touchstart', e => { e.preventDefault(); birdDescendHeld = true; }, { passive: false });
+  birdDownBtn.addEventListener('touchend',   e => { e.preventDefault(); birdDescendHeld = false; }, { passive: false });
+  birdDownBtn.addEventListener('touchcancel',e => { e.preventDefault(); birdDescendHeld = false; }, { passive: false });
+  birdDownBtn.addEventListener('mousedown',  e => { e.preventDefault(); birdDescendHeld = true; });
+  birdDownBtn.addEventListener('mouseup',    () => { birdDescendHeld = false; });
+  birdDownBtn.addEventListener('mouseleave', () => { birdDescendHeld = false; });
+  birdDownBtn.addEventListener('contextmenu', e => e.preventDefault());
+  birdDownBtn.addEventListener('selectstart', e => e.preventDefault());
+}
+// PC: Ctrlキーで下降(押している間)
+document.addEventListener('keydown', e => { if (e.key === 'Control' && !e.repeat) birdDescendHeld = true; });
+document.addEventListener('keyup',   e => { if (e.key === 'Control') birdDescendHeld = false; });
 
 // Mouse drag for camera
 // 「地面や建物を指(カーソル)でつかんで動かす」感覚にするため、ドラッグしている位置が

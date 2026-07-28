@@ -179,7 +179,19 @@ function updateDebugTileOverlay(force) {
   // buildQueuedが実態より少なく出てしまう(退行)。
   for (const e of chunkWaitBuildings.values()) for (const b of e.arr) bump(pendingByTile, tileKeyOf(b.x, b.z));
   for (const e of tileWaitBuildings.values()) for (const b of e.arr) bump(pendingByTile, tileKeyOf(b.x, b.z));
-  for (const arr of dormantGrid.values()) for (const b of arr) bump(dormantByTile, tileKeyOf(b.x, b.z));
+  // 【2026-07-28】以前は dormantGrid 全件を0.5秒ごとに走査していたが、dormantは数万件規模まで
+  // 育つ(経路シムでは20000超を実測)ため、表示されない遠方セルまで毎回舐めた上に
+  // tileKeyOf で文字列キーを大量生成し、GC圧を無駄に上げていた。オーバーレイが表示するのは
+  // プレイヤー周囲 R タイル分だけなので、対応するdormantセルだけを直接引く。
+  {
+    const cellsPerTile = Math.ceil(OSM_TILE_M / DORMANT_CELL);
+    const gx0 = (ptx - R) * cellsPerTile, gx1 = (ptx + R + 1) * cellsPerTile;
+    const gz0 = (ptz - R) * cellsPerTile, gz1 = (ptz + R + 1) * cellsPerTile;
+    for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
+      const arr = dormantGrid.get(gx + ',' + gz);
+      if (arr) for (const b of arr) bump(dormantByTile, tileKeyOf(b.x, b.z));
+    }
+  }
   for (const rec of buildingRecords) bump(doneByTile, tileKeyOf(rec.x, rec.z));
   // 【2026-07-19】roadReadyTiles は「道路データを受信・登録済み」なだけで、実際の3Dメッシュ化
   // (processRoadMeshQueue、フレーム分割)はまだこれからのことがある。特にタイル到着直後は
@@ -270,8 +282,22 @@ function updateDebugTileOverlay(force) {
     // 誤読しやすかった(実態は復帰レート律速で正常な高止まり)。分けて出す。
     logRows.push({ tile: key, status, road: roadReady, roadMeshPending, waitMs, terrain: terrainReady, buildDone: done, buildQueued: pendingByTile.get(key) || 0, buildDormant: dormantByTile.get(key) || 0, fails: osmTileFailCount.get(key) || 0 });
   }
-  // 範囲外に出た平面は隠すだけ(破棄しない。再度範囲に入ったらそのまま使い回す)
-  for (const [key, mesh] of debugTilePlanes) if (!seen.has(key)) mesh.visible = false;
+  // 範囲外に出た平面は隠す(近くに戻ってくる可能性が高いので基本は使い回す)。
+  // 【2026-07-28】ただし従来は一度作った平面を永久に保持していたため、経路シムのように
+  // 何kmも一方向へ走り続けるとGroup(短冊3枚=Mesh3個)が訪問タイル数だけ際限なく
+  // scene.childrenへ溜まっていた(不可視でも毎フレームのシーン走査対象になる)。
+  // 十分遠い(表示範囲の倍以上)ものはジオメトリ・マテリアルごと破棄する。
+  // 再接近時は_debugTilePlaneGroupが作り直すので見た目は変わらない。
+  const _evictR = R * 2 + 2;
+  for (const [key, grp] of debugTilePlanes) {
+    if (seen.has(key)) continue;
+    grp.visible = false;
+    const c = key.split(','), kx = +c[0], kz = +c[1];
+    if (Math.abs(kx - ptx) <= _evictR && Math.abs(kz - ptz) <= _evictR) continue;
+    scene.remove(grp);
+    for (const m of [grp.terrainMesh, grp.roadMesh, grp.buildMesh]) { m.geometry.dispose(); m.material.dispose(); }
+    debugTilePlanes.delete(key);
+  }
   if (force || _debugTileFrame % 120 === 0) {
     console.table(logRows); // 詳細な数値は~2秒ごとにコンソールへ
     // 【2026-07-21・ユーザー要望】道路生成が「地形は緑なのに赤いまま」滞留するパターンの
@@ -317,9 +343,93 @@ function updateDebugTileOverlay(force) {
   }
 }
 
+// ======= 常時メモリ計測(GPU/JSヒープの増加源の切り分け) =======
+// 【2026-07-28・経路シム中のタブクラッシュ調査】
+// これまでの対策(自販機等の撤去・木プール上限引き上げ・高架の距離アンロード・キュー自己
+// スロットル)を入れてもクラッシュが再発しており、静的レビューでは決定打が出なかった。
+// 過去の同種の調査(DEBUG_SESSION_20260716_BUILDINGS)では「renderer.infoの実測(geo/tex/
+// calls/tri)と内訳カウントで切り分けるのが最速」という結論が出ているので、まず同じ計器を
+// 常時稼働させる。狙いは「GPU側で伸びているのがジオメトリなのかテクスチャなのか」を
+// 一発で分けること(これだけで探索範囲が半分になる)。
+//
+// 【重要】既存の[fetch]/[roadgen]/[buildgen]ログはupdateDebugTileOverlay内にあり、
+// 🩺オーバーレイがONの時しか出ない。この[mem]ログはオーバーレイと無関係に常時出す
+// (集計はMap.size等のO(1)参照と配列1周のみで、~2秒に1回なので負荷は無視できる)。
+// また実機がiPhoneでリモートデバッグできないため、🩺ON時は画面にも同じ数値を出す。
+let _memDiagFrame = 0;
+let _memDiagPrev = null;
+let _memHudEl = null;
+function _memHud() {
+  if (_memHudEl) return _memHudEl;
+  const d = document.createElement('div');
+  d.id = 'memHud';
+  d.style.cssText = 'position:fixed;left:4px;top:4px;z-index:9999;pointer-events:none;'
+    + 'font:10px/1.35 monospace;color:#7fffd4;background:rgba(0,0,0,0.55);'
+    + 'padding:3px 5px;border-radius:4px;white-space:pre;display:none;';
+  document.body.appendChild(d);
+  _memHudEl = d;
+  return d;
+}
+function updateMemDiag() {
+  if (++_memDiagFrame % 120 !== 0) return; // ~2秒ごと
+  // 道路は「レコードは永久保持・meshだけ距離で解放」方式なので、総数とmesh保持数を分けて見る
+  // (総数だけ伸びてmeshが伸びないならGPUは健全、meshが伸び続けるならアンロード漏れ)。
+  let roadMesh = 0, motorwayMesh = 0;
+  for (const r of roadRecords) { if (r.mesh) { roadMesh++; if (r.type === 'motorway') motorwayMesh++; } }
+  let areaMesh = 0;
+  for (const e of areaPolyMeshes) if (e.mesh) areaMesh++;
+  const mem = renderer.info.memory, rnd = renderer.info.render;
+  const heapMB = (performance.memory && performance.memory.usedJSHeapSize)
+    ? Math.round(performance.memory.usedJSHeapSize / 1048576) : -1;
+  const now = {
+    geo: mem.geometries, tex: mem.textures,
+    prog: renderer.info.programs ? renderer.info.programs.length : -1,
+    calls: rnd.calls, tri: rnd.triangles,
+    sceneCh: scene.children.length,
+    bRec: buildingRecords.length, dormant: dormantCount,
+    roadRec: roadRecords.length, roadMesh, motorwayMesh,
+    areaMesh, areaRec: areaPolyMeshes.length,
+    chunks: chunkMeshes.size, facade: facadeCache.size,
+    dormCells: dormantGrid.size,
+    // 【2026-07-28・3巡目】geo/tex/roadRec/dormantを抑えても落ちるため、まだ計器の無い
+    // 「永久に増えうる配列・Set」を一通り出す。どれか1つだけが単調増加していればそれが次の的。
+    pendB: pendingBuildings.length, pendRoad: pendingRoadMeshes.length,
+    coll: collisionBoxes.length, mmB: minimapBuildings.length,
+    ways: (typeof seenOSMWays !== 'undefined' ? seenOSMWays.size : -1),
+    stn: (typeof stationLabels !== 'undefined' ? stationLabels.length : -1),
+    roadG: roadGrid.size,
+    dbgPlanes: debugTilePlanes.size, tileQ: osmTileQueue.length, heapMB,
+  };
+  // 前回との差分。クラッシュ前に「何が一貫して増え続けているか」を一目で見るための主目的。
+  const d = _memDiagPrev ? {} : null;
+  if (d) for (const k in now) d[k] = now[k] - _memDiagPrev[k];
+  _memDiagPrev = now;
+  // 【2026-07-28】オブジェクトのまま出すとコンソールで折りたたまれ、肝心のheapMB等が
+  // 展開しないと読めない(実機ログ提供時に「…」で潰れた)。1行の文字列で出す。
+  const sgnN = (v) => (v > 0 ? '+' + v : String(v));
+  console.log('[mem] ' + Object.keys(now).map(k => k + ' ' + now[k] + (d ? '(' + sgnN(d[k]) + ')' : '')).join(' ')
+    + ' | evicted/win dorm ' + _dormantEvicted + ' road ' + _roadEvicted);
+  _dormantEvicted = 0; _roadEvicted = 0;
+  if (debugTileOverlayOn) {
+    const el = _memHud();
+    el.style.display = 'block';
+    const sgn = (v) => (v > 0 ? '+' + v : String(v));
+    el.textContent =
+      `geo ${now.geo} (${d ? sgn(d.geo) : '-'})   tex ${now.tex} (${d ? sgn(d.tex) : '-'})\n`
+      + `heap ${now.heapMB}MB (${d ? sgn(d.heapMB) : '-'})   calls ${now.calls}\n`
+      + `bRec ${now.bRec} dorm ${now.dormant}/${now.dormCells}c facade ${now.facade}\n`
+      + `road ${now.roadMesh}/${now.roadRec} (mtw ${now.motorwayMesh})\n`
+      + `area ${now.areaMesh} chunk ${now.chunks} scene ${now.sceneCh}\n`
+      + `dbgPlanes ${now.dbgPlanes} tileQ ${now.tileQ}`;
+  } else if (_memHudEl) {
+    _memHudEl.style.display = 'none';
+  }
+}
+
 // ======= ANIMATION LOOP =======
 const clock = new THREE.Clock();
 let walkCycle = 0;
+let birdFlapCycle = 0; // BIRDモードの翼の羽ばたき用アキュムレータ(walkCycleと同じ仕組み)
 
 // ======= EXPLORE MODE: 自由移動・ジャンプ・歩行アニメーション・追従カメラ =======
 // 「3D探索」というゲームプレイそのものに属するロジックをここにまとめ、ModeRegistryの
@@ -335,10 +445,13 @@ function exploreOnUpdate(dt) {
   const joyMag = joyActive ? Math.min(1, Math.sqrt(joyOx*joyOx + joyOz*joyOz)) : 0;
   let speed = 5 + 40 * Math.min(1, Math.pow(joyMag, 0.7) * 1.15); // 最大45m/s
   if (keys['shift']) speed = 45;
+  // 【2026-07-27・BIRDモード】水平速度をそのまま3倍(part7.js参照)。joystick加速・
+  // Shiftダッシュを含めた結果を丸ごと倍にするので、通常時の入力の強弱感はそのまま活きる。
+  if (birdMode) speed *= BIRD_SPEED_MULT;
   const forward = _moveForward.set(-Math.sin(camYaw), 0, -Math.cos(camYaw));
   const right   = _moveRight.set( Math.cos(camYaw), 0, -Math.sin(camYaw));
 
-  let moveX = 0, moveZ = 0;
+  let moveX = 0, moveZ = 0, moveY = 0;
   let isMoving = false;
 
   // Keyboard
@@ -361,6 +474,23 @@ function exploreOnUpdate(dt) {
   const mLen = Math.sqrt(moveX*moveX + moveZ*moveZ);
   if (mLen > 0) { moveX /= mLen; moveZ /= mLen; }
 
+  // 【2026-07-27・BIRDモード】視界のピッチ(camPitch)を移動方向に反映する。下を向いて
+  // 前進すれば潜行、上を向いて前進すれば上昇するようにしたい、というユーザー要望。
+  // moveX/moveZは正規化済みのforward/right合成なので、forward・right単位ベクトルとの内積
+  // (共に単位ベクトルで直交)で「前後どれだけ」「左右どれだけ」の係数(fAmt/rAmt)を復元
+  // できる。前後成分だけをcos(camPitch)で水平方向に縮め、その分をsin(camPitch)で垂直
+  // (moveY)に振り分ける。左右ストレイフはロールを付けず従来どおり水平のまま(一般的な
+  // フライトカメラの流儀)。ベクトルの大きさ(fAmt²+rAmt²=mLen²=1)は保たれるので、
+  // 見た目の速度(speed)は視線の向きによらず一定。
+  if (birdMode && mLen > 0) {
+    const fAmt = moveX * forward.x + moveZ * forward.z;
+    const rAmt = moveX * right.x + moveZ * right.z;
+    const cp = Math.cos(camPitch), sp = Math.sin(camPitch);
+    moveX = forward.x * cp * fAmt + right.x * rAmt;
+    moveZ = forward.z * cp * fAmt + right.z * rAmt;
+    moveY = -sp * fAmt; // camPitchが大きい(下向き視点)ほど前進(fAmt>0)で降下
+  }
+
   // Apply movement with collision
   const nx = player.position.x + moveX * speed * dt;
   const nz = player.position.z + moveZ * speed * dt;
@@ -375,6 +505,17 @@ function exploreOnUpdate(dt) {
   // 解除した瞬間はvelY=0のまま「else if (airborne)」に合流し、自然に落下が始まる。
   if (altLocked) {
     velY = 0;
+  } else if (birdMode) {
+    // 【2026-07-27・BIRDモード】重力・地形追従・接地判定を無視し、(1)視界のピッチに連動した
+    // 前後移動分(上のmoveY、下や上を向いて進むことでの潜行/上昇)と(2)上昇(hopHeld)/
+    // 下降(birdDescendHeld)ボタンの2系統を合算して高さを直接制御する。常にairborne=true
+    // にしておくことで、下のJump pose(空中姿勢)が流用され、歩行アニメーションは出ない。
+    // ボタン同士は同時押しで相殺して静止。OFFに戻すと最後のvelYを引き継いで通常の重力
+    // 落下(下の「else if (airborne)」)へ自然に合流する。
+    airborne = true;
+    const buttonV = hopHeld === birdDescendHeld ? 0 : (hopHeld ? BIRD_VSPEED : -BIRD_VSPEED);
+    velY = buttonV + moveY * speed;
+    player.position.y += velY * dt;
   } else if (hopHeld) {
     velY = RISE_SPEED;
     airborne = true;
@@ -432,7 +573,28 @@ function exploreOnUpdate(dt) {
     player.rotation.x = velY > 0 ? -0.15 * jumpT : 0.1 * jumpT;
   }
 
+  // 【2026-07-27・BIRDモード】翼の羽ばたきアニメーション。移動速度が速いほど速く羽ばたく
+  // (静止5Hz相当〜全力12Hz相当)。leftWing/rightWingはビジュアル用の新規メッシュ(part1.js)
+  // で、腕とは独立に動かす(表示切替はrefreshCharacterVisibility、part7.js)。
+  // 【注】翼の基準姿勢(position/rotation.y,z)は目視確認なしで決めた値のため、実機で見て
+  // 羽ばたきの向き・角度が不自然なら振幅・基準角を調整すること。
+  if (birdMode) {
+    const flapSpeed = 5 + Math.min(7, speed / 8);
+    birdFlapCycle += dt * flapSpeed;
+    const flap = Math.sin(birdFlapCycle) * 0.5;
+    leftWing.rotation.x = flap;
+    rightWing.rotation.x = flap; // 鳥は左右対称に羽ばたくため同位相
+  }
+
   // Camera
+  updatePlayerCamera();
+}
+
+// カメラ更新(三人称/一人称/上空)を切り出した共通関数。
+// 【2026-07-27・GPS追従モード追加に伴う抽出】元はexploreOnUpdateの末尾にそのまま書かれていた
+// ブロックを、ロジックを一切変えずに関数化しただけ(挙動は完全に同一)。GPS追従モード
+// (geoOnUpdate、下記)もWASD自由移動と同じ三人称/一人称/上空カメラを使うための共通化。
+function updatePlayerCamera() {
   if (viewMode === 1) {
     // First person
     scene.fog = WORLD_FOG;
@@ -469,6 +631,94 @@ function exploreOnUpdate(dt) {
     camera.position.lerp(safeCam, 0.2);
     camera.lookAt(player.position.x, player.position.y + 1.5, player.position.z);
   }
+}
+
+// ======= GPS MODE(モードA): 実際のGPS位置に追従。WASD/スティック入力は無視 =======
+// geoAnchorX/Z/Time・geoVelX/Z(part7.jsのonGeoFixが継続更新)から、次のフィックスが来るまでの
+// 間も推定速度で外挿し続ける(dead reckoning)ことで、フィックスの瞬間だけワープしてあとは
+// 静止する、という動きではなく連続して歩いているように見せる(ユーザー要望・2026-07-27)。
+// 外挿した点へは位置は指数平滑で追従、向きは角度差の平滑回頭でなめらかに追いつかせる。
+// ユーザー確認済みの設計により、GPS誤差での建物めり込みを許容し水平方向の衝突判定
+// (wouldCollide)はここでは行わない。ジャンプ・BIRDモード・高度キープ等の操作系はこの
+// モードでは対象外(実際に歩くモードのため)。
+const GEO_POS_SMOOTH = 6;  // 位置追従の平滑化速度(1/秒。大きいほど目標点に速く寄る)
+// 【2026-07-27・向きをスマホのコンパスに変更】コンパスは高頻度・連続的に取れるため、
+// GPS移動ベクトル頼りだった頃より応答を上げても(値自体が安定しているので)ジッターにならない。
+// 4→8に引き上げ、実際にスマホを振り向けた動きへの追従をきびきびさせる。
+const GEO_YAW_SMOOTH = 8;  // 向き追従の平滑化速度(1/秒)
+const GEO_CAM_RETURN_SMOOTH = 6; // 指を離した後、カメラがplayer.rotation.yへ戻る速度(1/秒)
+function geoOnUpdate(dt) {
+  // 直近フィックス(geoAnchor)から、推定速度(geoVel)で経過時間ぶん外挿した点を目標にする。
+  // GEO_EXTRAPOLATE_MAXを超えたら外挿をやめてその場で待機させる(信号ロスト時の暴走防止)。
+  let targetX = geoAnchorX, targetZ = geoAnchorZ;
+  if (geoAnchorTime !== null) {
+    const elapsed = Math.min((performance.now() - geoAnchorTime) / 1000, GEO_EXTRAPOLATE_MAX);
+    targetX = geoAnchorX + geoVelX * elapsed;
+    targetZ = geoAnchorZ + geoVelZ * elapsed;
+  }
+  const dx = targetX - player.position.x, dz = targetZ - player.position.z;
+  player.position.x += dx * Math.min(1, dt * GEO_POS_SMOOTH);
+  player.position.z += dz * Math.min(1, dt * GEO_POS_SMOOTH);
+  const isMoving = Math.hypot(geoVelX, geoVelZ) > 0.15 || Math.hypot(dx, dz) > 0.05;
+
+  // 向き: スマホのコンパス(geoCompassHeading、part7.js)が新しければ最優先で使う。
+  // 取れていない/古い(GEO_COMPASS_STALE_MS超)場合はGPS移動ベクトル推定(geoTargetYaw)に
+  // フォールバックする。explore同様の角度差平滑で回頭する(体の向き=実際に歩いている方向)。
+  let effectiveYaw = geoTargetYaw;
+  if (geoCompassHeading !== null && geoCompassLastUpdate !== null &&
+      (performance.now() - geoCompassLastUpdate) < GEO_COMPASS_STALE_MS) {
+    // GEO_COMPASS_OFFSET_DEG(part7.js): 実機で進行方向と逆向きになる報告があったための補正。
+    const hRad = (geoCompassHeading + GEO_COMPASS_OFFSET_DEG) * Math.PI / 180;
+    // xzToLatLon/latLonToXZの座標系(+X=東、+Z=南)に合わせた北基準の向きベクトルから
+    // atan2(dx,dz)で角度を出す(GPS移動ベクトル推定・WASD向き計算と同じ基準に揃える)。
+    effectiveYaw = Math.atan2(Math.sin(hRad), -Math.cos(hRad));
+  }
+  if (effectiveYaw !== null) {
+    let diff = effectiveYaw - player.rotation.y;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    player.rotation.y += diff * GEO_YAW_SMOOTH * dt;
+  }
+
+  // 【2026-07-27・ユーザー要望】カメラ(camYaw)は今まで毎フレームplayer.rotation.yへ強制
+  // 一致させていたため、explore同様のドラッグ操作(part7.jsのmousemove/touchmoveハンドラが
+  // 直接camYawを書き換える)がその場で打ち消され、指で視界を引っ張ることができなかった。
+  // ドラッグ中(mouseDown、または右側タッチのcamTouchIdが有効)はcamYawに一切触れず
+  // ハンドラの更新をそのまま反映させ、指を離した(ドラッグしていない)間だけ体の向き
+  // (=進行方向/コンパス)へなめらかに戻す。
+  const geoDragging = mouseDown || camTouchId !== null;
+  if (!geoDragging) {
+    let camDiff = player.rotation.y - camYaw;
+    while (camDiff > Math.PI) camDiff -= Math.PI * 2;
+    while (camDiff < -Math.PI) camDiff += Math.PI * 2;
+    camYaw += camDiff * GEO_CAM_RETURN_SMOOTH * dt;
+  }
+
+  // 床・重力(ジャンプ/BIRD/高度キープは対象外。歩行中に段差から落ちる程度は自然に追従させる)
+  const floorY = floorHeightAt(player.position.x, player.position.z, player.position.y);
+  if (airborne) {
+    velY += GRAVITY * dt;
+    player.position.y += velY * dt;
+    if (velY <= 0 && player.position.y <= floorY) { player.position.y = floorY; velY = 0; airborne = false; }
+  } else if (player.position.y - floorY > 1.5) {
+    airborne = true; velY = 0;
+  } else {
+    player.position.y = floorY;
+  }
+
+  // 歩行アニメーション: 実際の歩行を模した固定ペース(WASDのrunT/speed連動アニメは使わない)
+  if (isMoving && !airborne) {
+    walkCycle += dt * 6;
+    const swing = Math.sin(walkCycle) * 0.5;
+    leftArm.rotation.x = swing; rightArm.rotation.x = -swing;
+    leftLeg.rotation.x = -swing; rightLeg.rotation.x = swing;
+  } else if (!airborne) {
+    leftArm.rotation.x = 0; rightArm.rotation.x = 0;
+    leftLeg.rotation.x = 0; rightLeg.rotation.x = 0;
+  }
+  player.rotation.x += (0 - player.rotation.x) * Math.min(1, dt * 10);
+
+  updatePlayerCamera();
 }
 
 function animate() {
@@ -668,12 +918,14 @@ function animate() {
   // (長時間プレイでの重量化→クラッシュ)のを防ぐため、遠方の建物を解放する
   unloadFarBuildings();
   reactivateNearbyDormantBuildings(); // 逆に、近づいた遠景建物は生成キューへ復帰させる
+  evictFarDormant(); // 二度と戻らない遠方のdormant記述子を捨てる(part1.js、無人長距離走行対策)
   scanGateWaitQueues(); // 【2026-07-21・Fable5診断(b)】ゲート待ち隔離キューの低頻度スキャン
   // (2026-07-16: 高度LOD(updateAltitudeLOD)は撤去 — 40m/300mまで絞ってもクラッシュ防止に
   //  効かないことが実証され、上空の「スカスカ感」の害だけが残ったため。クラッシュの実対策は
   //  建物総数キャップ(PERF.bMax)+細街路メッシュ距離制限で達成済み)
   // 道路・線路も同様に、遠方のものはGPUメッシュだけ解放する(記録データは残す)
   unloadFarRoads();
+  evictFarRoads(); // 遠方の道路レコード自体を捨てる(part1.js、roadRecordsの無制限増加対策)
   // 公園・水面・田畑・キャンパスの面メッシュも同じ方式(遠方GPU解放/再接近で再構築)。
   // 【2026-07-17】以前はこれだけ一度作ったら二度と解放されなかった(CODE_REVIEW_20260717 P8)。
   unloadFarAreaPolys();
@@ -688,6 +940,8 @@ function animate() {
   updateForest();
   // デバッグ: タイル読み込み状況オーバーレイ(オフ中は内部で即return、コストなし)
   updateDebugTileOverlay();
+  // メモリ計測(🩺のON/OFFに関係なく常時。updateMemDiag参照)
+  updateMemDiag();
 
   // 空・星・遠景地形をカメラ/プレイヤーに追従させる
   // (固定のままだと移動やマップジャンプで far クリップ外に出て「空が消える」)
@@ -719,6 +973,9 @@ if (window.ModeRegistry) {
   // 移動・ジャンプ・歩行アニメーション・カメラの実処理は exploreOnUpdate(上で定義)に
   // 分離済み。将来のRPG/アクション等のモードは、同じ枠組みで別のonUpdateを登録すればよい。
   ModeRegistry.registerMode({ id: 'explore', label: '3D探索', onUpdate: exploreOnUpdate });
+  // 【2026-07-27・GPS追従モード(モードA)】geoBtn(part7.js)のstartGeoFollow/stopGeoFollowが
+  // switchMode('geo')/switchMode('explore')でこの2モードを排他的に切り替える。
+  ModeRegistry.registerMode({ id: 'geo', label: 'GPS追従', onUpdate: geoOnUpdate });
   ModeRegistry.switchMode('explore');
 }
 
@@ -818,4 +1075,16 @@ setInterval(saveLastPos, 10000);
   // 最終的なプレイヤー位置を中心に、NEAR(周辺・高解像度)とFAR(広域・低解像度)を両方取得
   loadNearTerrain(player.position.x, player.position.z);
   loadWideTerrain(player.position.x, player.position.z);
+
+  // 【2026-07-27・GPS追従モードの遠方ジャンプ再開】startGeoFollow(part7.js)が、遠方
+  // (300km超)ジャンプでのlocation.reloadを検知した時だけ立てておくフラグ。ここまでの
+  // resume処理(loadOSM内recenterOrigin)で既にジャンプ先へ原点が付け替わっているため、
+  // 起動直後にstartGeoFollowを呼び直せば今度は近距離ジャンプ扱いになりreloadは起きず、
+  // 継続追従(watchPosition)がそのまま定着する。
+  let resumeGeoFollow = false;
+  try { resumeGeoFollow = localStorage.getItem('iseharaResumeGeoFollow') === '1'; } catch (e) {}
+  if (resumeGeoFollow) {
+    try { localStorage.removeItem('iseharaResumeGeoFollow'); } catch (e) {}
+    if (typeof startGeoFollow === 'function') startGeoFollow();
+  }
 })();
