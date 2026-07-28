@@ -370,7 +370,61 @@ function _memHud() {
   _memHudEl = d;
   return d;
 }
+// ======= GPUバイト数の実測(個数ではなくバイト) =======
+// 【2026-07-28・二分探索の結果を受けて】旧バージョン(BIRD/GPS追従/経路シム導入前)でも
+// 移動を続けると落ちることが確認され、「昨日の変更が原因」という線は消えた。発動条件は
+// 連続移動そのもの。同時に、std設定でも geo≒10,000 / tex≒700 しか無いのにGPUプロセスが
+// 2GBという大きなズレが出ている。
+// renderer.info.memory は「個数」しか返さないため、1個あたりが巨大なジオメトリ(地形の
+// 高解像度グリッド等、数十万頂点)が積み上がっていても個数にはほとんど表れない。これまで
+// 5巡ぶん個数ばかり見ていて空振りしていた原因はここだと判断し、実バイト数を直接数える。
+// scene全体の走査になるので低頻度(~10秒ごと)に限定する。
+let _gpuBytesFrame = 0;
+function logGpuBytes() {
+  if (++_gpuBytesFrame % 600 !== 0) return; // ~10秒ごと
+  const seenGeo = new Set(), seenTex = new Set();
+  let geoBytes = 0, texBytes = 0, meshCount = 0;
+  const top = [];        // 単体で大きいジオメトリ上位(犯人の直接特定用)
+  const byKind = new Map(); // 分類ごとの合計バイト
+  scene.traverse((o) => {
+    const g = o.geometry;
+    if (g) {
+      meshCount++;
+      if (!seenGeo.has(g.uuid)) {
+        seenGeo.add(g.uuid);
+        let b = 0;
+        for (const k in g.attributes) { const a = g.attributes[k]; if (a && a.array) b += a.array.byteLength; }
+        if (g.index && g.index.array) b += g.index.array.byteLength;
+        // InstancedMeshのインスタンス行列(count×16 float)も実際にGPUへ載るので含める
+        if (o.isInstancedMesh && o.instanceMatrix && o.instanceMatrix.array) b += o.instanceMatrix.array.byteLength;
+        geoBytes += b;
+        const kind = o.name || (o.isInstancedMesh ? 'Inst:' + g.type : g.type);
+        byKind.set(kind, (byKind.get(kind) || 0) + b);
+        top.push({ b, kind, n: g.attributes.position ? g.attributes.position.count : 0 });
+      }
+    }
+    const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
+    for (const m of mats) {
+      for (const slot of ['map', 'emissiveMap', 'normalMap', 'alphaMap']) {
+        const t = m && m[slot];
+        if (!t || seenTex.has(t.uuid) || !t.image) continue;
+        seenTex.add(t.uuid);
+        texBytes += (t.image.width || 0) * (t.image.height || 0) * 4 * 1.34; // mipmap込みの概算
+      }
+    }
+  });
+  top.sort((a, b) => b.b - a.b);
+  const MB = (v) => (v / 1048576).toFixed(1);
+  const kinds = [...byKind.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
+    .map(([k, v]) => k + ':' + MB(v)).join(' ');
+  console.log('[gpuBytes] geoMB ' + MB(geoBytes) + ' texMB ' + MB(texBytes)
+    + ' meshes ' + meshCount + ' uniqGeo ' + seenGeo.size + ' uniqTex ' + seenTex.size
+    + ' | 分類上位MB ' + kinds
+    + ' | 最大 ' + top.slice(0, 3).map(t => t.kind + '(' + t.n + '頂点,' + MB(t.b) + 'MB)').join(' '));
+}
+
 function updateMemDiag() {
+  logGpuBytes();
   if (++_memDiagFrame % 120 !== 0) return; // ~2秒ごと
   // 道路は「レコードは永久保持・meshだけ距離で解放」方式なので、総数とmesh保持数を分けて見る
   // (総数だけ伸びてmeshが伸びないならGPUは健全、meshが伸び続けるならアンロード漏れ)。

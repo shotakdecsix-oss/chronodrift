@@ -172,6 +172,9 @@ function _gsiLoadTile(tx, ty) {
     cv.width = 256; cv.height = 256;
     const ctx = cv.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(bmp, 0, 0);
+    // 【2026-07-28】ImageBitmapはGC任せでは解放が遅く、仕様上もclose()が推奨されている。
+    // 1枚256x256x4=262KBで、移動し続けると数百枚単位で作られるため描き込んだ直後に明示解放する。
+    bmp.close();
     const d = ctx.getImageData(0, 0, 256, 256).data;
     const out = new Float32Array(65536);
     for (let i = 0; i < 65536; i++) {
