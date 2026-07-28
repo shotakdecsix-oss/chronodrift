@@ -455,7 +455,24 @@ function processTileData(data, tileCount) {
     ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ
     if (MODE === 'edo') fh = applyEdoHeightCap(style, fh); // 江戸: 現代建物の実測高さそのままだと高層ビルになるため木造家屋相当に抑える
     const realRec = { x: cx, z: cz, w: fw, d: fd, h: fh, style, real: true, rot: bRot };
-    pendingBuildings.push(realRec);
+    // 【2026-07-28・静止していても落ちる不具合の主因】以前はタイルから取れた実建物を
+    // 距離に関係なく全部pendingBuildingsへ積んでいた。密集地(東京)では取得半径内に
+    // 15万件以上あるのに、生成距離(BUILDING_GEN_DIST_REAL)の中に入れるのは2万件程度。
+    // 残り13万件は生成ループが1件ずつpopしては距離判定で弾いてdormantへ移すだけの
+    // 「素通り」で、実機ログでは【静止中でも2秒あたり18,600件】がこの素通りを通っていた
+    // (pendB 153,923 → 6,405 まで一定ペースで流れ、dormantは上限60,000に張り付いて
+    //  2秒あたり13,800〜27,600件がevictされ続けていた)。
+    // 生成ループの予算を丸ごと空費するうえ、毎秒1万件規模のオブジェクト移動を延々続けるので
+    // レンダラプロセスの確保量だけが戻らずに伸び続ける。
+    // 投入時点で距離を見て、最初からdormantへ入れる。近づいたときに
+    // reactivateNearbyDormantBuildings が拾い上げるので、見た目の結果は変わらない
+    // (これはそもそもdormantBuildingsが担うべき役割で、経由地を1つ省くだけ)。
+    const _pbdx = cx - player.position.x, _pbdz = cz - player.position.z;
+    if (_pbdx * _pbdx + _pbdz * _pbdz > BUILDING_GEN_DIST_REAL * BUILDING_GEN_DIST_REAL) {
+      dormantAdd(realRec);
+    } else {
+      pendingBuildings.push(realRec);
+    }
     // 【重要・2026-07-15】以前はbuildingGrid(hasRealBuildingNearby/hasRealHouseNearbyが参照する、
     // 「本物のOSM建物がここにある」という手続き生成の裏付け判定用インデックス)への登録が、
     // addBuilding()で実際にメッシュ化された時にしか行われていなかった。建物のバックログが
