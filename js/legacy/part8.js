@@ -467,8 +467,14 @@ function processTileData(data, tileCount) {
     // 投入時点で距離を見て、最初からdormantへ入れる。近づいたときに
     // reactivateNearbyDormantBuildings が拾い上げるので、見た目の結果は変わらない
     // (これはそもそもdormantBuildingsが担うべき役割で、経由地を1つ省くだけ)。
+    // 【2026-07-28・追記】プレイヤーの開始位置が確定する前(worldPosSettled=false)は
+    // 距離判定そのものが無意味なので、必ずpendingBuildingsへ入れる。ここで誤ってdormantへ
+    // 送ると、evictFarDormantに恒久削除されたうえタイルは「取得済み」のままになるため、
+    // 「足元のタイルが緑なのに実建物だけ出ない(道路と手続き生成は出る)」という
+    // 復旧不能の欠落になる。境界のブレを避けるため、判定にも1.2倍の余裕を持たせる。
+    const _pbLim = BUILDING_GEN_DIST_REAL * 1.2;
     const _pbdx = cx - player.position.x, _pbdz = cz - player.position.z;
-    if (_pbdx * _pbdx + _pbdz * _pbdz > BUILDING_GEN_DIST_REAL * BUILDING_GEN_DIST_REAL) {
+    if (worldPosSettled && _pbdx * _pbdx + _pbdz * _pbdz > _pbLim * _pbLim) {
       dormantAdd(realRec);
     } else {
       pendingBuildings.push(realRec);

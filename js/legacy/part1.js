@@ -902,6 +902,13 @@ function sortNewEntriesByDistanceToPlayer(arr, fromIdx, getXZ) {
 // 生成することになり、数秒〜数十秒のフリーズの主因だった(東京都心で45秒超を確認)。
 // → addRoad はレコード登録(軽量。isOnRoad判定・ミニマップは即座に正しく動く)だけ行い、
 //   重いメッシュ生成はこのキューで1フレームあたり時間バジェット内だけ処理する。
+// 【2026-07-28】プレイヤーの開始位置が確定したか。
+// animate()は起動ブートストラップIIFEより前に呼ばれるため、checkOSMTilesは
+// 「位置情報の取得(await startLocP)→jumpToLatLon」より先に回り始める。この数秒の窓に
+// タイル応答が届くと、プレイヤーはまだ既定位置に居るので距離判定が全部でたらめになる。
+// 距離を根拠に「捨てる/遠方送りにする」判断は、この旗が立つまで絶対に行わない
+// (part8.jsの投入時の振り分け、evictFarDormantの恒久削除がこれを見る)。
+let worldPosSettled = false;
 const pendingRoadMeshes = [];
 function queueRoadMesh(r) {
   if (r._q || r._dropped) return; // 二重投入防止 / 距離破棄済みレコード(evictFarRoads参照)は作らない
@@ -1442,6 +1449,7 @@ let _dormantEvicted = 0; // [mem]ログ用(直近ウィンドウの累計)
 function evictFarDormant() {
   _dormantEvictFrame++;
   if (_dormantEvictFrame % 90 !== 0) return; // unloadFarBuildingsと同じ周期
+  if (!worldPosSettled) return; // 開始位置が確定する前の距離判定でdormantを恒久削除しない
   if (dormantCount === 0) return;
   const px = player.position.x, pz = player.position.z;
   const keep2 = DORMANT_KEEP_DIST * DORMANT_KEEP_DIST;

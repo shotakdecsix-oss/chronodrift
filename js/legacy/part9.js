@@ -1248,6 +1248,9 @@ setInterval(saveLastPos, 10000);
     const loc = await startLocP;
     jumpToLatLon(loc.lat, loc.lon);
   }
+  // ここでプレイヤーの開始位置が確定した。以降は距離を根拠にした遠方送り・恒久削除を許可する
+  // (part1.js worldPosSettled のコメント参照)。
+  worldPosSettled = true;
   // 最終的なプレイヤー位置を中心に、NEAR(周辺・高解像度)とFAR(広域・低解像度)を両方取得
   loadNearTerrain(player.position.x, player.position.z);
   loadWideTerrain(player.position.x, player.position.z);
