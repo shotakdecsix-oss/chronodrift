@@ -1513,7 +1513,20 @@ function evictFarDormant() {
 // 通常のタイル取得に拾わせて作り直す。
 // 【距離の選び方】道路メッシュの表示距離(ROAD_UNLOAD_DIST)より外側で行う。手前でやると
 // 目の前の道路が一度消えて再生成される(ちらつく)ため。
-const STALE_REVIVE_DIST = Math.max(5000, ROAD_UNLOAD_DIST * 1.5);
+// 【2026-08-01・CODE_REVIEW_20260801 P0-1 の修正】以前は Math.max(5000, ROAD_UNLOAD_DIST*1.5)
+// で、std/lite では DORMANT_KEEP_DIST(4000m)より【外側】になっていた。
+//     lite: KEEP 4000 / REVIVE 5000 → 反転   std: KEEP 4000 / REVIVE 5000 → 反転
+//     high: KEEP 5120 / REVIVE 5000 → 正常(たまたま)
+// 「捨てる境界」より「作り直す境界」が外側にあると、捨てた瞬間に作り直し条件を満たす。
+// しかも evictFarDormant と reviveStaleTiles はどちらも %90 で位相が一致するため、
+// 同一フレームで「dormantを捨てる → stale印 → 道路レコード全削除 → 未取得へ戻す」まで
+// 進み、直後の checkOSMTiles が再キューする。結果、先読み範囲(5x5の外周は3200〜4800m)の
+// タイルが1.5秒周期で永久に取得・破棄を繰り返し、Overpassの同時実行枠を食い潰していた
+// (ユーザー報告「足元より先に遠くのタイルが生成される」の主因)。
+// 必ず KEEP の内側になるよう、両者を突き合わせて決める。ROAD_UNLOAD_DIST(道路メッシュの
+// 表示距離)より外側という元々の条件も維持する(手前でやると目の前の道路がちらつくため)。
+//     std 2800m / lite 1920m / high 3584m — いずれも road表示距離の外かつ KEEP の内側
+const STALE_REVIVE_DIST = Math.min(DORMANT_KEEP_DIST * 0.7, ROAD_UNLOAD_DIST * 1.2);
 // そのタイルに属する残存レコードを全部消してから、再取得可能な状態へ戻す。
 // 【重要】resetTileForRefetchを単体で呼んではいけない(残存レコードがあると二重生成になる)。
 function dropTileRemnants(tk) {
@@ -1536,20 +1549,39 @@ function dropTileRemnants(tk) {
   resetTileForRefetch(tk);
 }
 let _staleReviveFrame = 0;
+// 1回の作り直しで扱うタイル数の上限。下の処理は targets の件数に関わらず roadRecords 全件を
+// 1パス走査 + roadGrid 全再構築するので、まとめてやるほど1回のコストは変わらず「回数」だけが
+// 効く。近い順に少しずつ捌けば十分(次の周期=約5秒後に続きをやる)。
+const STALE_REVIVE_MAX_PER_PASS = 4;
 function reviveStaleTiles() {
   _staleReviveFrame++;
-  if (_staleReviveFrame % 90 !== 0) return;
+  // 【2026-08-01・CODE_REVIEW_20260801 P0-1 の修正(3)】以前は %90(約1.5秒)で、しかも
+  // evictFarRoads にある ROAD_RECORD_SOFT_MIN 相当のガードが無かった。この関数は対象が
+  // 1枚でもあれば roadRecords 全件走査 + roadGrid.clear()+全件再構築を行うため、経路シムで
+  // レコードが数万〜十数万件に育った状態だと 1.5 秒ごとにその再構築が回っていた。
+  // 全件走査+グリッド再構築という性質は evictFarRoads と同じなので、周期もそちらに揃える。
+  // 【位相】%300 の余り 7 は %90 の 0 と決して一致しない(gcd(300,90)=30、7 は 30 の倍数で
+  // ないため)。evictFarDormant(%90)と同一フレームに走らないようにして、「捨てた直後に
+  // 作り直す」形になりにくくする(構造的な循環自体は markTileStale の距離ガードで断ち済み。
+  // これは二重の保険)。
+  if (_staleReviveFrame % 300 !== 7) return;
   if (!worldPosSettled || staleTiles.size === 0) return;
   const px = player.position.x, pz = player.position.z;
   const lim2 = STALE_REVIVE_DIST * STALE_REVIVE_DIST;
-  const targets = new Set();
+  // 近い順に上限件数だけ拾う(遠いものが先に枠を取って、目の前のタイルが後回しに
+  // なるのを防ぐ)。
+  const cand = [];
   for (const tk of staleTiles) {
     const p2 = tk.split(',');
     const cx = (parseInt(p2[0], 10) + 0.5) * OSM_TILE_M, cz = (parseInt(p2[1], 10) + 0.5) * OSM_TILE_M;
     const dx = cx - px, dz = cz - pz;
-    if (dx * dx + dz * dz <= lim2) targets.add(tk);
+    const d2 = dx * dx + dz * dz;
+    if (d2 <= lim2) cand.push({ tk, d2 });
   }
-  if (targets.size === 0) return;
+  if (cand.length === 0) return;
+  cand.sort((a, b) => a.d2 - b.d2);
+  const targets = new Set();
+  for (let i = 0; i < Math.min(STALE_REVIVE_MAX_PER_PASS, cand.length); i++) targets.add(cand[i].tk);
   // 対象タイルの道路レコードを1パスでまとめて落とす(タイルごとに全件走査しない)
   let w = 0, dropped = 0;
   for (let i = 0; i < roadRecords.length; i++) {

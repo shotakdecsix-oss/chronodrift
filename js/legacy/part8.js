@@ -81,7 +81,13 @@ let osmTileActiveCount = 0;
 // (Phase3)と同じ考え方をクライアント側の並列枠にも導入し、遠方(まとめクエリ)には
 // 全枠を渡さず、常に最低1枠は近傍/足元ジョブの到着に備えて空けておく(processOSMTileQueue
 // 参照)。
-const OSM_TILE_CONCURRENCY_FAR_MAX = Math.max(1, OSM_TILE_CONCURRENCY - 1);
+// 【2026-08-01・CODE_REVIEW_20260801 P1-1】以前は OSM_TILE_CONCURRENCY - 1。同時実行が2だった
+// 頃の「1枠だけ近傍用に空けておく」をそのまま8へ持ち上げた形で、遠方のまとめクエリが7枠まで
+// 取れてしまう。優先度スコア(_tileScore)は【既に実行中の】ジョブを追い越せないので、密集地で
+// 10〜30秒かかる遠方クエリが7本走っていると、最優先のはずの足元ジョブがその分まるごと待たされる。
+// 予約枠を絶対数(-1)ではなく比率(半分)にして、同時実行数を将来変えても近傍側の枠が
+// 痩せないようにする。8 → far最大4 / 近傍用に常時4枠。
+const OSM_TILE_CONCURRENCY_FAR_MAX = Math.max(1, Math.floor(OSM_TILE_CONCURRENCY / 2));
 let osmTileActiveFarCount = 0; // 現在実行中のうち「far」判定(まとめクエリ)で消費している枠数
 // 近傍優先(_tileScore内のNEAR_TIER_R=5×5・距離2)。processOSMTileQueueの予約枠判定でも
 // 使うため、以前はfetchOSMTileBatch内のローカルconstだったものをモジュールスコープへ上げる
@@ -236,7 +242,24 @@ const staleTiles = new Set(); // 一部を恒久破棄したタイル。接近�
 function osmTileKeyOfXZ(x, z) {
   return Math.floor(x / OSM_TILE_M) + ',' + Math.floor(z / OSM_TILE_M);
 }
-function markTileStale(x, z) { staleTiles.add(osmTileKeyOfXZ(x, z)); }
+// 【2026-08-01・CODE_REVIEW_20260801 P0-1 の修正(2)】距離ラダーを直す(part1.js
+// STALE_REVIVE_DIST)だけでは足りない。evictFarDormant の第2段(DORMANT_MAX=60000 超過分を
+// 遠いセルから間引く処理)は【距離で切っていない】ため、密集地ではプレイヤーのすぐ近くの
+// タイルからも dormant が捨てられ、markTileStale される。その距離は当然 STALE_REVIVE_DIST の
+// 内側なので、reviveStaleTiles が即座に「作り直し」と判断して目の前の道路レコードを破棄し、
+// 再取得を始めてしまう(=第1段を距離で直しても第2段経由で同じ循環が残る)。
+// 「stale タイルは必ず作り直し半径の外側で生まれる」を入口(ここ)で保証する。こうすれば
+// stale になったタイルは、プレイヤーが一度離れてから戻ってきた時にだけ作り直される
+// (これが元々意図していた挙動)。
+// 判定は reviveStaleTiles と完全に同じ「タイル中心とプレイヤーの距離」で揃える
+// (片方が建物座標・片方がタイル中心だと境界付近で判定が食い違い、循環が残る)。
+function markTileStale(x, z) {
+  const tx = Math.floor(x / OSM_TILE_M), tz = Math.floor(z / OSM_TILE_M);
+  const cx = (tx + 0.5) * OSM_TILE_M, cz = (tz + 0.5) * OSM_TILE_M;
+  const dx = cx - player.position.x, dz = cz - player.position.z;
+  if (dx * dx + dz * dz <= STALE_REVIVE_DIST * STALE_REVIVE_DIST) return;
+  staleTiles.add(tx + ',' + tz);
+}
 // そのタイルを「一度も取得していない」状態へ完全に戻す。
 // 【重要】呼ぶ側で、そのタイルに属する生存レコード(道路・建物・dormant)を先に全部
 // 消しておくこと。残っていると再取得で二重生成になる。
