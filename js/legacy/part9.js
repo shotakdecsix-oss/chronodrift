@@ -580,8 +580,8 @@ function updateMemDiag() {
   // 展開しないと読めない(実機ログ提供時に「…」で潰れた)。1行の文字列で出す。
   const sgnN = (v) => (v > 0 ? '+' + v : String(v));
   console.log('[mem] ' + Object.keys(now).map(k => k + ' ' + now[k] + (d ? '(' + sgnN(d[k]) + ')' : '')).join(' ')
-    + ' | evicted/win dorm ' + _dormantEvicted + ' road ' + _roadEvicted);
-  _dormantEvicted = 0; _roadEvicted = 0;
+    + ' | evicted/win dorm ' + _dormantEvicted + ' road ' + _roadEvicted + ' areaPoly ' + _areaPolyEvicted);
+  _dormantEvicted = 0; _roadEvicted = 0; _areaPolyEvicted = 0;
   if (debugTileOverlayOn) {
     const el = _memHud();
     el.style.display = 'block';
@@ -1105,6 +1105,7 @@ function animate() {
   // 公園・水面・田畑・キャンパスの面メッシュも同じ方式(遠方GPU解放/再接近で再構築)。
   // 【2026-07-17】以前はこれだけ一度作ったら二度と解放されなかった(CODE_REVIEW_20260717 P8)。
   unloadFarAreaPolys();
+  evictFarAreaPolys(); // 遠方の面ポリゴンレコード自体を捨てて予算(areaPolyBudget)を回収する(part4.js)
   // Tile-based OSM fetch — loads roads/buildings for newly entered areas
   checkOSMTiles();
   // 遠景標高グリッドをプレイヤーに追従(遠くへジャンプしても実地形・標高が出る)

@@ -533,6 +533,51 @@ function unloadFarAreaPolys(force) {
   }
 }
 
+// ======= 面ポリゴンレコードの距離破棄(予算の回収) =======
+// 【2026-08-01・ユーザー要望「rebuildRoadMesh同様に不要になった水面ポリゴンを回収して再利用する」】
+// areaPolyBudget(park/water/farm/campusそれぞれ上限あり)は、これまでdropAreaRecordsInTile
+// (=タイル再取得時)でしか返却されなかった。unloadFarAreaPolysはGPUメッシュを解放するだけで
+// entry自体(=予算の占有)は生き残り続けるため、二度と戻らない遠方の水面・公園等がbudgetを
+// 埋め尽くすと、以降その種別は実形状ポリゴンが一切生成されず回避判定・ミニマップ表示のみに
+// フォールバックする(waterの場合「川幅が実際より細い」の主因。areaPolyBudgetOK参照)。
+// evictFarRoads(part1.js)と全く同じ考え方で、十分遠いレコードは定期的に配列ごと捨てて
+// 予算を返す。KEEP距離はメッシュ保持距離(AREA_POLY_UNLOAD_DIST)よりずっと外側に取り、
+// 「まだ見えている・すぐ戻れる」ものは絶対に捨てない。AREA_POLY_UNLOAD_DISTはROAD_UNLOAD_DIST
+// と同値(PERF.roadUnload)なので、道路と同じROAD_RECORD_KEEP_DIST(part1.js)をそのまま使う。
+// 【トレードオフ】evictFarRoadsと同じく、捨てた範囲へ戻るとそのタイルが取得済み扱いのままなら
+// 実形状ポリゴンは復活しない(回避判定・地形自体は別データなので消えない)。KEEP距離は通常の
+// 探索範囲のはるか外なので実用上は起きない想定。
+const AREA_POLY_RECORD_SOFT_MIN = 300; // これ以下なら走査自体しない(通常プレイでは常にここで抜ける)
+let _areaPolyEvictFrame = 0;
+let _areaPolyEvicted = 0; // [mem]ログ用(直近ウィンドウの累計)
+function evictFarAreaPolys(force) {
+  if (!worldPosSettled) return; // 開始位置が確定するまで距離を根拠に捨てない
+  _areaPolyEvictFrame++;
+  if (!force && _areaPolyEvictFrame % 300 !== 0) return; // evictFarRoadsと同じ~5秒周期(全件走査のため低頻度)
+  if (areaPolyMeshes.length < AREA_POLY_RECORD_SOFT_MIN) return;
+  const px = player.position.x, pz = player.position.z;
+  const keepDist = typeof ROAD_RECORD_KEEP_DIST === 'number' ? ROAD_RECORD_KEEP_DIST : Math.max(6000, AREA_POLY_UNLOAD_DIST * 2);
+  const keep2 = keepDist * keepDist;
+  let w = 0; // 生存分を前詰めするコンパクション(evictFarRoadsと同じ方針)
+  for (let i = 0; i < areaPolyMeshes.length; i++) {
+    const e = areaPolyMeshes[i];
+    // bboxへの最短距離(unloadFarAreaPolysと同じ判定。巨大な水面・公園の中にいるのに
+    // 「中心が遠い」という理由で捨てられないようにする)
+    const nx = Math.max(e.minX, Math.min(px, e.maxX));
+    const nz = Math.max(e.minZ, Math.min(pz, e.maxZ));
+    const dx = px - nx, dz = pz - nz;
+    if (dx * dx + dz * dz <= keep2) { areaPolyMeshes[w++] = e; continue; }
+    // ここに来る時点でunloadFarAreaPolysが既にメッシュを解放しているはずだが、念のため
+    if (e.mesh) { scene.remove(e.mesh); e.mesh.geometry.dispose(); e.mesh = null; }
+    areaPolyRefund(e.areaKind); // 予算を返す(再取得でまた確保される)
+    _areaPolyEvicted++;
+  }
+  if (w === areaPolyMeshes.length) return;
+  areaPolyMeshes.length = w;
+  areaPolyGrid.clear();
+  for (const e of areaPolyMeshes) polyGridAdd(areaPolyGrid, e); // 個別削除より作り直しの方が単純で確実(roadGridと同じ方針)
+}
+
 function scatterTreesIn(poly, sqmPerTree, cap) {
   const area = (poly.maxX - poly.minX) * (poly.maxZ - poly.minZ);
   const n = Math.min(cap, Math.max(2, Math.floor(area / sqmPerTree)));
