@@ -323,3 +323,86 @@ if (!r.mesh) { if (dd <= lim2r) queueRoadMesh(r); continue; }
 2. コンソールの `[fetch] queue` が移動を止めても 0 に落ち着かない(常に数件残る)なら
    P0-1 のループが動いている証拠。
 3. `[staleTile] Nタイルを作り直します` のログが移動していないのに定期的に出るなら確定。
+
+---
+
+# 実施ログ(2026-08-01)
+
+## 入れた修正(#1・#2)
+
+診断の推奨順のうち #1・#2 を実装。#3(実機確認)を挟んでから #4(`otk` 化)へ進む方針。
+
+| # | ファイル | 変更内容 |
+|---|---|---|
+| 1 | `js/legacy/part1.js` | `STALE_REVIVE_DIST` を `Math.max(5000, ROAD_UNLOAD_DIST*1.5)` → `Math.min(DORMANT_KEEP_DIST*0.7, ROAD_UNLOAD_DIST*1.2)` |
+| 2 | `js/legacy/part8.js` | `markTileStale()` に距離ガードを追加(`STALE_REVIVE_DIST` の内側なら stale にしない) |
+| 3 | `js/legacy/part1.js` | `reviveStaleTiles()` を `%90` → `%300`(余り7で位相分離)+ 近い順 `STALE_REVIVE_MAX_PER_PASS=4` タイル/回 |
+| 4 | `js/legacy/part8.js` | `OSM_TILE_CONCURRENCY_FAR_MAX` を `CONCURRENCY-1`(=7) → `floor(CONCURRENCY/2)`(=4) |
+
+### なぜ #2(`markTileStale` の距離ガード)が必須だったか
+
+距離定数(#1)だけでは循環が残る。`evictFarDormant()` の**第2段**
+(`DORMANT_MAX = 60000` 超過分を遠いセルから間引く処理)は**距離で切っていない**ため、
+密集地ではプレイヤーのすぐ近くのタイルからも dormant が捨てられ `markTileStale` される。
+その距離は当然 `STALE_REVIVE_DIST` の内側なので、`reviveStaleTiles` が即座に
+「作り直し」と判断して目の前の道路レコードを破棄する。第1段(距離判定あり)を直しても
+第2段が迂回路として残る、という構造だった。
+
+入口(`markTileStale`)でガードすることで「stale タイルは必ず作り直し半径の**外側**で
+生まれる」が保証され、プレイヤーが一度離れてから戻ってきた時にだけ作り直される
+(= 元々意図していた挙動)。
+
+判定尺度は `reviveStaleTiles` と完全に揃えて**タイル中心とプレイヤーの距離**にした。
+片方が建物座標・片方がタイル中心だと境界付近で判定が食い違い、細い循環が残るため。
+
+## 検証
+
+`node --check js/legacy/part1.js js/legacy/part8.js` → 両方 OK。
+
+全プリセットで距離ラダーを検算(成立すべき不等式: `REVIVE < KEEP` かつ `REVIVE > road表示距離`):
+
+```
+lite  road=1600  KEEP=4000  REVIVE=1920   REVIVE<KEEP ✓  REVIVE>road ✓
+std   road=2500  KEEP=4000  REVIVE=2800   REVIVE<KEEP ✓  REVIVE>road ✓
+high  road=3200  KEEP=5120  REVIVE=3584   REVIVE<KEEP ✓  REVIVE>road ✓
+```
+
+修正前は lite/std が `REVIVE(5000) > KEEP(4000)` で反転、high だけ偶然正常(5120 > 5000)
+だった。**プリセットによって不等式の向きが変わっていた**ため目視では気づきにくい。
+
+## 併せて更新したドキュメント
+
+- `ESCALATION_20260728_CRASH.md` に **11章**を追記。このループが「静止 2〜4分」という
+  クラッシュ再現条件を汚染していたこと、`freezeWorld()` がこの経路も止めるので二分探索の
+  解釈に混ざっている可能性、修正後に `[mem]` を取り直すべきこと。
+  **クラッシュの原因ではない**(ループを生んだコードは 7/28 追加、クラッシュは 7/26 でも再現)が
+  悪化要因なのは確実、という位置づけで記載。
+
+## 実機での確認項目(次にやること = 診断の #3)
+
+1. 🩺 オーバーレイで 5×5 の外周タイルが「緑 → 灰 → 赤 → 緑」を1.5秒周期で繰り返さなくなったか
+2. **静止した状態で** `[staleTile] Nタイルを作り直します` が出続けないか(出なければループ停止)
+3. `[fetch] queue` が静止後に 0 へ落ち着くか
+
+これで「戻ると緑緑緑なのに空」が**残る**なら、原因は P0-2(way 帰属の食い違い)なので
+`otk` 化(診断 #4)へ進む。
+
+## 未着手のまま残っている項目
+
+- **P0-2 / `otk` 化(本命)** — way の帰属タイルを確定してレコードに焼き込み、
+  `seenOSMWays` の解除とレコード消去を同一キーで行う
+- P1-2 `t.kind === 'building'` が距離無関係に tier2 帯(`SPLIT_NEAR_QUERIES=true` 時に顕在化)
+- P1-3 距離再ソート周期 0.5 秒(ラッシュ中は最大 12,000 棟が古い順序のまま処理されうる)
+- P1-4 `sortNewEntriesByDistanceToPlayer` の `splice` + 逐次 `push` + 比較ごとの `{x,z}` 生成
+- P2-1 上限のない構造(`seenOSMWays` / `tileWays` / `avoidPolygons` 他)
+- P2-4 `unloadFarRoads` の `roadRecords` 全件走査を `roadGrid` 近傍クエリへ
+
+## 作業上の注意(この作業で踏んだもの)
+
+- **作業ツリーが既に汚れている**: `index.html` を含む 50 ファイル以上が CRLF、HEAD は LF。
+  `git diff` 上は全行差分に見える(42万行)。`js/legacy/*.js` は LF のまま。
+  **`git add .` は禁止**。変更ファイルを明示指定してコミットすること。
+- **`.git/index.lock` の残骸**: サンドボックス側から `git status` を叩くと index.lock が
+  作られ、マウントの権限で削除できずに残る(`Operation not permitted`)。Windows 側から
+  `Remove-Item .git\index.lock -Force` が必要になる。以後 index を触る git コマンドは
+  サンドボックスから実行しない(`git --no-pager diff` 等の読み取り専用に限定)。
