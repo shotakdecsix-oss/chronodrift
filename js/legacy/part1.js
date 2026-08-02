@@ -694,15 +694,30 @@ function roadGridAdd(r) {
 // (移動中の拡張生成で道路生成が追いつかないケースの正体)。道路レコード登録のタイミングで
 // 重なる建物を検出し、手続き生成は削除・実建物は再キュー(今度は道路を知った状態で
 // fitRealBuildingToRoadsが縮小 or 線路ならdrop)する。
+// 【2026-08-02修正・ユーザー報告「まだ線路とぎれが起きている」】このpad/rhwは「建物の実
+// フットプリントが道路リボンに文字通り重なっているか」を見る厳密判定で、線路drop等
+// 実建物の最終チェック(fitRealBuildingToRoads)と同じ基準にわざと合わせてある。だが
+// 手続き生成の建物(generateChunk、part8.js)は配置時、実フットプリント判定ではなく
+// LOT_MARGIN(=4、part8.js内のローカル定数)ぶん外側にパディングしたisOnRoad呼び出し
+// (`isOnRoad(qx,qz, bw+LOT_MARGIN*2, bd+LOT_MARGIN*2)`)で弾かれる設計になっている。
+// 配置時はこの広い余裕を確保していたのに、gaveUpタイル明けの事後清掃(この関数)は
+// 厳密判定のままだったため、線路のすぐ脇(重ならないギリギリの範囲)に建てられた
+// 手続き生成の家だけが清掃を素通りして残っていた——これが「まだ発生している」の実体
+// (調査で確認、[[project_isehara_game_vegetation_on_late_road_rail]]参照)。手続き生成
+// (rec.real不在)だけ、配置時と同じ量(PROC_CLEANUP_EXTRA_MARGIN=8、LOT_MARGIN*2相当)を
+// 上乗せする。実建物は従来通り厳密判定のまま(fitRealBuildingToRoadsが別途縮小するため、
+// ここを広げると健全な実建物まで巻き込んで消してしまう)。
+const PROC_CLEANUP_EXTRA_MARGIN = 8;
 function removeBuildingsOverlappingRoad(r) {
   if (r.type === 'water') return;
   if (buildingRecords.length === 0) return;
-  const rhw = (r.rw || 5) / 2 + 0.5;
-  const pad = 40; // 建物の半対角ぶんの探索余裕
-  const gx0 = Math.floor((Math.min(r.x1, r.x2) - rhw - pad) / BUILDING_CELL);
-  const gx1 = Math.floor((Math.max(r.x1, r.x2) + rhw + pad) / BUILDING_CELL);
-  const gz0 = Math.floor((Math.min(r.z1, r.z2) - rhw - pad) / BUILDING_CELL);
-  const gz1 = Math.floor((Math.max(r.z1, r.z2) + rhw + pad) / BUILDING_CELL);
+  const rhwReal = (r.rw || 5) / 2 + 0.5;
+  const rhwProc = rhwReal + PROC_CLEANUP_EXTRA_MARGIN;
+  const pad = 40 + PROC_CLEANUP_EXTRA_MARGIN; // 建物の半対角ぶん+手続き生成の広い余裕ぶんの探索範囲
+  const gx0 = Math.floor((Math.min(r.x1, r.x2) - rhwProc - pad) / BUILDING_CELL);
+  const gx1 = Math.floor((Math.max(r.x1, r.x2) + rhwProc + pad) / BUILDING_CELL);
+  const gz0 = Math.floor((Math.min(r.z1, r.z2) - rhwProc - pad) / BUILDING_CELL);
+  const gz1 = Math.floor((Math.max(r.z1, r.z2) + rhwProc + pad) / BUILDING_CELL);
   const removeIds = new Set();
   const seenB = new Set();
   for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
@@ -711,6 +726,7 @@ function removeBuildingsOverlappingRoad(r) {
     for (const rec of arr) {
       if (rec.bid == null || seenB.has(rec.bid)) continue;
       seenB.add(rec.bid);
+      const rhw = rec.real ? rhwReal : rhwProc;
       // 建物ローカル系で道路リボンとの重なり判定(part2.js fitRealBuildingToRoadsの
       // 線路最終チェックと同じ計算。_minAbsOverWindowはpart2.js定義、実行時参照)
       const c = Math.cos(rec.rot || 0), s = Math.sin(rec.rot || 0);
