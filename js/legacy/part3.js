@@ -916,7 +916,7 @@ function rebuildMotorwayMesh(r) {
   // 橋脚(見た目・当たり判定とも)は挙動が不安定だったため廃止。高速道路は橋脚なしで空中に浮く形で表示する。
 }
 
-function addMotorway(x1, z1, x2, z2) {
+function addMotorway(x1, z1, x2, z2, wayId=null) {
   const dx = x2 - x1, dz = z2 - z1;
   const len = Math.hypot(dx, dz);
   if (len < 2) return;
@@ -937,7 +937,7 @@ function addMotorway(x1, z1, x2, z2) {
   motorwaySlopes.push(slope);
   // mesh・斜面の座標を記録し、NEAR地形更新時に桁と当たり判定を一緒に
   // 現在の地形高さへ作り直せるようにする(浮き/埋まり・判定ズレ対策)
-  addRoadRecord({ x1, z1, x2, z2, type: 'motorway', rw: MWY_W, mesh, slope });
+  addRoadRecord({ x1, z1, x2, z2, type: 'motorway', rw: MWY_W, mesh, slope, wid: wayId });
 }
 
 // Shared road materials (created once, reused)
@@ -1107,14 +1107,18 @@ function makeRoadGeo(x1, z1, x2, z2, width, yOffset, bridgeInfo) {
 // 割合)。実際の高さはmakeRoadGeoが構築のたびにgetGroundYで取り直して線形補間する
 // (座標だけ保持し、高さを一度きり焼き込まないことで地形精度の向上に追従できるようにする)。
 // 橋区間でなければnull。
-function addRoad(x1, z1, x2, z2, width, type='road', bridgeY=null) {
+// 【2026-08-03・修正A】wayId: このセグメントの元になったOSM way ID(part8.js processTileDataが
+// el.idを渡す。手続き生成側の呼び出しは無いのでnull)。roadRecordにrec.widとして持たせ、
+// タイル境界を無視して「そのwayが生成した全セグメント」を一括削除できるようにする
+// ([[project_isehara_game_way_tile_attribution]]参照)。
+function addRoad(x1, z1, x2, z2, width, type='road', bridgeY=null, wayId=null) {
   const dx = x2-x1, dz = z2-z1;
   const totalLen = Math.sqrt(dx*dx+dz*dz);
   if (totalLen < 0.5) return;
 
   // 高速道路: 現実モードは高架化、他モードは従来どおり細い地上路として描く
   if (type === 'motorway') {
-    if (IS_REAL) { addMotorway(x1, z1, x2, z2); return; }
+    if (IS_REAL) { addMotorway(x1, z1, x2, z2, wayId); return; }
     type = 'road';
   }
 
@@ -1173,7 +1177,7 @@ function addRoad(x1, z1, x2, z2, width, type='road', bridgeY=null) {
   // railWhiteは距離アンロード(unloadFarRoads)/復元(rebuildRoadMesh)で本体と一緒に扱う。
   // 【重要】重いメッシュ生成はここでは行わず、レコード登録+フレーム分割キュー投入だけにする
   // (密集タイル到着時の数十秒フリーズ対策。isOnRoad・ミニマップはレコードだけで正しく動く)。
-  const rec = {x1, z1, x2, z2, type, rw: w, mesh: null, mat, yOff, railWhite: null, bridgeY, slope: null};
+  const rec = {x1, z1, x2, z2, type, rw: w, mesh: null, mat, yOff, railWhite: null, bridgeY, slope: null, wid: wayId};
   // 橋区間: 見た目(makeRoadGeoが使うbridgeY)と同じ高さで「乗れる床」もここで登録する。
   // 直前にbridgeSegmentYで求めた高さをそのままslopeへ焼き込み、NEAR地形更新時は
   // rebuildRoadMesh側でこのslopeを見た目と一緒に更新し続ける(常に同じ計算式を使うため、

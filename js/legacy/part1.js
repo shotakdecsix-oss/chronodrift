@@ -836,6 +836,30 @@ function processVegCleanupQueue() {
 // roadRecords.push の共通化: 記録と同時に空間グリッドへ登録
 function addRoadRecord(r) { roadRecords.push(r); roadGridAdd(r); removeBuildingsOverlappingRoad(r); queueVegetationCleanup(r); }
 
+// 【2026-08-03・修正A】widSetに含まれるway由来のroadRecordを、タイル境界・現在の位置を
+// 一切問わず全部削除する。reviveStaleTiles(タイル作り直し)・evictFarRoads(遠方全滅判定)
+// から使う。「そのwayをun-seeする」操作と必ずセットで(原子的に)呼ぶこと——un-seeだけ
+// 先にやると、再取得時にこの削除より前の古いレコードの上に同じ道路がもう1本積まれる
+// (dropTileRemnants/resetTileForRefetchのコメント参照)。
+function removeRoadRecordsByWid(widSet) {
+  if (!widSet || widSet.size === 0) return 0;
+  let w = 0, dropped = 0;
+  for (let i = 0; i < roadRecords.length; i++) {
+    const r = roadRecords[i];
+    if (r.wid == null || !widSet.has(r.wid)) { roadRecords[w++] = r; continue; }
+    if (r.mesh) { scene.remove(r.mesh); r.mesh.geometry.dispose(); r.mesh = null; }
+    if (r.railWhite) { scene.remove(r.railWhite); r.railWhite.geometry.dispose(); r.railWhite = null; }
+    r._dropped = true;
+    dropped++;
+  }
+  if (dropped > 0) {
+    roadRecords.length = w;
+    roadGrid.clear();
+    for (const r of roadRecords) roadGridAdd(r);
+  }
+  return dropped;
+}
+
 // 【2026-08-02・ユーザー報告「マップジャンプ後に木や信号機が空中に浮かんでいる」】
 // 建物(rebuildBuildingHeight)・道路(rebuildRoadsInBounds)・森の木(rebuildForest、
 // 2026-07-20対策)は、NEAR地形が更新されるたび(part6.js loadNearTerrain成功時)に
@@ -1238,12 +1262,18 @@ function evictFarRoads(force) {
   // なるため、生存0のタイルに限る)。この距離(6000m超)では建物もdormantも既に消えている
   // ので、道路の全滅=そのタイルには何も残っていない、と見なせる。
   const _tileSurv = new Map(), _tileDropped = new Set();
+  // 【2026-08-03・修正A】widが複数タイルにまたがりうるようになったため、「このタイルの
+  // セグメントが全滅したか」に加えて「このwayは(タイルを問わず)どこかにまだ生き残って
+  // いるか」も同じ1パスで数える。全滅タイルのway一覧をun-seeする際、まだ他所で生きている
+  // wayを誤ってun-seeすると再取得で重複生成するため、resetTileForRefetchへprotectedWidsとして渡す。
+  const _survivingWids = new Set();
   for (let i = 0; i < roadRecords.length; i++) {
     const r = roadRecords[i];
     const mx = (r.x1 + r.x2) / 2 - px, mz = (r.z1 + r.z2) / 2 - pz;
     const _tk = osmTileKeyOfXZ((r.x1 + r.x2) / 2, (r.z1 + r.z2) / 2);
     if (mx * mx + mz * mz <= (r.type === 'motorway' ? keepMtw2 : keep2)) {
       _tileSurv.set(_tk, (_tileSurv.get(_tk) || 0) + 1);
+      if (r.wid != null) _survivingWids.add(r.wid);
       roadRecords[w++] = r; continue;
     }
     _tileDropped.add(_tk);
@@ -1258,7 +1288,7 @@ function evictFarRoads(force) {
   if (w === roadRecords.length) return;
   roadRecords.length = w;
   for (const tk of _tileDropped) {
-    if (!_tileSurv.get(tk)) dropTileRemnants(tk); // 残りかす(dormant等)も消してから取得済みフラグを落とす
+    if (!_tileSurv.get(tk)) dropTileRemnants(tk, _survivingWids); // 残りかす(dormant等)も消してから取得済みフラグを落とす。他所で生存中のwayはun-seeしない
   }
   // roadGridは1レコードが複数セルに入るため個別削除が面倒かつ高コスト。生存分だけで作り直す
   // (5秒に1回・生存数万件のO(n)なので、部分削除より単純で確実)。
@@ -1663,7 +1693,7 @@ function evictFarDormant() {
 const STALE_REVIVE_DIST = Math.min(DORMANT_KEEP_DIST * 0.7, ROAD_UNLOAD_DIST * 1.2);
 // そのタイルに属する残存レコードを全部消してから、再取得可能な状態へ戻す。
 // 【重要】resetTileForRefetchを単体で呼んではいけない(残存レコードがあると二重生成になる)。
-function dropTileRemnants(tk) {
+function dropTileRemnants(tk, protectedWids) {
   // dormant: タイル内のセルを消す
   const parts = tk.split(',');
   const tx = parseInt(parts[0], 10), tz = parseInt(parts[1], 10);
@@ -1680,7 +1710,7 @@ function dropTileRemnants(tk) {
   // 面レコード(公園・水面・田畑・キャンパス/回避ポリゴン/土地利用)も落とす。
   // 残したまま再取得すると同じポリゴンが二重に積まれ、面メッシュが重なってz-fightingする。
   if (typeof dropAreaRecordsInTile === 'function') dropAreaRecordsInTile(tx, tz, OSM_TILE_M);
-  resetTileForRefetch(tk);
+  resetTileForRefetch(tk, protectedWids);
 }
 let _staleReviveFrame = 0;
 // 1回の作り直しで扱うタイル数の上限。下の処理は targets の件数に関わらず roadRecords 全件を
@@ -1716,23 +1746,21 @@ function reviveStaleTiles() {
   cand.sort((a, b) => a.d2 - b.d2);
   const targets = new Set();
   for (let i = 0; i < Math.min(STALE_REVIVE_MAX_PER_PASS, cand.length); i++) targets.add(cand[i].tk);
-  // 対象タイルの道路レコードを1パスでまとめて落とす(タイルごとに全件走査しない)
-  let w = 0, dropped = 0;
-  for (let i = 0; i < roadRecords.length; i++) {
-    const r = roadRecords[i];
-    if (!targets.has(osmTileKeyOfXZ((r.x1 + r.x2) / 2, (r.z1 + r.z2) / 2))) { roadRecords[w++] = r; continue; }
-    if (r.mesh) { scene.remove(r.mesh); r.mesh.geometry.dispose(); r.mesh = null; }
-    if (r.railWhite) { scene.remove(r.railWhite); r.railWhite.geometry.dispose(); r.railWhite = null; }
-    r._dropped = true;
-    dropped++;
+  // 【2026-08-03・修正A】以前は「セグメント中点がtargetsタイルの範囲内か」という位置ベースで
+  // 削除対象を決めていた。しかしそのwayが実際に帰属するタイル(tileWays、複数タイルに
+  // またがりうる)と、セグメントの位置(タイル1つに定まる)は一致しない場合がある——特に
+  // 線路・幹線道路のような長いwayは、帰属タイルの外に伸びるセグメントを大量に持つ。
+  // 位置ベースのままだと、un-seeされたway(帰属タイル側で判定)のうち帰属タイルの外に
+  // あるセグメントだけ消し忘れ、再取得時にそのway全体が新規追加されて古いセグメントと
+  // 重複する。widベース(そのwayが生成した全セグメントを、位置を問わず一括削除)に統一する。
+  const widSet = new Set();
+  for (const tk of targets) {
+    const ways = tileWays.get(tk);
+    if (ways) for (const id of ways) widSet.add(id);
   }
-  if (dropped > 0) {
-    roadRecords.length = w;
-    roadGrid.clear();
-    for (const r of roadRecords) roadGridAdd(r);
-  }
+  const dropped = removeRoadRecordsByWid(widSet);
   for (const tk of targets) dropTileRemnants(tk);
-  console.log('[staleTile] ' + targets.size + 'タイルを作り直します(道路レコード' + dropped + '本を破棄して再取得)');
+  console.log('[staleTile] ' + targets.size + 'タイルを作り直します(way帰属の道路レコード' + dropped + '本を破棄して再取得)');
 }
 
 // ======= 【2026-07-21・Fable5診断(b)】ゲート待ち建物の隔離キュー =======

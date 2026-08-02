@@ -263,9 +263,26 @@ function markTileStale(x, z) {
 // そのタイルを「一度も取得していない」状態へ完全に戻す。
 // 【重要】呼ぶ側で、そのタイルに属する生存レコード(道路・建物・dormant)を先に全部
 // 消しておくこと。残っていると再取得で二重生成になる。
-function resetTileForRefetch(key) {
+// 【2026-08-03・修正A】protectedWids: このタイルに帰属するway一覧のうち、まだ他の場所に
+// 生存レコードが残っているway ID集合(呼び出し元があらかじめ算出)。指定があれば、その
+// way IDだけはun-see(seenOSMWays.delete)せずtileWaysにも残す——生きているwayを誤って
+// un-seeすると、次にどこかのタイルがそのwayを再取得した時に既存の生存セグメントへ
+// 重複生成してしまうため([[project_isehara_game_way_tile_attribution]]、evictFarRoads参照)。
+function resetTileForRefetch(key, protectedWids) {
   const ways = tileWays.get(key);
-  if (ways) { for (const id of ways) seenOSMWays.delete(id); tileWays.delete(key); }
+  if (ways) {
+    if (protectedWids && protectedWids.size) {
+      const remaining = [];
+      for (const id of ways) {
+        if (protectedWids.has(id)) { remaining.push(id); continue; }
+        seenOSMWays.delete(id);
+      }
+      if (remaining.length) tileWays.set(key, remaining); else tileWays.delete(key);
+    } else {
+      for (const id of ways) seenOSMWays.delete(id);
+      tileWays.delete(key);
+    }
+  }
   // 【2026-07-28】building relation(マルチポリゴンの建物・スタジアム等)も取り消す。
   // これを忘れると、タイルを再取得しても synthesizeBuildingRelationWays が
   // 「処理済み」として合成をスキップし、relation由来の建物だけ永久に欠ける。
@@ -410,14 +427,14 @@ function processTileData(data, tileCount) {
             fracA: bridgeCum[i] / bridgeTotalLen, fracB: bridgeCum[i+1] / bridgeTotalLen
           };
         }
-        addRoad(a.x, a.z, b.x, b.z, width, type, bridgeY);
+        addRoad(a.x, a.z, b.x, b.z, width, type, bridgeY, el.id);
       }
     }
     if (!USES_MEIJI_LANDUSE && tags.railway === 'rail') {
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
-        addRoad(a.x, a.z, b.x, b.z, 4, 'railway');
+        addRoad(a.x, a.z, b.x, b.z, 4, 'railway', null, el.id);
       }
     }
     if (tags.waterway && tags.waterway !== 'riverbank') {
@@ -425,7 +442,7 @@ function processTileData(data, tileCount) {
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
-        addRoad(a.x, a.z, b.x, b.z, ww, 'water');
+        addRoad(a.x, a.z, b.x, b.z, ww, 'water', null, el.id);
       }
     }
   });
@@ -597,14 +614,35 @@ function processTileData(data, tileCount) {
     }
     if (el.type !== 'way' || el.id == null) return;
     seenOSMWays.add(el.id);
-    const g = (el.geometry && el.geometry[0]) ||
-      (el.bounds ? { lat: (el.bounds.minlat + el.bounds.maxlat) / 2, lon: (el.bounds.minlon + el.bounds.maxlon) / 2 } : null);
-    if (!g) return;
-    const pxz = latLonToXZ(g.lat, g.lon);
-    const k = osmTileKeyOfXZ(pxz.x, pxz.z);
-    let arr = tileWays.get(k);
-    if (!arr) { arr = []; tileWays.set(k, arr); }
-    arr.push(el.id);
+    // 【2026-08-03・修正A(way帰属のotk化)】以前は「最初のノードのタイル」1つだけに
+    // 帰属させていた。線路・幹線道路のように複数タイルにまたがるwayは、その帰属タイル
+    // (=最初のノードのタイル)以外のタイルがstaleになって作り直されても
+    // resetTileForRefetchがseenOSMWaysを解除できず(帰属タイルの一覧に載っていないため)、
+    // そのタイル区間のセグメントだけ永久に復活しなくなっていた(「線路が途切れる」報告の
+    // 主因。tileWays/dropTileRemnants側の対応と対で[[project_isehara_game_way_tile_attribution]]
+    // 参照)。wayの全ジオメトリが実際に通過する「全タイル」に帰属させることで、
+    // どのタイルがstaleになっても正しくun-seeできるようにする。
+    if (el.geometry && el.geometry.length) {
+      const seenTilesForWay = new Set();
+      for (const g2 of el.geometry) {
+        const p2 = latLonToXZ(g2.lat, g2.lon);
+        seenTilesForWay.add(osmTileKeyOfXZ(p2.x, p2.z));
+      }
+      for (const k of seenTilesForWay) {
+        let arr = tileWays.get(k);
+        if (!arr) { arr = []; tileWays.set(k, arr); }
+        arr.push(el.id);
+      }
+    } else {
+      // フォールバック(geometryを持たない要素。従来通り代表点1つ)
+      const g = el.bounds ? { lat: (el.bounds.minlat + el.bounds.maxlat) / 2, lon: (el.bounds.minlon + el.bounds.maxlon) / 2 } : null;
+      if (!g) return;
+      const pxz = latLonToXZ(g.lat, g.lon);
+      const k = osmTileKeyOfXZ(pxz.x, pxz.z);
+      let arr = tileWays.get(k);
+      if (!arr) { arr = []; tileWays.set(k, arr); }
+      arr.push(el.id);
+    }
   });
 }
 
