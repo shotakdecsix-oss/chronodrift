@@ -608,6 +608,52 @@ function scatterTreesIn(poly, sqmPerTree, cap) {
   }
 }
 
+// 【2026-08-03・修正B(暫定緩和)】以前はhandleAreaFeature内でタイル到着と同時に
+// scatterTreesInを即座に呼んでいた。ゲート(道路データの到達・距離)が一切無く、
+// 5×5先読み(±3200m)の全域に道路より先に木が生え、後から届く道路・線路の位置を
+// 手続き建物と同じ理屈で邪魔していた
+// (IMPL_PROMPT_20260803_ROAD_FIDELITY_ROOTCAUSE_v2.md M2、
+// [[project_isehara_game_way_tile_attribution]]の修正Aとは独立した発生経路)。
+// 「本体」(木の散布をgenerateChunk側へ完全移設)ではなく、既存のchunkWaitBuildings/
+// tileWaitBuildings(part1.js)と同じ設計の暫定隔離キューで、ゲート成立まで散布を遅らせる。
+const pendingAreaTrees = []; // { poly, sqmPerTree, cap, tries }
+function queueAreaTrees(poly, sqmPerTree, cap) {
+  pendingAreaTrees.push({ poly, sqmPerTree, cap, tries: 0 });
+}
+// そのポリゴンのbbox全体がかかる全OSMタイルの道路・建物データが揃っており、かつ
+// プレイヤーから手続き生成距離(BUILDING_GEN_DIST_PROC)以内か。
+function _areaTreesReady(poly) {
+  const cx = (poly.minX + poly.maxX) / 2, cz = (poly.minZ + poly.maxZ) / 2;
+  const dx = cx - player.position.x, dz = cz - player.position.z;
+  if (dx * dx + dz * dz > BUILDING_GEN_DIST_PROC * BUILDING_GEN_DIST_PROC) return false;
+  const t0x = Math.floor(poly.minX / OSM_TILE_M), t1x = Math.floor(poly.maxX / OSM_TILE_M);
+  const t0z = Math.floor(poly.minZ / OSM_TILE_M), t1z = Math.floor(poly.maxZ / OSM_TILE_M);
+  for (let tx = t0x; tx <= t1x; tx++) for (let tz = t0z; tz <= t1z; tz++) {
+    const k = tx + ',' + tz;
+    if (!roadReadyTiles.has(k) || !buildingReadyTiles.has(k)) return false;
+  }
+  return true;
+}
+let _areaTreeScanFrame = 0;
+function scanPendingAreaTrees() {
+  _areaTreeScanFrame++;
+  if (_areaTreeScanFrame % 90 !== 0) return; // 隔離キューと同じ低頻度スキャン(約1.5秒ごと)
+  if (pendingAreaTrees.length === 0) return;
+  const keep = [];
+  for (const e of pendingAreaTrees) {
+    e.tries++;
+    // 20回(約30秒)待っても揃わなければ諦めて撒く(既存のゲート待ち隔離キューと同じ安全弁。
+    // 無限に待ち続けて木が永久に生えない事態を避ける)。
+    if (_areaTreesReady(e.poly) || e.tries >= 20) {
+      scatterTreesIn(e.poly, e.sqmPerTree, e.cap);
+    } else {
+      keep.push(e);
+    }
+  }
+  pendingAreaTrees.length = 0;
+  for (const e of keep) pendingAreaTrees.push(e);
+}
+
 // ======= 明治モード: 迅速測図100m土地利用データ =======
 // 出典: 農研機構農業環境研究部門「明治時代初期土地利用・被覆デジタルデータベース」(CC BY 4.0)
 // https://github.com/wata909/habs_test — GitHub Pages配信でCORS可、プロキシ不要。
@@ -837,7 +883,7 @@ function handleAreaFeature(el) {
   const span = Math.max(maxX - minX, maxZ - minZ);
   if (isPark) {
     if (span < 400 && areaPolyBudgetOK('park')) buildTerrainFollowingAreaPoly(pts, lawnMat, 0.14, 20, false);
-    scatterTreesIn(poly, 170, 40);
+    if (_areaTreesReady(poly)) scatterTreesIn(poly, 170, 40); else queueAreaTrees(poly, 170, 40);
     const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
     // 【2026-07-28・ユーザー要望で撤去】ベンチ。benchPプール自体はpart2.jsに残している
     // (signBoardP撤去時と同じ方針)が、poolAdd呼び出しをやめたので以降生成されない。
@@ -863,7 +909,7 @@ function handleAreaFeature(el) {
     // 森は公園より密なはずなので公園より密度を上げ、上限もTREE_MAX(3500)に対し
     // 十分小さい260に据え置き(1ポリゴンが木プールを独占しないための個別上限。
     // [[feedback_per_building_decoration_budget]]と同じ理由=共有予算は個別に上限が要る)。
-    scatterTreesIn(poly, 130, 260);
+    if (_areaTreesReady(poly)) scatterTreesIn(poly, 130, 260); else queueAreaTrees(poly, 130, 260);
   } else if (isCampus) {
     if (span < 900 && areaPolyBudgetOK('campus')) buildTerrainFollowingAreaPoly(pts, campusGroundMat, 0.13, 25, false);
   } else if (isPitch) {
