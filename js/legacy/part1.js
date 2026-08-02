@@ -744,8 +744,54 @@ function removeBuildingsOverlappingRoad(r) {
   }
   removeBuildingsByIds(removeIds);
 }
+// 【2026-08-02】建物(removeBuildingsOverlappingRoad)と同じ理由で、木・下草も後から届いた
+// 道路・線路と重なっていれば取り除く必要がある(ユーザー報告: 線路のあるべき場所に手続き
+// 生成の建物や木があり、線路が途切れている)。タイル取得がgaveUp(諦め)で一旦「空地」扱いに
+// なり手続き生成が先に走った後、背景リトライで実際の道路・線路データが遅れて届いた場合、
+// 建物側はremoveBuildingsOverlappingRoadで自動的に片付くが、木・下草はbuildingRecordsの
+// ような個体レコードを持たないInstancedMeshプール管理(part2.js)のため、この清掃の対象外
+// のまま放置されていた。プールはbuildingRecordsのような空間グリッドを持たないので、
+// instanceMatrixの平行移動成分(x,z)を直接読んで距離判定→スワップ詰めで除去する
+// (compactPool と同じ手法、「遠いから捨てる」ではなく「新しい道路/線路と重なるから捨てる」
+// 点だけが違う)。街路樹・公園木(treeTrunkP/treeTopPools)は既にcompactPoolの対象で
+// インデックス入れ替え耐性が確認済み。森の木(forestTrunkP/forestLeafPools)はnoCompactだが
+// rebuildForestが移動のたびpool.nから作り直すため、こちらのスワップ詰めと衝突しない。
+function _removePoolInstancesNearSeg(pool, x1, z1, x2, z2, rhw) {
+  if (!pool || pool.n === 0) return 0;
+  const m = pool.mesh;
+  const arr = m.instanceMatrix.array; // Matrix4を並べたFloat32Array(平行移動は12,13,14)
+  const col = m.instanceColor ? m.instanceColor.array : null;
+  const rhw2 = rhw * rhw;
+  let w = 0;
+  for (let i = 0; i < pool.n; i++) {
+    const o = i * 16;
+    const px = arr[o + 12], pz = arr[o + 14];
+    if (distSqPointToSeg(px, pz, x1, z1, x2, z2) < rhw2) continue; // 重なる→詰めずに捨てる
+    if (w !== i) {
+      arr.copyWithin(w * 16, o, o + 16);
+      if (col) col.copyWithin(w * 3, i * 3, i * 3 + 3);
+    }
+    w++;
+  }
+  const removed = pool.n - w;
+  if (removed === 0) return 0;
+  pool.n = w;
+  m.count = w;
+  m.instanceMatrix.needsUpdate = true;
+  if (col) m.instanceColor.needsUpdate = true;
+  return removed;
+}
+function removeVegetationOverlappingRoad(r) {
+  if (r.type === 'water') return; // removeBuildingsOverlappingRoadと同じ扱い(水面幅は実測ではない推定値のため)
+  const rhw = (r.rw || 5) / 2 + 2; // 建物より広めの余裕(樹冠・下草の見た目の半径ぶん)
+  _removePoolInstancesNearSeg(treeTrunkP, r.x1, r.z1, r.x2, r.z2, rhw);
+  for (const p of treeTopPools) _removePoolInstancesNearSeg(p, r.x1, r.z1, r.x2, r.z2, rhw);
+  _removePoolInstancesNearSeg(forestTrunkP, r.x1, r.z1, r.x2, r.z2, rhw);
+  for (const p of forestLeafPools) _removePoolInstancesNearSeg(p, r.x1, r.z1, r.x2, r.z2, rhw);
+  _removePoolInstancesNearSeg(scrubP, r.x1, r.z1, r.x2, r.z2, rhw);
+}
 // roadRecords.push の共通化: 記録と同時に空間グリッドへ登録
-function addRoadRecord(r) { roadRecords.push(r); roadGridAdd(r); removeBuildingsOverlappingRoad(r); }
+function addRoadRecord(r) { roadRecords.push(r); roadGridAdd(r); removeBuildingsOverlappingRoad(r); removeVegetationOverlappingRoad(r); }
 // 矩形範囲にかかる可能性のある道路だけを空間ハッシュから拾う(roadRecords全件走査を避ける)
 function queryRoadGrid(x0, x1, z0, z1) {
   const gx0 = Math.floor(x0 / ROAD_CELL), gx1 = Math.floor(x1 / ROAD_CELL);
