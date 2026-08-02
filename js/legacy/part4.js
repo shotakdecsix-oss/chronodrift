@@ -513,6 +513,19 @@ function dropAreaRecordsInTile(tx, tz, tileM) {
       }
     }
   }
+  // 【2026-08-03・修正P3(v3 perf)】pendingAreaTrees(森・公園の木のゲート待ち隔離キュー)も
+  // 同じ理由でパージする。タイルが作り直される=そのタイルに帰属するwayはun-seeされ
+  // 再取得時にhandleAreaFeatureが新しいポリゴンとして積み直すため、古いポリゴン参照を
+  // キューに残したままにすると、既に消えた形状の座標へ木を撒く事故になる。
+  if (typeof pendingAreaTrees !== 'undefined' && pendingAreaTrees.length) {
+    let pw = 0;
+    for (const e of pendingAreaTrees) {
+      const cx = (e.poly.minX + e.poly.maxX) / 2, cz = (e.poly.minZ + e.poly.maxZ) / 2;
+      if (cx >= x0 && cx < x1 && cz >= z0 && cz < z1) { dropped++; continue; }
+      pendingAreaTrees[pw++] = e;
+    }
+    pendingAreaTrees.length = pw;
+  }
   return dropped;
 }
 
@@ -602,6 +615,13 @@ function scatterTreesIn(poly, sqmPerTree, cap) {
     const x = poly.minX + Math.random() * (poly.maxX - poly.minX);
     const z = poly.minZ + Math.random() * (poly.maxZ - poly.minZ);
     if (!pointInPolygon(x, z, poly.pts)) continue;
+    // 【2026-08-03・修正P3(v3 perf)】ポリゴン単位のゲート(_areaTreesReady)は「bboxが
+    // かかる全タイルが揃うまで」という粗い条件で、数百m〜数kmの森は条件成立がまれなため、
+    // 結局タイムアウトで諦めてゲート無しに近い形で撒くことが多かった。木1本ごとに、その
+    // 足元のタイルの道路データが確定しているかを直接見る(IMPL_PROMPT_20260803_
+    // ROAD_FIDELITY_v3_PERF.md P3)。揃っている場所から自然に埋まり、揃っていない場所は
+    // 空くだけ(=忠実性優先の正しい挙動)。撒き漏れた分はpendingAreaTreesの再スキャンで拾う。
+    if (!roadReadyTiles.has(osmTileKeyOfXZ(x, z))) continue;
     if (isOnRoad(x, z, 2.5, 2.5)) continue; // 公園・森を横切る道路の上に木が生えないように
     if (isNearWater(x, z, 2)) continue; // 森・公園に隣接/内包する池・川の上に木が生えないように
     addTree(x, z, 0.7 + Math.random() * 0.9);

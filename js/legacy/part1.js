@@ -1758,9 +1758,25 @@ function reviveStaleTiles() {
     const ways = tileWays.get(tk);
     if (ways) for (const id of ways) widSet.add(id);
   }
+  // 【2026-08-03・修正P2(v3 perf)】widベース削除は「そのwayが生成した全セグメント」を
+  // 位置を問わず消すため、遠方タイル1枚がstaleになるたびに、そのwayが足元まで伸びていれば
+  // 近くの道路・線路まで巻き込んで一度消え、再取得・再メッシュされていた(体感「道路の
+  // 生成がいつまでも安定しない」の原因。2026-08-01に潰した距離ラダー反転と構造的に同じ罠。
+  // IMPL_PROMPT_20260803_ROAD_FIDELITY_v3_PERF.md参照)。evictFarRoadsの_survivingWidsと
+  // 同じ発想で、近傍(ROAD_UNLOAD_DIST以内)に生存セグメントを持つwayは削除対象からも
+  // un-see対象からも外す(目の前で描画中の道路は絶対に触らない。そのタイル区間は、
+  // このwayがプレイヤーから離れた時に改めて作り直される)。
+  const nearLim2 = ROAD_UNLOAD_DIST * ROAD_UNLOAD_DIST;
+  const nearWids = new Set();
+  for (const r of roadRecords) {
+    if (r.wid == null || !widSet.has(r.wid)) continue;
+    const mx = (r.x1 + r.x2) / 2 - px, mz = (r.z1 + r.z2) / 2 - pz;
+    if (mx * mx + mz * mz <= nearLim2) nearWids.add(r.wid);
+  }
+  for (const id of nearWids) widSet.delete(id);
   const dropped = removeRoadRecordsByWid(widSet);
-  for (const tk of targets) dropTileRemnants(tk);
-  console.log('[staleTile] ' + targets.size + 'タイルを作り直します(way帰属の道路レコード' + dropped + '本を破棄して再取得)');
+  for (const tk of targets) dropTileRemnants(tk, nearWids);
+  console.log('[staleTile] ' + targets.size + 'タイルを作り直します(way帰属の道路レコード' + dropped + '本を破棄して再取得、近傍生存' + nearWids.size + 'way保護)');
 }
 
 // ======= 【2026-07-21・Fable5診断(b)】ゲート待ち建物の隔離キュー =======

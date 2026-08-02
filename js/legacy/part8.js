@@ -158,6 +158,10 @@ function resetOSMTileQueueForJump() {
   // 全タイル凍結)する一因になっていた。buildingQueuedTiles(キュー状態、消してよい)だけ
   // クリアする。
   buildingQueuedTiles.clear();
+  // 【2026-08-03・修正P3(v3 perf)】pendingAreaTrees(part4.js、森・公園の木のゲート待ち
+  // 隔離キュー)は古い座標のポリゴンを持ったままなので、ここでクリアしないと近距離ジャンプ後に
+  // 前の場所のポリゴン座標で木が湧く事故になる。
+  if (typeof pendingAreaTrees !== 'undefined') pendingAreaTrees.length = 0;
 }
 let _osmMoveUx = 0, _osmMoveUz = 0; // プレイヤーの進行方向(単位ベクトル)。取得順の前方優先に使う
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)
@@ -361,6 +365,10 @@ const UNPAVED_SURFACES = new Set(['unpaved','dirt','earth','ground','gravel','fi
 
 function processTileData(data, tileCount) {
   if (!data || !data.elements) return;
+  // 【2026-08-03・v3計測】完全同期のこの関数がフレームループをどれだけ止めているかを
+  // 密集地で確認するための計測。P1(bbox早期脱出)前後で比較する(IMPL_PROMPT_20260803_
+  // ROAD_FIDELITY_v3_PERF.md参照)。
+  const _tileDataT0 = performance.now();
   // building=タグを持つrelation(マルチポリゴン)をway相当の疑似要素に変換し、既存のbuilding
   // 処理に合流させる(part2.js synthesizeBuildingRelationWays参照。地図上に見える
   // 大きな建物枠が生成システムに一切渡っていなかった不具合の対策)。
@@ -622,16 +630,43 @@ function processTileData(data, tileCount) {
     // 主因。tileWays/dropTileRemnants側の対応と対で[[project_isehara_game_way_tile_attribution]]
     // 参照)。wayの全ジオメトリが実際に通過する「全タイル」に帰属させることで、
     // どのタイルがstaleになっても正しくun-seeできるようにする。
+    // 【2026-08-03・修正P1(速度低下対策)】上の対応は応答に含まれる全way(大半は建物・
+    // 小さなポリゴンで、実際には1タイルに収まる)に対してノードごとにlatLonToXZ+
+    // タイルキー文字列を生成しSetへ積んでおり、密集タイル1枚で数十万アロケーションが
+    // 発生し、完全同期のprocessTileDataがフレームループを長時間止めていた(体感「取得は
+    // 速いのに生成が進まない」の主因、IMPL_PROMPT_20260803_ROAD_FIDELITY_v3_PERF.md参照)。
+    // まずlat/lonのbboxだけを数値で求め(アロケーション無し)、bboxの四隅2点だけ座標変換して
+    // タイル範囲を出す。単一タイルに収まれば(全体の99%)そのキー1つだけ登録して即終了。
+    // 複数タイルにまたがる場合(線路・幹線道路等ごく少数)だけ、従来通りノード単位で正確に
+    // 通過タイルを集める(bbox内の全タイルを登録すると、斜めに走る長いwayが実際には
+    // 通過しないタイルまで帰属してしまい、無関係なstale化のたびに誤ってun-seeされる副作用がある)。
     if (el.geometry && el.geometry.length) {
-      const seenTilesForWay = new Set();
+      let mnLat = Infinity, mxLat = -Infinity, mnLon = Infinity, mxLon = -Infinity;
       for (const g2 of el.geometry) {
-        const p2 = latLonToXZ(g2.lat, g2.lon);
-        seenTilesForWay.add(osmTileKeyOfXZ(p2.x, p2.z));
+        if (g2.lat < mnLat) mnLat = g2.lat;
+        if (g2.lat > mxLat) mxLat = g2.lat;
+        if (g2.lon < mnLon) mnLon = g2.lon;
+        if (g2.lon > mxLon) mxLon = g2.lon;
       }
-      for (const k of seenTilesForWay) {
+      const pA = latLonToXZ(mnLat, mnLon), pB = latLonToXZ(mxLat, mxLon);
+      const tx0 = Math.floor(Math.min(pA.x, pB.x) / OSM_TILE_M), tx1 = Math.floor(Math.max(pA.x, pB.x) / OSM_TILE_M);
+      const tz0 = Math.floor(Math.min(pA.z, pB.z) / OSM_TILE_M), tz1 = Math.floor(Math.max(pA.z, pB.z) / OSM_TILE_M);
+      if (tx0 === tx1 && tz0 === tz1) {
+        const k = tx0 + ',' + tz0;
         let arr = tileWays.get(k);
         if (!arr) { arr = []; tileWays.set(k, arr); }
         arr.push(el.id);
+      } else {
+        const seenTilesForWay = new Set();
+        for (const g2 of el.geometry) {
+          const p2 = latLonToXZ(g2.lat, g2.lon);
+          seenTilesForWay.add(osmTileKeyOfXZ(p2.x, p2.z));
+        }
+        for (const k of seenTilesForWay) {
+          let arr = tileWays.get(k);
+          if (!arr) { arr = []; tileWays.set(k, arr); }
+          arr.push(el.id);
+        }
       }
     } else {
       // フォールバック(geometryを持たない要素。従来通り代表点1つ)
@@ -644,6 +679,8 @@ function processTileData(data, tileCount) {
       arr.push(el.id);
     }
   });
+  const _tileDataMs = performance.now() - _tileDataT0;
+  if (_tileDataMs > 20) console.log('[tileData] ' + _tileDataMs.toFixed(1) + 'ms elems=' + data.elements.length);
 }
 
 // キューに空きワーカー枠がある限り、並行してタイルを取得していく
