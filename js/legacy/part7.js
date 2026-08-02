@@ -766,10 +766,16 @@ function drawMinimap() {
   mctx.restore();
 
   // Player arrow — arrowhead points in facing direction, feathers at back
+  // 【2026-08-02修正】player.rotation.yとcamYawは同じforward定義(-sinθ,-cosθ、part9.js)を
+  // 共有しており、このワールド→キャンバス変換(toMapはx,zをそのままスケール、反転無し)では
+  // 上の視界コーンが検証済みの `-camYaw` を使っている(part9.jsの一人称カメラ修正時に
+  // 「ミニマップの視界コーン(-camYaw)と同じ基準」と確認済み)。矢印だけ`Math.PI - py2`
+  // (=-py2+180°)になっており、コーンに対して常にちょうど180°(進行方向と逆)を向く
+  // バグだった(ユーザー報告: GPS追従・経路モードでキャラ矢印が逆向き)。コーンと同じ`-py2`に統一。
   const py2 = player.rotation.y;
   mctx.save();
   mctx.translate(MM/2, MM/2);
-  mctx.rotate(Math.PI - py2); // corrected: tip points in movement direction
+  mctx.rotate(-py2); // tip points in movement direction (cone と同じ -θ 変換)
   mctx.fillStyle = '#ff4040';
   mctx.strokeStyle = '#ffffff';
   mctx.lineWidth = 1;
