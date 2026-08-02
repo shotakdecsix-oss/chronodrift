@@ -811,14 +811,18 @@ function updatePlayerCamera() {
 // 静止する、という動きではなく連続して歩いているように見せる(ユーザー要望・2026-07-27)。
 // 外挿した点へは位置は指数平滑で追従、向きは角度差の平滑回頭でなめらかに追いつかせる。
 // ユーザー確認済みの設計により、GPS誤差での建物めり込みを許容し水平方向の衝突判定
-// (wouldCollide)はここでは行わない。ジャンプ・BIRDモード・高度キープ等の操作系はこの
-// モードでは対象外(実際に歩くモードのため)。
+// (wouldCollide)はここでは行わない。
+// 【2026-08-02追加】水平移動(GPS追従)はそのままに、ジャンプ上昇(hopHeld)・高度キープ
+// (altLocked)・視界の自由回転(camYaw)はexploreモードと同じ操作を有効にした。BIRDモード
+// は対象外のまま(GPS駆動の水平移動とBIRDの視点連動移動が両立しないため)。
 const GEO_POS_SMOOTH = 6;  // 位置追従の平滑化速度(1/秒。大きいほど目標点に速く寄る)
 // 【2026-07-27・向きをスマホのコンパスに変更】コンパスは高頻度・連続的に取れるため、
 // GPS移動ベクトル頼りだった頃より応答を上げても(値自体が安定しているので)ジッターにならない。
 // 4→8に引き上げ、実際にスマホを振り向けた動きへの追従をきびきびさせる。
 const GEO_YAW_SMOOTH = 8;  // 向き追従の平滑化速度(1/秒)
-const GEO_CAM_RETURN_SMOOTH = 6; // 指を離した後、カメラがplayer.rotation.yへ戻る速度(1/秒)
+// 【2026-08-02】視界回転を完全自由化したため、GEO_CAM_RETURN_SMOOTH(離した後に
+// player.rotation.yへ戻す用の定数)は不要になり削除。カメラはexplore同様、
+// ドラッグ/Q・Eキー入力でのみ動く。
 function geoOnUpdate(dt) {
   // 直近フィックス(geoAnchor)から、推定速度(geoVel)で経過時間ぶん外挿した点を目標にする。
   // GEO_EXTRAPOLATE_MAXを超えたら外挿をやめてその場で待機させる(信号ロスト時の暴走防止)。
@@ -852,23 +856,25 @@ function geoOnUpdate(dt) {
     player.rotation.y += diff * GEO_YAW_SMOOTH * dt;
   }
 
-  // 【2026-07-27・ユーザー要望】カメラ(camYaw)は今まで毎フレームplayer.rotation.yへ強制
-  // 一致させていたため、explore同様のドラッグ操作(part7.jsのmousemove/touchmoveハンドラが
-  // 直接camYawを書き換える)がその場で打ち消され、指で視界を引っ張ることができなかった。
-  // ドラッグ中(mouseDown、または右側タッチのcamTouchIdが有効)はcamYawに一切触れず
-  // ハンドラの更新をそのまま反映させ、指を離した(ドラッグしていない)間だけ体の向き
-  // (=進行方向/コンパス)へなめらかに戻す。
-  const geoDragging = mouseDown || camTouchId !== null;
-  if (!geoDragging) {
-    let camDiff = player.rotation.y - camYaw;
-    while (camDiff > Math.PI) camDiff -= Math.PI * 2;
-    while (camDiff < -Math.PI) camDiff += Math.PI * 2;
-    camYaw += camDiff * GEO_CAM_RETURN_SMOOTH * dt;
-  }
+  // 【2026-08-02・ユーザー要望】視界回転を完全自由化。以前はドラッグを離すと体の向き
+  // (進行方向/コンパス)へ自動で戻していたが、それをやめてexploreモードと同じく
+  // ドラッグ(mousemove/touchmove、part7.js)とQ/EキーだけでcamdiffなしにcamYawを動かす。
+  // 体(player.rotation.y)は引き続きGPS/コンパスの向きへ回頭するので、体の向きと
+  // カメラの向きが常に一致している必要はない(explore同様、見たい方向を自由に見られる)。
+  if (keys['q']) { camYaw += dt; }
+  if (keys['e']) { camYaw -= dt; }
 
-  // 床・重力(ジャンプ/BIRD/高度キープは対象外。歩行中に段差から落ちる程度は自然に追従させる)
+  // 【2026-08-02・ユーザー要望】GPS追従中もジャンプ上昇(hopBtn/Space)と高度キープ
+  // (altKeepBtn/C)を使えるようにする。水平位置は引き続きGPS外挿(targetX/targetZ)に
+  // 追従させたまま、垂直方向だけexploreモードと同じ入力を反映する。
   const floorY = floorHeightAt(player.position.x, player.position.z, player.position.y);
-  if (airborne) {
+  if (altLocked) {
+    velY = 0; // ロック中は重力・上昇入力とも無視してその高さに静止
+  } else if (hopHeld) {
+    velY = RISE_SPEED;
+    airborne = true;
+    player.position.y += velY * dt;
+  } else if (airborne) {
     velY += GRAVITY * dt;
     player.position.y += velY * dt;
     if (velY <= 0 && player.position.y <= floorY) { player.position.y = floorY; velY = 0; airborne = false; }
@@ -887,6 +893,15 @@ function geoOnUpdate(dt) {
   } else if (!airborne) {
     leftArm.rotation.x = 0; rightArm.rotation.x = 0;
     leftLeg.rotation.x = 0; rightLeg.rotation.x = 0;
+  }
+  // 【2026-08-02】ジャンプ上昇を有効化したのに合わせ、exploreモードと同じジャンプ姿勢
+  // (空中では脚を畳む)を適用。無いと上昇中も歩行アニメの最終フレームで固まって見える。
+  if (airborne) {
+    const jumpT = Math.min(1, Math.abs(velY) / 15.6);
+    leftArm.rotation.x  = -0.9 * jumpT;
+    rightArm.rotation.x = -0.9 * jumpT;
+    leftLeg.rotation.x  =  0.7 * jumpT;
+    rightLeg.rotation.x =  0.7 * jumpT;
   }
   player.rotation.x += (0 - player.rotation.x) * Math.min(1, dt * 10);
 
@@ -1105,7 +1120,13 @@ function animate() {
   // 公園・水面・田畑・キャンパスの面メッシュも同じ方式(遠方GPU解放/再接近で再構築)。
   // 【2026-07-17】以前はこれだけ一度作ったら二度と解放されなかった(CODE_REVIEW_20260717 P8)。
   unloadFarAreaPolys();
-  evictFarAreaPolys(); // 遠方の面ポリゴンレコード自体を捨てて予算(areaPolyBudget)を回収する(part4.js)
+  // 【2026-08-01・無効化】evictFarAreaPolys(part4.js)を試したが「すぐにリボンだけになった」と
+  // 報告あり。永続削除は一度事故ると同一セッション中は戻せず(タイル取得済みフラグは
+  // そのままなので再取得されない)、実機で検証できていない状態で回し続けるのは危険と判断し停止。
+  // 原因切り分けにはevictFarAreaPolys呼び出し前後の[mem]ログ(areaPoly evicted件数)が要るが、
+  // 未確認のまま代わりにareaPolyBudget自体を引き上げる安全側の対応に切り替えた
+  // (2026-07-16のwater 80→400と同じ理屈: 面メッシュ自体は軽いので予算を増やすだけなら安全)。
+  // evictFarAreaPolys();
   // Tile-based OSM fetch — loads roads/buildings for newly entered areas
   checkOSMTiles();
   // 遠景標高グリッドをプレイヤーに追従(遠くへジャンプしても実地形・標高が出る)

@@ -190,7 +190,10 @@ const avoidGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッ�
 // 【2026-07-17・CODE_REVIEW_20260717 P8-a】park/campusも長距離移動ですぐ尽き、
 // 「後から訪れた地域だけ公園の芝生・キャンパス地面が無い」状態になっていたため、
 // water同様400へ増枠(面メッシュ自体は軽いので負荷影響は小さい)。
-const areaPolyBudget = { park: 400, water: 400, farm: 250, campus: 400 }; // 面メッシュのドローコール予算
+// 【2026-08-01】distance based eviction(evictFarAreaPolys)を試したが「すぐにリボンだけに
+// なった」と実機報告があり無効化(above unloadFarAreaPolys呼び出し箇所参照)。回収して
+// 再利用する方式の代わりに、同じ「面メッシュは軽い」根拠でwaterをさらに増枠する安全側の対応。
+const areaPolyBudget = { park: 400, water: 1600, farm: 250, campus: 400 }; // 面メッシュのドローコール予算
 // 予算が尽きた事実を可視化する(以前は静かに回避判定のみへフォールバックし気づけなかった)。
 // 種類ごとに初回だけコンソールへ警告し、ログが埋もれないようにする。
 const _areaPolyWarned = new Set();
