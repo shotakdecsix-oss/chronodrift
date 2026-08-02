@@ -317,6 +317,13 @@ async function loadNearTerrain(centerX = 0, centerZ = 0) {
   // 【2026-07-20】森の木(plantTree/rebuildForest)も同じ理由でNEAR更新のたびに追従させる
   // (詳細はloadWideTerrain側の同種コメント参照。マップジャンプ後に木が浮いて見える不具合対策)。
   if (typeof rebuildForest === 'function') rebuildForest();
+  // 【2026-08-02】街路樹・公園木・道路小物(信号機・電柱・街灯・横断歩道)も同じ理由で
+  // 追従させる(森の木と違い個体レコードが無いため、生成時に登録したpool.resnap[idx]の
+  // うち範囲内のものだけ同期でY再計算する。rebuildBuildingsInBounds等と同じ方式。
+  // 詳細はpart1.js resnapPropsAndTreesInBounds参照)。
+  if (typeof resnapPropsAndTreesInBounds === 'function') {
+    resnapPropsAndTreesInBounds(centerX - rsHalfW, centerX + rsHalfW, centerZ - rsHalfD, centerZ + rsHalfD);
+  }
 }
 
 // プレイヤーがNEARグリッドの中心から離れたら取り直す。範囲を広げた(±4km)ぶん、

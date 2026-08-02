@@ -786,6 +786,7 @@ function _removePoolInstancesNearSeg(pool, x1, z1, x2, z2, rhw) {
     if (w !== i) {
       arr.copyWithin(w * 16, o, o + 16);
       if (col) col.copyWithin(w * 3, i * 3, i * 3 + 3);
+      if (pool.resnap) pool.resnap[w] = pool.resnap[i]; // 【2026-08-02】compactPoolと同じくresnap追跡情報も一緒に移す
     }
     w++;
   }
@@ -834,6 +835,51 @@ function processVegCleanupQueue() {
 }
 // roadRecords.push の共通化: 記録と同時に空間グリッドへ登録
 function addRoadRecord(r) { roadRecords.push(r); roadGridAdd(r); removeBuildingsOverlappingRoad(r); queueVegetationCleanup(r); }
+
+// 【2026-08-02・ユーザー報告「マップジャンプ後に木や信号機が空中に浮かんでいる」】
+// 建物(rebuildBuildingHeight)・道路(rebuildRoadsInBounds)・森の木(rebuildForest、
+// 2026-07-20対策)は、NEAR地形が更新されるたび(part6.js loadNearTerrain成功時)に
+// Y座標を再計算して追従する仕組みを持つ。だが街路樹・公園木(addTree)・道路小物
+// (信号機・電柱・街灯・横断歩道、decorateRoad/addRoad)は個体レコードを持たず
+// InstancedMeshプールへの一回限りの追記のみだったため、この追従の対象外だった。
+// マップジャンプ直後は新しい地点のNEAR地形がまだ届いておらず、getGroundY(part6.js
+// terrainY)が古い地域のNEARグリッドか、それも範囲外なら0m基準にフォールバックするため、
+// この間に配置された木・信号機等はそのままの高さで固定され、後からNEAR地形が届いても
+// 誰も再計算しないため浮いた/埋まったまま残っていた。
+//
+// 生成時にpool.resnap[idx]へ{x,z,yOff}を登録しておき(trackResnapInstance)、NEAR地形更新時
+// (part6.js)にその範囲内のインスタンスだけY座標を再サンプリングする(resnapPropsAndTreesInBounds)。
+// 【重要・キューにしなかった理由】当初は木・下草の事後清掃(queueVegetationCleanup)と同じ
+// フレーム予算キューにする案だったが、そのキューに積んだ後で別のスワップ詰め処理
+// (compactPool、または上のqueueVegetationCleanup自体)が同じプールのインデックスを
+// 動かすと、キュー内の古いidxが「別の(無関係な)インスタンス」を指してしまい、その
+// インスタンスのY座標を誤って書き換える事故になりうる(単に古いバグが残るより悪い)。
+// これを避けるため、pool.resnap配列自体をcompactPool/_removePoolInstancesNearSegの
+// スワップ詰めと同時に同期更新するようにし(該当箇所参照)、再スナップ自体もキューを介さず
+// 呼び出しの瞬間に同期実行する(rebuildBuildingsInBounds/rebuildStationsInBoundsと同じ方式。
+// 対象半径がRESNAP_HALF_M=3600mに絞られ、NEAR地形更新時のみ発火する低頻度処理なので、
+// 同期実行でも許容できると判断——道路/線路セグメント1本ごとに高頻度発火していた
+// [[project_isehara_game_vegetation_on_late_road_rail]]のケースとは負荷特性が異なる)。
+function trackResnapInstance(pool, idx, x, z, yOff) {
+  if (idx == null || idx < 0 || !pool || !pool.resnap) return; // poolAddはプール満杯時-1を返す(生成自体スキップ)
+  pool.resnap[idx] = { x, z, yOff };
+}
+function _resnapPoolInBounds(pool, x0, x1, z0, z1) {
+  if (!pool || !pool.resnap) return;
+  for (let i = 0; i < pool.n; i++) {
+    const e = pool.resnap[i];
+    if (!e || e.x < x0 || e.x > x1 || e.z < z0 || e.z > z1) continue;
+    poolSetY(pool, i, getGroundY(e.x, e.z) + e.yOff);
+  }
+}
+function resnapPropsAndTreesInBounds(x0, x1, z0, z1) {
+  _resnapPoolInBounds(treeTrunkP, x0, x1, z0, z1);
+  for (const p of treeTopPools) _resnapPoolInBounds(p, x0, x1, z0, z1);
+  _resnapPoolInBounds(signalP, x0, x1, z0, z1);
+  _resnapPoolInBounds(poleP, x0, x1, z0, z1);
+  _resnapPoolInBounds(lampP, x0, x1, z0, z1);
+  _resnapPoolInBounds(xwalkP, x0, x1, z0, z1);
+}
 // 矩形範囲にかかる可能性のある道路だけを空間ハッシュから拾う(roadRecords全件走査を避ける)
 function queryRoadGrid(x0, x1, z0, z1) {
   const gx0 = Math.floor(x0 / ROAD_CELL), gx1 = Math.floor(x1 / ROAD_CELL);

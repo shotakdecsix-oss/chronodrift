@@ -28,7 +28,9 @@ function decorateRoad(x1, z1, x2, z2, type, w, rec) {
       const t = Math.random();
       const sx = x1 + dx * t + px * (w / 2 + 1);
       const sz = z1 + dz * t + pz * (w / 2 + 1);
-      poolAdd(signalP, sx, getGroundY(sx, sz) + 0.4, sz, Math.random() * 3, 0.5, 1.6, 0.9); // 道祖神
+      // 【2026-08-02】マップジャンプ直後浮き/埋まり対策(下のsignalP/poleP/lampPと同じ理由)
+      const idx = poolAdd(signalP, sx, getGroundY(sx, sz) + 0.4, sz, Math.random() * 3, 0.5, 1.6, 0.9); // 道祖神
+      trackResnapInstance(signalP, idx, sx, sz, 0.4);
     }
     return;
   }
@@ -45,10 +47,22 @@ function decorateRoad(x1, z1, x2, z2, type, w, rec) {
     if (PROP_SIGNALS && len > 60 && Math.random() < 0.1) {
       const sx = x1 + dx * 0.5 + px * (w / 2 + 0.8), sz = z1 + dz * 0.5 + pz * (w / 2 + 0.8);
       const gy = getGroundY(sx, sz);
-      poolAdd(poleP, sx, gy + 3, sz, 0, 0.8, 0.72, 0.8);
-      poolAdd(signalP, sx - px * 1.2, gy + 5.6, sz - pz * 1.2, ry);
-      poolAdd(lampP, sx - px * 1.2, gy + 5.6, sz - pz * 1.2, ry, 0.9, 0.9, 0.9,
+      // 【2026-08-02・ユーザー報告「マップジャンプ後に信号機が空中に浮かんでいる」】
+      // ジャンプ直後は新しい地点のNEAR地形がまだ届いておらず、getGroundYが古い地域や
+      // 0m基準にフォールバックする(part6.js terrainY)。建物・道路・森の木は既にNEAR地形
+      // 更新時の再スナップ対象になっている(part6.js loadNearTerrain内)が、この道路小物
+      // (信号機・電柱・街灯)は個体レコードを持たずInstancedMeshプールのみのため対象外
+      // だった。生成位置をtrackResnapInstance(part1.js)に登録し、NEAR地形が更新される
+      // たびY座標を再計算させる(信号機・街灯の座標はsx-px*1.2等でpoleと少しずれるため、
+      // 個別にtxs/tzsとして登録する)。
+      const px1 = sx - px * 1.2, pz1 = sz - pz * 1.2;
+      const idxPole = poolAdd(poleP, sx, gy + 3, sz, 0, 0.8, 0.72, 0.8);
+      trackResnapInstance(poleP, idxPole, sx, sz, 3);
+      const idxSignal = poolAdd(signalP, px1, gy + 5.6, pz1, ry);
+      trackResnapInstance(signalP, idxSignal, px1, pz1, 5.6);
+      const idxLamp = poolAdd(lampP, px1, gy + 5.6, pz1, ry, 0.9, 0.9, 0.9,
               Math.random() < 0.6 ? 0x33ff66 : 0xff4433);
+      trackResnapInstance(lampP, idxLamp, px1, pz1, 5.6);
     }
     // 【2026-07-18・ユーザー判断で撤去】青看板・標識(ポール+看板)。街並みに不要な
     // 小物として撤去要望。signBoardPプール自体はpart2.jsに残しているが、poolAdd呼び出しを

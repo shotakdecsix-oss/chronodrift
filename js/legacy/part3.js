@@ -1198,8 +1198,11 @@ function addRoad(x1, z1, x2, z2, width, type='road', bridgeY=null) {
         nodeUse.set(k, n);
         if (n === 3 && w >= 6) {
           const cx = ex + ix * 6, cz = ez + iz * 6;
-          poolAdd(xwalkP, cx, getGroundY(cx, cz) + 0.45, cz,
+          // 【2026-08-02】マップジャンプ直後浮き/埋まり対策(part2.js addTree・part4.js
+          // decorateRoadと同じ理由、trackResnapInstanceはpart1.js)
+          const idxXwalk = poolAdd(xwalkP, cx, getGroundY(cx, cz) + 0.45, cz,
                   Math.atan2(-iz, ix) + Math.PI / 2, w - 1.8, 1, 2.6);
+          trackResnapInstance(xwalkP, idxXwalk, cx, cz, 0.45);
         }
       }
     }

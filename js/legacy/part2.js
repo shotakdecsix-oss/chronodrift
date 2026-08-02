@@ -725,7 +725,11 @@ function makePool(geo, mat, max, name) {
   m.count = 0;
   m.frustumCulled = false; // インスタンスが広域に散るため全体カリング無効(1ドローコールなので安い)
   scene.add(m);
-  const pool = { mesh: m, max, n: 0, name: name || null };
+  // 【2026-08-02】resnap: インデックスに対応する{x,z,yOff}を保持する並行配列(未追跡インスタンスは
+  // null)。マップジャンプ後の浮き/埋まり対策(trackResnapInstance、part1.js)用。
+  // compactPool(このすぐ下)がインスタンスをスワップで詰める時、この配列も同じインデックスで
+  // 一緒にスワップしないと「別のインスタンスの位置情報で誤って上書きする」事故になるため必須。
+  const pool = { mesh: m, max, n: 0, name: name || null, resnap: new Array(max).fill(null) };
   _allPools.push(pool);
   return pool;
 }
@@ -755,6 +759,7 @@ function compactPool(pool, px, pz, keep2) {
     if (w !== i) {
       arr.copyWithin(w * 16, o, o + 16);
       if (col) col.copyWithin(w * 3, i * 3, i * 3 + 3);
+      pool.resnap[w] = pool.resnap[i]; // 【2026-08-02】インスタンスと一緒にresnap追跡情報も移す
     }
     w++;
   }
@@ -926,10 +931,16 @@ function addTree(x, z, s) {
   if (MODE === 'space') return; // 宇宙: 大気が無いため植生(三角錐のクリスタル樹)は生やさない
   const gy = getGroundY(x, z);
   const top = treeTopPools[(Math.random() * treeTopPools.length) | 0]; // 色ごとの単色プールから選ぶ
-  poolAdd(treeTrunkP, x, gy + 0.8 * s, z, 0, s, s, s);
+  // 【2026-08-02・ユーザー報告「マップジャンプ後に木が空中に浮かんでいる」】森の木
+  // (plantTree/rebuildForest)は既にNEAR地形更新のたびに追従済み(2026-07-20対策)だが、
+  // この街路樹・公園木(addTree)は一回限りの配置で同じ追従が無かった。生成位置を
+  // trackResnapInstance(part1.js)に登録し、NEAR地形が更新されるたびY座標を再計算させる。
+  const idxTrunk = poolAdd(treeTrunkP, x, gy + 0.8 * s, z, 0, s, s, s);
+  trackResnapInstance(treeTrunkP, idxTrunk, x, z, 0.8 * s);
   const round = MODE === 'marchen'; // メルヘンは丸っこく
-  poolAdd(top, x, gy + 2.3 * s, z, Math.random() * 3,
+  const idxTop = poolAdd(top, x, gy + 2.3 * s, z, Math.random() * 3,
           s * (round ? 1.3 : 1), s * (round ? 0.95 : 0.9 + Math.random() * 0.5), s * (round ? 1.3 : 1));
+  trackResnapInstance(top, idxTop, x, z, 2.3 * s);
 }
 
 // ======= 空き地の下草・雑木(疎林) =======
