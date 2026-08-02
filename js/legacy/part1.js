@@ -781,17 +781,43 @@ function _removePoolInstancesNearSeg(pool, x1, z1, x2, z2, rhw) {
   if (col) m.instanceColor.needsUpdate = true;
   return removed;
 }
-function removeVegetationOverlappingRoad(r) {
+function _doRemoveVegetationOverlappingRoad(x1, z1, x2, z2, rhw) {
+  _removePoolInstancesNearSeg(treeTrunkP, x1, z1, x2, z2, rhw);
+  for (const p of treeTopPools) _removePoolInstancesNearSeg(p, x1, z1, x2, z2, rhw);
+  _removePoolInstancesNearSeg(forestTrunkP, x1, z1, x2, z2, rhw);
+  for (const p of forestLeafPools) _removePoolInstancesNearSeg(p, x1, z1, x2, z2, rhw);
+  _removePoolInstancesNearSeg(scrubP, x1, z1, x2, z2, rhw);
+}
+// 【2026-08-02修正・ユーザー報告「動きが重くなった/移動中に頻繁にフリーズする」】
+// removeBuildingsOverlappingRoad は建物側に空間グリッド(meshedBuildingGrid)があるので
+// 近傍だけを見て安いが、木・下草のプールには同種のグリッドが無く、_removePoolInstancesNearSeg
+// は毎回プール全件(最大3〜4万件×8プール)を線形走査する。当初はaddRoadRecordから道路・線路の
+// セグメント1本ごとに同期呼び出ししていたが、1タイル分のOSM応答(processTileData)は数十〜
+// 数百セグメントをforEachで一気に処理する1回の同期JS呼び出しのため、そのぶん丸ごと
+// 走査コストが掛け算されてメインスレッドが固まっていた(道路メッシュ生成が
+// pendingRoadMeshes+processRoadMeshQueueでフレーム予算制になっているのと同じ理由で、
+// これも同期実行してはいけない処理だった)。road/roadMeshキューと同じフレーム予算方式に
+// 変更し、addRoadRecordでは安いディスクリプタをキューに積むだけにする。
+const _vegCleanupQueue = [];
+function queueVegetationCleanup(r) {
   if (r.type === 'water') return; // removeBuildingsOverlappingRoadと同じ扱い(水面幅は実測ではない推定値のため)
   const rhw = (r.rw || 5) / 2 + 2; // 建物より広めの余裕(樹冠・下草の見た目の半径ぶん)
-  _removePoolInstancesNearSeg(treeTrunkP, r.x1, r.z1, r.x2, r.z2, rhw);
-  for (const p of treeTopPools) _removePoolInstancesNearSeg(p, r.x1, r.z1, r.x2, r.z2, rhw);
-  _removePoolInstancesNearSeg(forestTrunkP, r.x1, r.z1, r.x2, r.z2, rhw);
-  for (const p of forestLeafPools) _removePoolInstancesNearSeg(p, r.x1, r.z1, r.x2, r.z2, rhw);
-  _removePoolInstancesNearSeg(scrubP, r.x1, r.z1, r.x2, r.z2, rhw);
+  _vegCleanupQueue.push({ x1: r.x1, z1: r.z1, x2: r.x2, z2: r.z2, rhw });
+}
+const VEG_CLEANUP_BUDGET_MS = 4; // 1フレームあたりの上限。既存の除去(遅れて片付く)は許容、フリーズは許容しない
+function processVegCleanupQueue() {
+  if (_vegCleanupQueue.length === 0) return;
+  const t0 = performance.now();
+  let i = 0;
+  while (i < _vegCleanupQueue.length) {
+    if ((i & 3) === 0 && performance.now() - t0 > VEG_CLEANUP_BUDGET_MS) break;
+    const e = _vegCleanupQueue[i++];
+    _doRemoveVegetationOverlappingRoad(e.x1, e.z1, e.x2, e.z2, e.rhw);
+  }
+  if (i > 0) _vegCleanupQueue.splice(0, i);
 }
 // roadRecords.push の共通化: 記録と同時に空間グリッドへ登録
-function addRoadRecord(r) { roadRecords.push(r); roadGridAdd(r); removeBuildingsOverlappingRoad(r); removeVegetationOverlappingRoad(r); }
+function addRoadRecord(r) { roadRecords.push(r); roadGridAdd(r); removeBuildingsOverlappingRoad(r); queueVegetationCleanup(r); }
 // 矩形範囲にかかる可能性のある道路だけを空間ハッシュから拾う(roadRecords全件走査を避ける)
 function queryRoadGrid(x0, x1, z0, z1) {
   const gx0 = Math.floor(x0 / ROAD_CELL), gx1 = Math.floor(x1 / ROAD_CELL);

@@ -849,8 +849,19 @@ function geoOnUpdate(dt) {
     // atan2(dx,dz)で角度を出す(GPS移動ベクトル推定・WASD向き計算と同じ基準に揃える)。
     effectiveYaw = Math.atan2(Math.sin(hRad), -Math.cos(hRad));
   }
+  // 【2026-08-02修正・ユーザー報告「キャラの体向きが反対かも」】effectiveYaw(コンパス/
+  // geoTargetYaw、いずれもpart7.js)は、camYawの前方定義(-sinθ,-cosθ)に合わせた「カメラ用」
+  // の規約(Frame B)で計算されている——GEO_COMPASS_OFFSET_DEGは過去にこの規約で実機の
+  // カメラ向きを合わせ込んだ値、geoTargetYawもatan2(-dx,-dz)でcamYaw用に修正済み
+  // ([[project_isehara_game_camyaw_travel_direction_sign]])。一方player.rotation.y(体の向き)
+  // はexploreモードの向き決定式(atan2(moveX,moveZ)、符号反転なし)と同じ規約(Frame A)で
+  // なければならず、この2つはちょうど180°異なる別の値である必要がある。camYawは自由視界化
+  // (2026-08-02)によりeffectiveYawから完全に独立済みなので、ここでは体用にFrame Aへ変換
+  // (+Math.PI)してから追従させる。ミニマップの矢印(drawMinimap、part7.js)もこのFrame A
+  // 前提のMath.PI-θ式に統一済み。
   if (effectiveYaw !== null) {
-    let diff = effectiveYaw - player.rotation.y;
+    const bodyYaw = effectiveYaw + Math.PI;
+    let diff = bodyYaw - player.rotation.y;
     while (diff > Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
     player.rotation.y += diff * GEO_YAW_SMOOTH * dt;
@@ -941,6 +952,9 @@ function animate() {
     sortNewEntriesByDistanceToPlayer(pendingRoadMeshes, 0, r => ({ x: (r.x1 + r.x2) / 2, z: (r.z1 + r.z2) / 2 }));
   }
   if (!_freezeWorld) processRoadMeshQueue(); // 道路メッシュもフレーム分割(密集タイル到着時のフリーズ防止)
+  // 【2026-08-02】道路/線路が後から届いた時の木・下草の片付け(queueVegetationCleanup、part1.js)
+  // も同じ理由でフレーム予算制。addRoadRecordで積んだ分をここで少しずつ処理する。
+  if (!_freezeWorld) processVegCleanupQueue();
   // タイル取得分の建物もフレーム分割(20棟/フレーム)で生成。
   // 【重要】以前はここでNEAR地形の準備状況を一切見ていなかった。チャンク生成側
   // (processChunkQueue/chunkNearTerrainReady)だけをゲートしても、実際の建物の大半は

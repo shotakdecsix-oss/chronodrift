@@ -176,6 +176,23 @@ body {
   0%, 100% { box-shadow:var(--shadow), 0 0 0 0 rgba(47,215,255,0.55); }
   50% { box-shadow:var(--shadow), 0 0 0 6px rgba(47,215,255,0); }
 }
+/* 2026-08-02・ユーザー要望: 速度調整バーを、経路検索パネル(#mapOverlayの中、開かないと
+   見えない)ではなく通常の3D画面上に常時出す。routeSimBadgeのすぐ下に積む。
+   カメラモード切替(進行方向向き↔完全自由)も同じ小パネルにまとめる。 */
+#routeSpeedHud {
+  position:fixed; top:calc(var(--safe-top) + 140px); right:var(--safe-right);
+  border-radius:var(--hud-radius); padding:8px 12px; z-index:45;
+  width:190px; pointer-events:all; display:none; flex-direction:column; gap:6px;
+}
+#routeSpeedHud.show { display:flex; }
+#routeSpeedHud .routeSpeedRow { color:var(--text); }
+#routeCamModeBtn {
+  background:rgba(20,80,120,0.9); color:#c8ecff;
+  border:1px solid #40c0ff; border-radius:8px;
+  padding:6px 0; font-size:12px; cursor:pointer; white-space:nowrap;
+}
+#routeCamModeBtn:hover { background:rgba(30,110,160,0.95); }
+#routeCamModeBtn.active { background:rgba(139,123,255,0.45); border-color:var(--accent); }
 
 /* Touch joystick */
 #joystick {
@@ -414,6 +431,18 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
      geoFollowBadgeと同じ理由でbuttonにする(タップで即終了=ワンタッチ離脱)。 -->
 <button id="routeSimBadge" type="button" class="glass" title="タップで経路シムを終了">🚗 経路シム中</button>
 
+<!-- 2026-08-02: 速度調整バー+カメラモード切替。以前は#mapOverlay内の#routeControls
+     (地図画面を開かないと出てこない)にしかなく、3D画面を見ながら調整できなかったため
+     常時HUDへ移設(ユーザー要望)。表示条件はrouteSimBadgeと同じ(経路読み込み中は常時表示)。 -->
+<div id="routeSpeedHud" class="glass">
+  <div class="routeSpeedRow">
+    <span>速度</span>
+    <input id="routeSpeedSlider" type="range" min="2" max="40" step="1" value="10">
+    <span id="routeSpeedLabel">36 km/h</span>
+  </div>
+  <button id="routeCamModeBtn" type="button" title="視界カメラ: 進行方向向き(引っ張りで回転可)⇔完全自由を切替">🎥 進行方向</button>
+</div>
+
 <!-- 左: アイコンレール -->
 <nav id="hudRail">
   <!-- 2026-07-21: 上空視点専用の🗺(旧mapBtn)を撤去し、視点切替ボタン1つに統合(機能が
@@ -545,11 +574,8 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
       <!-- 2026-07-28: タイル生成が追いついていない間、経路シムが自動減速/停止している旨を表示
            (part10.js routeSimOnUpdate)。落ちる不具合対策として無人走行を自己制御するための表示。 -->
       <div id="routeThrottleHint" style="display:none;">⏳ 生成待ちのため減速中...</div>
-      <div class="routeSpeedRow">
-        <span>速度</span>
-        <input id="routeSpeedSlider" type="range" min="2" max="40" step="1" value="10">
-        <span id="routeSpeedLabel">36 km/h</span>
-      </div>
+      <!-- 2026-08-02: 速度スライダーは常時HUD(#routeSpeedHud、routeSimBadgeの下)へ移設済み。
+           ここには残さない(同じidの要素を2つ作らないため)。 -->
       <div class="routeControlBtnRow">
         <button id="routePlayPauseBtn">⏸ 一時停止</button>
         <button id="routeEndBtn">✕ 経路終了</button>

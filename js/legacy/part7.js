@@ -422,11 +422,14 @@ function onGeoFix(pos) {
     const dist = Math.hypot(dx, dz);
     if (dist >= GEO_HEADING_MIN_DIST) {
       // 【2026-07-28修正・ユーザー報告(経路シムで同じ症状が出て発覚)】camYawの前方ベクトルは
-      // (-sin(camYaw), -cos(camYaw))(part9.js updatePlayerCamera/exploreOnUpdate参照)。
-      // geoTargetYawはこの後camYawに反映される(geoOnUpdate)ため、実際の移動方向(dx,dz)を
-      // 向かせるには atan2(-dx, -dz) が正しい。以前のatan2(dx,dz)は180°逆(視界が進行方向と
-      // 逆向き)になっていたが、コンパスが使える端末ではこちらの分岐に来ないため気づかれずに
-      // 残っていた(GEO_COMPASS_OFFSET_DEG=180のコンパス側だけ正しく補正済みだった)。
+      // (-sin(camYaw), -cos(camYaw))(part9.js updatePlayerCamera/exploreOnUpdate参照)なので、
+      // 実際の移動方向(dx,dz)を向かせるには atan2(-dx, -dz) が正しい(このFrame Bの規約は
+      // カメラ向き計算にとって今も正しいまま)。
+      // 【2026-08-02追記】以前はgeoTargetYawがそのままcamYawにも反映されていたが、GPS追従モードの
+      // 自由視界化(geoOnUpdate、part9.js)でcamYawは完全に独立した。現在geoTargetYawは
+      // effectiveYaw経由でplayer.rotation.y(体の向き)にのみ使われ、そちらはexploreモードと
+      // 同じ規約(Frame A)が必要なため、geoOnUpdate側で+Math.PIして変換している(このFrame B
+      // の値自体は変更不要)。
       geoTargetYaw = Math.atan2(-dx, -dz);
       geoLastFixXZ = { x, z };
     }
@@ -766,16 +769,19 @@ function drawMinimap() {
   mctx.restore();
 
   // Player arrow — arrowhead points in facing direction, feathers at back
-  // 【2026-08-02修正】player.rotation.yとcamYawは同じforward定義(-sinθ,-cosθ、part9.js)を
-  // 共有しており、このワールド→キャンバス変換(toMapはx,zをそのままスケール、反転無し)では
-  // 上の視界コーンが検証済みの `-camYaw` を使っている(part9.jsの一人称カメラ修正時に
-  // 「ミニマップの視界コーン(-camYaw)と同じ基準」と確認済み)。矢印だけ`Math.PI - py2`
-  // (=-py2+180°)になっており、コーンに対して常にちょうど180°(進行方向と逆)を向く
-  // バグだった(ユーザー報告: GPS追従・経路モードでキャラ矢印が逆向き)。コーンと同じ`-py2`に統一。
+  // 【2026-08-02再修正】前回`-py2`(視界コーンの-camYawと同じ式)に統一したところ、GPS追従・
+  // 経路モードの矢印は直ったが通常モード(WASD/explore)が逆向きになった。原因は
+  // player.rotation.yがモードによって異なる符号規約で計算されていたこと:
+  // exploreは`atan2(moveX,moveZ)`(符号反転なし=Frame A)、camYawは`(-sinθ,-cosθ)`前方定義
+  // (Frame B)。この2つは別のforward規約で、`-θ`はFrame B(camYaw)には正しいがFrame A
+  // (player.rotation.y)には180°ずれる。根本修正として、GPS追従(geoOnUpdate、part9.js)・
+  // 経路シム(routeSimOnUpdate、part10.js)の体の向き計算をexploreと同じFrame Aに揃えたので、
+  // player.rotation.yは常にFrame A基準になった。ミニマップの矢印はこのFrame A用の式
+  // `Math.PI - θ`に統一する(元の式に戻した形。詳細は[[project_isehara_game_minimap_arrow_reversed]]参照)。
   const py2 = player.rotation.y;
   mctx.save();
   mctx.translate(MM/2, MM/2);
-  mctx.rotate(-py2); // tip points in movement direction (cone と同じ -θ 変換)
+  mctx.rotate(Math.PI - py2); // tip points in movement direction (Frame A: player.rotation.y用の変換)
   mctx.fillStyle = '#ff4040';
   mctx.strokeStyle = '#ffffff';
   mctx.lineWidth = 1;

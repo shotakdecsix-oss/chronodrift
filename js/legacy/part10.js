@@ -201,9 +201,15 @@ function clearRouteLine() {
 const ROUTE_QUEUE_BACKLOG_SOFT = 60;  // これを超えたら減速し始める
 const ROUTE_QUEUE_BACKLOG_HARD = 150; // これを超えたら完全停止(キューが捌けるまで進めない)
 
+// 【2026-08-02追加・ユーザー要望】視界カメラを「進行方向向き(引っ張りで回転可能)」
+// (false、既定=以前からの挙動)と「完全自由」(true、GPS追従モードの自由視界と同じ)から
+// 選べるようにする。routeCamModeBtn(下のUI配線)でトグル。
+let routeCamFreeLook = false;
+
 // ======= ModeRegistry連携: 経路シム中の毎フレーム更新 =======
 // GPS追従モード(geoOnUpdate、part9.js)と同じ考え方:ドラッグ中(mouseDown/camTouchId)は
-// camYawに触れず、離した間だけ進行方向へなめらかに戻す(指で視界を振り向ける操作を邪魔しない)。
+// camYawに触れず、離した間だけ進行方向へなめらかに戻す(指で視界を振り向ける操作を邪魔しない、
+// routeCamFreeLook=falseの時のみ)。
 function routeSimOnUpdate(dt) {
   let _throttled = false;
   if (!routePaused) {
@@ -218,18 +224,21 @@ function routeSimOnUpdate(dt) {
   }
   if (routeThrottleHintEl) routeThrottleHintEl.style.display = _throttled ? 'block' : 'none';
   const pt = advanceRouteProgress(routeProgress);
+  // 【2026-08-02修正・ユーザー報告「キャラの体向きが反対かも」】targetYaw(進行方向ベクトルから
+  // 求めた角度)はcamYawの前方定義(-sinθ,-cosθ。updatePlayerCamera/exploreOnUpdate参照)に
+  // 合わせた「カメラ用」の規約(Frame B、2026-07-28に視界の逆向きバグを直した時の式そのまま)。
+  // 一方、体(player.rotation.y)はexploreモードの向き決定式(atan2(moveX,moveZ)、符号反転なし
+  // =Frame A)と同じ規約でなければならず、この2つはちょうど180°異なる別々の値が必要
+  // (詳しい経緯はGPS追従モード側の同種修正・part9.js参照)。targetYawはカメラ用のまま残し、
+  // 体だけ別に Frame A(bodyYaw = atan2(dx,dz)、符号反転なし)で計算する。
+  let targetYaw = null;
   if (pt) {
     player.position.x = pt.x;
     player.position.z = pt.z;
     if (Math.hypot(pt.dx, pt.dz) > 0.001) {
-      // 【2026-07-28修正・ユーザー報告「視界が進行方向に対して逆」】camYaw基準の前方ベクトルは
-      // (-sin(camYaw), -cos(camYaw))(updatePlayerCamera・exploreOnUpdateのforward定義と同じ)。
-      // camYawはこの後player.rotation.yを追いかけるため、実際に(dx,dz)方向を向かせるには
-      // camYaw = atan2(-dx, -dz) でなければならない(atan2(dx,dz)のままだとちょうど180°逆になる)。
-      // GPS追従モード(geoOnUpdate、part7.js)のコンパス経路もGEO_COMPASS_OFFSET_DEG=180で
-      // 実質同じ補正を行っており、こちらは経路シム(コンパス非経由)向けに同じ補正を直接適用する。
-      const targetYaw = Math.atan2(-pt.dx, -pt.dz);
-      let diff = targetYaw - player.rotation.y;
+      targetYaw = Math.atan2(-pt.dx, -pt.dz); // カメラ用(Frame B)
+      const bodyYaw = Math.atan2(pt.dx, pt.dz); // 体用(Frame A、exploreと同じ規約)
+      let diff = bodyYaw - player.rotation.y;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
       player.rotation.y += diff * Math.min(1, dt * 6);
@@ -237,9 +246,16 @@ function routeSimOnUpdate(dt) {
   }
   player.position.y = floorHeightAt(player.position.x, player.position.z, player.position.y);
 
+  // 【2026-08-02追加】GPS追従モードと同じくQ/Eキーは常に効かせる(自由視界時の回転手段)。
+  if (keys['q']) { camYaw += dt; }
+  if (keys['e']) { camYaw -= dt; }
   const dragging = mouseDown || camTouchId !== null;
-  if (!dragging) {
-    let camDiff = player.rotation.y - camYaw;
+  // 【2026-08-02変更】以前はplayer.rotation.y(=当時はカメラと同じFrame Bだった)を追いかけて
+  // いたが、上の修正でplayer.rotation.yがFrame A(体用)に変わったため、カメラは代わりに
+  // targetYaw(Frame B、カメラ用)を直接追いかける。routeCamFreeLook=trueの間は追従自体を止め、
+  // ドラッグ/Q・Eキーだけで動く完全自由視界にする(GPS追従モードと同じ設計)。
+  if (!routeCamFreeLook && !dragging && targetYaw !== null) {
+    let camDiff = targetYaw - camYaw;
     while (camDiff > Math.PI) camDiff -= Math.PI * 2;
     while (camDiff < -Math.PI) camDiff += Math.PI * 2;
     camYaw += camDiff * Math.min(1, dt * 6);
@@ -280,6 +296,9 @@ const routeSpeedLabelEl = document.getElementById('routeSpeedLabel');
 const routePlayPauseBtnEl = document.getElementById('routePlayPauseBtn');
 const routeEndBtnEl = document.getElementById('routeEndBtn');
 const routeSimBadgeEl = document.getElementById('routeSimBadge');
+// 2026-08-02: 速度バー+カメラモード切替の常時HUD(3D画面上、routeSimBadgeの下)。
+const routeSpeedHudEl = document.getElementById('routeSpeedHud');
+const routeCamModeBtnEl = document.getElementById('routeCamModeBtn');
 
 // 出発地・目的地それぞれ「現在地」「履歴地」タップで確定した場合はここに{lat,lon,name}を保持し、
 // startRouteSimでのテキスト検索(geocodeQuery)をスキップする。手入力し直したら破棄する
@@ -350,9 +369,12 @@ if (routeBtnEl && routePanelEl) {
 }
 
 // プレイ画面に常時出す経路シム中バッジ(geoFollowBadgeと同じ考え方)。タップでワンタッチ終了できる。
+// 【2026-08-02】速度HUD(routeSpeedHudEl)もrouteSimBadgeと同じ条件(経路読み込み中は常時)で
+// 表示・非表示を連動させる。
 function updateRouteSimBadge() {
-  if (!routeSimBadgeEl) return;
   const hasRoute = routePoints.length > 0;
+  if (routeSpeedHudEl) routeSpeedHudEl.classList.toggle('show', hasRoute);
+  if (!routeSimBadgeEl) return;
   routeSimBadgeEl.classList.toggle('show', hasRoute);
   if (hasRoute) {
     const active = window.ModeRegistry && ModeRegistry.getActiveMode();
@@ -361,6 +383,17 @@ function updateRouteSimBadge() {
   }
 }
 if (routeSimBadgeEl) bindTapButton(routeSimBadgeEl, () => { if (routePoints.length > 0) endRouteSim(); });
+
+// 【2026-08-02追加・ユーザー要望】視界カメラモード(進行方向向き⇔完全自由)の切替ボタン。
+function updateRouteCamModeBtn() {
+  if (!routeCamModeBtnEl) return;
+  routeCamModeBtnEl.textContent = routeCamFreeLook ? '🎥 完全自由' : '🎥 進行方向';
+  routeCamModeBtnEl.classList.toggle('active', routeCamFreeLook);
+}
+if (routeCamModeBtnEl) {
+  bindTapButton(routeCamModeBtnEl, () => { routeCamFreeLook = !routeCamFreeLook; updateRouteCamModeBtn(); });
+  updateRouteCamModeBtn();
+}
 
 function updateRouteControlsUI() {
   const active = window.ModeRegistry && ModeRegistry.getActiveMode();
