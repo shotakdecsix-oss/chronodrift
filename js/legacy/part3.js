@@ -258,6 +258,13 @@ function drawLandmarkTower(dm, x, gy, z, kind) {
   }
 }
 
+// 【2026-08-02】校庭(yard)の平面化+向き反映をクォータニオン合成で正しく行うための使い回し
+// テンプ変数(addBuilding呼び出しのたびに新規allocしない)。_YARD_FLATTEN_Qは常に
+// ローカルX軸-90°(yard.rotation.x=-Math.PI/2と同じ回転)で固定。
+const _YARD_UP_AXIS = new THREE.Vector3(0, 1, 0);
+const _YARD_YAW_Q = new THREE.Quaternion();
+const _YARD_FLATTEN_Q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
+
 function addBuilding(x, z, w, d, h, style, isReal, rot) {
   const _origH = h; // 遠方アンロード時、再生成できるよう元のhを覚えておく(下でhを斜面ぶん延長するため)
   // 4隅+中心の地形高さを見て、最低点を基礎にし最高点まで胴体を延長。
@@ -278,6 +285,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
   // rebuildBuildingHeight() でまとめてシフトできるようにする。
   const parts = [];
   const dm = (...a) => { const m = detailMesh(...a); parts.push(m); return m; };
+  let yard = null; // 校庭(下記type==='school'で設定)。回転適用ループで特別扱いするため関数スコープに置く
 
   const type = style ? style.type : 'default';
   const floors = Math.max(1, Math.round(h / 3)); // building:levels は h に反映済み → 窓の段数に逆算
@@ -626,7 +634,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
     }
   } else if (type === 'school') {
     // 校庭(土色の広場)
-    const yard = dm(UNIT_PLANE, YARD_MAT, x, gy + 0.12, z, w + 18, d + 18, 1);
+    yard = dm(UNIT_PLANE, YARD_MAT, x, gy + 0.12, z, w + 18, d + 18, 1);
     yard.rotation.x = -Math.PI / 2;
   }
 
@@ -655,7 +663,20 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
       const dx0 = p.position.x - x, dz0 = p.position.z - z;
       p.position.x = x + dx0 * rc + dz0 * rs;
       p.position.z = z - dx0 * rs + dz0 * rc;
-      p.rotation.y += rot;
+      if (p === yard) {
+        // 【2026-08-02修正・ユーザー報告「校庭グラウンドがXZ/YZのような高さを持った面になる」】
+        // yardだけは生成時にrotation.x=-π/2(平面化)が既に設定されている唯一のpartで、
+        // 他のpartと同じ`p.rotation.y += rot`(Eulerの生成分値を直接加算)で処理すると、
+        // three.jsの既定Euler順序(XYZ、非可換)によりローカルX方向の伸びがワールドYの
+        // 高さへ漏れ、平面が傾いた/めくれ上がった見た目になっていた(建物の向きrotが
+        // ±90°に近いほど顕著)。「親GroupにrotationY=rotを付けたのと同じ変換」という
+        // このブロック本来の意図(上のコメント参照)を、この1パーツだけクォータニオン合成
+        // (平面化→ワールドY軸でrotだけ回す、の順で明示的に合成)で正しく実現する。
+        _YARD_YAW_Q.setFromAxisAngle(_YARD_UP_AXIS, rot);
+        yard.quaternion.copy(_YARD_YAW_Q).multiply(_YARD_FLATTEN_Q);
+      } else {
+        p.rotation.y += rot;
+      }
     }
   }
 
