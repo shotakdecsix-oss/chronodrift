@@ -240,6 +240,18 @@ function _commitWaterPoly(pts, holes, minX, maxX, minZ, maxZ) {
   const entry = { pts, minX, maxX, minZ, maxZ };
   minimapWaterPolys.push(entry);
   polyGridAdd(minimapWaterGrid, entry);
+  // 【2026-08-03・「橋が架かっているところと水に埋もれているところがある」の真因対策】
+  // 道路(橋)タイルと水面タイル/relationはOverpassから独立に、到着した順に処理される
+  // (処理順の保証は無い)。橋が先に処理されると、その時点ではwaterSurfaceYAtがまだ
+  // 何も見つけられないため`bridgeSegmentY`はクリアランス無しの高さで確定してしまい、
+  // 後からこの水面ポリゴンが届いても誰も橋を作り直さないため、水没したまま固定されていた
+  // (=「架かっている/埋もれている」の違いは、単にどちらが先にtileで届いたか次第だった)。
+  // 水面が確定した瞬間に、その範囲(バンクのアンカーがbboxよりわずかに外側にあるケースを
+  // 吸収するmargin付き)にかかる道路(橋を含む)を強制的に作り直させる。
+  const margin = 60;
+  if (typeof rebuildRoadsInBounds === 'function') {
+    rebuildRoadsInBounds(minX - margin, maxX + margin, minZ - margin, maxZ + margin);
+  }
 }
 function queueWaterPolyRetry(pts, holes, minX, maxX, minZ, maxZ) {
   pendingAreaWaterPolys.push({ pts, holes, minX, maxX, minZ, maxZ });
