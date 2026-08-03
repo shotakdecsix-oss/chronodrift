@@ -1013,12 +1013,19 @@ function addFireTower(x, z) {
 // SEA_Yを基準にすると、スライダーを動かした後に新しく生成される橋だけ基準がズレて
 // 混在してしまう。実標高0m基準なら地点・タイミングに関わらず常に同じ結果になる。
 const BRIDGE_MIN_CLEARANCE_M = 1.5; // 実標高0mからの最低クリアランス(実length, m)
-// 【2026-08-03・橋が水面に埋もれる不具合対策】水面(part4.js _computeWaterProfile)の水位が
-// 地形ノード最大値+マージン+単調伝播+上向きスムージングでかさ上げされるようになったため、
-// バンク2点のgetGroundYだけで補間する従来の直線が、橋がまたぐ水面より低くなり橋桁が水没して
-// 見える不具合が発生した。橋が実際にまたぐ水面の水位も見て、それより確実に高い位置に
-// 直線を底上げする(直線であることは保つ=見た目/足場判定は従来通りシンプルなまま)。
+// 【2026-08-03・橋が水面に埋もれる不具合対策 → 地面道路との段差を指摘され再修正】
+// 水面(part4.js _computeWaterProfile)の水位がかさ上げされるようになったため、バンク2点の
+// getGroundYだけで補間する従来の直線が水面より低くなり橋桁が水没する問題が起きた。
+// 最初の修正は「両端を揃って底上げ」したが、これだと橋の両端(=地面側の道路とつながる
+// 接続点)の高さが地面道路のgetGroundYと食い違い、橋と地面道路の間に段差ができてしまった
+// (今回ユーザーが指摘した症状の原因)。
+// 正しい設計: 橋の両端(f=0とf=1、実際のバンクのアンカー点)は必ず地面のgetGroundY基準の
+// ままにして地面道路と同じ高さで接続を保証し、水面をまたぐ区間(通常は橋の中間部)だけ
+// 水位クリアランスを満たすよう滑らかに(smoothstepで)立ち上げる。端から
+// BRIDGE_RAMP_FRAC(15%)の範囲は立ち上がりの助走区間とし、ちょうど端(f=0/1)では
+// 底上げ量が必ずゼロになる(=地面道路の高さと完全に一致する)ようにする。
 const BRIDGE_CLEARANCE_ABOVE_WATER_M = 2.0; // 水面から橋桁下端までの最低クリアランス(実m)
+const BRIDGE_RAMP_FRAC = 0.15; // 橋の両端から何割の区間を立ち上がりの助走に使うか
 
 // 【2026-07-21・橋対応】橋区間の両端の高さ(bridgeInfo.ax/az/bx/bzの地形高さをfracA/fracBで
 // 線形補間したもの)を求める共通ヘルパー。見た目(makeRoadGeo)と足場判定(bridgeSlopes/
@@ -1029,24 +1036,25 @@ function bridgeSegmentY(bridgeInfo) {
   // seaLevelM部分だけ外し、常に0m基準にしたもの。
   const trueSeaY = -elevBase * ELEV_SCALE;
   const floor = trueSeaY + BRIDGE_MIN_CLEARANCE_M * ELEV_SCALE;
-  let yA0 = Math.max(getGroundY(bridgeInfo.ax, bridgeInfo.az), floor);
-  let yB0 = Math.max(getGroundY(bridgeInfo.bx, bridgeInfo.bz), floor);
-  // 橋の両端・中間点で実際の水位を問い合わせ、いずれかが直線を上回っていれば
-  // 両端を揃って底上げする(直線を保つため、両端に同じだけ加算する)。
-  if (typeof waterSurfaceYAt === 'function') {
-    const midX = (bridgeInfo.ax + bridgeInfo.bx) / 2, midZ = (bridgeInfo.az + bridgeInfo.bz) / 2;
-    const clearance = BRIDGE_CLEARANCE_ABOVE_WATER_M * ELEV_SCALE;
-    let need = -Infinity;
-    for (const p of [[bridgeInfo.ax, bridgeInfo.az], [midX, midZ], [bridgeInfo.bx, bridgeInfo.bz]]) {
-      const wy = waterSurfaceYAt(p[0], p[1]);
-      if (wy != null) need = Math.max(need, wy + clearance);
-    }
-    if (need > -Infinity) {
-      if (need > yA0) yA0 = need;
-      if (need > yB0) yB0 = need;
-    }
-  }
-  return { yA: yA0 + (yB0 - yA0) * bridgeInfo.fracA, yB: yA0 + (yB0 - yA0) * bridgeInfo.fracB };
+  // yA0/yB0は「地面道路と接続する固定端」なので水位由来の底上げは一切加えない。
+  const yA0 = Math.max(getGroundY(bridgeInfo.ax, bridgeInfo.az), floor);
+  const yB0 = Math.max(getGroundY(bridgeInfo.bx, bridgeInfo.bz), floor);
+  const heightAt = (f) => {
+    const base = yA0 + (yB0 - yA0) * f;
+    if (typeof waterSurfaceYAt !== 'function') return base;
+    const x = bridgeInfo.ax + (bridgeInfo.bx - bridgeInfo.ax) * f;
+    const z = bridgeInfo.az + (bridgeInfo.bz - bridgeInfo.az) * f;
+    const wy = waterSurfaceYAt(x, z);
+    if (wy == null) return base; // 水面の外(=橋の地面側の区間)はそのまま地面基準
+    const needed = wy + BRIDGE_CLEARANCE_ABOVE_WATER_M * ELEV_SCALE;
+    if (needed <= base) return base;
+    // f=0/1ちょうどでは助走の進捗0=底上げゼロ(地面道路と完全一致)、
+    // BRIDGE_RAMP_FRAC以上離れた区間では進捗1=必要な底上げを満額適用。
+    const edgeT = Math.min(f, 1 - f) / BRIDGE_RAMP_FRAC;
+    const ease = edgeT >= 1 ? 1 : (edgeT <= 0 ? 0 : edgeT * edgeT * (3 - 2 * edgeT)); // smoothstep
+    return base + (needed - base) * ease;
+  };
+  return { yA: heightAt(bridgeInfo.fracA), yB: heightAt(bridgeInfo.fracB) };
 }
 
 // 橋(bridge=yes等)の「乗れる床」。motorwaySlopes(高速道路の桁)と全く同じ考え方で、
