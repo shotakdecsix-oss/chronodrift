@@ -426,10 +426,26 @@ function _instantiateAreaPolyMesh(entry) {
       shape.holes.push(hpath);
     }
     geo = new THREE.ShapeGeometry(shape);
+    // 【2026-08-03・ユーザー報告「川面に正しくない地面描写が混ざりこんでいる」】
+    // buildAreaPoly(このkind='flat'、現在は水面専用)は以前、輪郭の各頂点ごとに
+    // getGroundYをサンプルしていた。水面ポリゴンの頂点は間引き後のOSM輪郭点で
+    // (span>1500mの大河川ではtol=25m間引き)、広い川では頂点間隔が数十〜数百mに
+    // なる。水中には実測の水底標高データが無いため、この間隔でサンプルした
+    // getGroundYは周辺の堤防・中州・岸の起伏がそのまま漏れ込んだ値になり、頂点間を
+    // 結ぶ大きな三角形がその起伏をなぞって「川面に地面が混ざり込む」ように見えていた
+    // (buildTerrainFollowingAreaPolyのコメントにある「頂点間で浮く/埋まる」と同根の
+    // 問題で、水面は頂点間隔が特に広いため顕著だった)。水面は物理的に平坦なはずなので、
+    // 頂点ごとの追従はやめ、この輪郭の頂点群から一度だけ高さをサンプルし、下位25%点の
+    // 平均(=一番低い側、単一の外れ値に引きずられにくい)を面全体に一律適用する。
+    const _wHeights = entry.pts.map(p => getGroundY(p.x, p.z)).sort((a, b) => a - b);
+    const _wSampleN = Math.max(1, Math.ceil(_wHeights.length * 0.25));
+    let _wY = 0;
+    for (let i = 0; i < _wSampleN; i++) _wY += _wHeights[i];
+    _wY = _wY / _wSampleN + entry.yOff;
     const pos = geo.attributes.position;
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i), z = pos.getY(i); // ShapeのXY平面 → XZ平面へ
-      pos.setXYZ(i, x, getGroundY(x, z) + entry.yOff, z);
+      pos.setXYZ(i, x, _wY, z);
     }
     geo.computeVertexNormals();
   } else { // 'terrain'(buildTerrainFollowingAreaPoly)
