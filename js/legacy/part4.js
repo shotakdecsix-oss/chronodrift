@@ -426,22 +426,32 @@ function _instantiateAreaPolyMesh(entry) {
       shape.holes.push(hpath);
     }
     geo = new THREE.ShapeGeometry(shape);
-    // 【2026-08-03・ユーザー報告「川面に正しくない地面描写が混ざりこんでいる」】
-    // buildAreaPoly(このkind='flat'、現在は水面専用)は以前、輪郭の各頂点ごとに
-    // getGroundYをサンプルしていた。水面ポリゴンの頂点は間引き後のOSM輪郭点で
-    // (span>1500mの大河川ではtol=25m間引き)、広い川では頂点間隔が数十〜数百mに
-    // なる。水中には実測の水底標高データが無いため、この間隔でサンプルした
-    // getGroundYは周辺の堤防・中州・岸の起伏がそのまま漏れ込んだ値になり、頂点間を
-    // 結ぶ大きな三角形がその起伏をなぞって「川面に地面が混ざり込む」ように見えていた
-    // (buildTerrainFollowingAreaPolyのコメントにある「頂点間で浮く/埋まる」と同根の
-    // 問題で、水面は頂点間隔が特に広いため顕著だった)。水面は物理的に平坦なはずなので、
-    // 頂点ごとの追従はやめ、この輪郭の頂点群から一度だけ高さをサンプルし、下位25%点の
-    // 平均(=一番低い側、単一の外れ値に引きずられにくい)を面全体に一律適用する。
-    const _wHeights = entry.pts.map(p => getGroundY(p.x, p.z)).sort((a, b) => a - b);
-    const _wSampleN = Math.max(1, Math.ceil(_wHeights.length * 0.25));
-    let _wY = 0;
-    for (let i = 0; i < _wSampleN; i++) _wY += _wHeights[i];
-    _wY = _wY / _wSampleN + entry.yOff;
+    // 【2026-08-03再修正・ユーザー報告「まだ直っていない。地形の高さに関係なく、データ上の
+    // 川の部分は水面で塗りつぶせないか」】直前の修正(輪郭頂点の下位25%平均)は輪郭付近の
+    // 低い側に合わせただけで、輪郭から離れたポリゴン内部の地形の方が高い場合はそこだけ
+    // 地面メッシュが水面より高くなり突き出たままだった(水中には実測の水底標高データが無く、
+    // 周辺地形の起伏をそのまま引き継ぐため、内部だけ高いことがある)。「データ上で川と
+    // 判定された領域は地形の高さに関係なく必ず水面で覆う」を徹底するため、輪郭だけでなく
+    // ポリゴン内部も格子状にサンプルして最大値を取り、その少し上(entry.yOff)に水面を置く
+    // (地形が水面を突き破ることが構造的に無くなる。buildTerrainFollowingAreaPolyと同じ
+    // グリッド手法・同じ上限80セルを流用)。
+    const _wCell = 40;
+    const _wNx = Math.max(1, Math.min(80, Math.ceil((entry.maxX - entry.minX) / _wCell)));
+    const _wNz = Math.max(1, Math.min(80, Math.ceil((entry.maxZ - entry.minZ) / _wCell)));
+    let _wMaxH = -Infinity;
+    for (let j = 0; j <= _wNz; j++) {
+      const z = entry.minZ + (entry.maxZ - entry.minZ) * j / _wNz;
+      for (let i = 0; i <= _wNx; i++) {
+        const x = entry.minX + (entry.maxX - entry.minX) * i / _wNx;
+        if (!pointInPolygon(x, z, entry.pts)) continue;
+        const h = getGroundY(x, z);
+        if (h > _wMaxH) _wMaxH = h;
+      }
+    }
+    if (_wMaxH === -Infinity) { // 内部サンプルが1点も無い(細長すぎる等) → 輪郭頂点で代用
+      for (const p of entry.pts) { const h = getGroundY(p.x, p.z); if (h > _wMaxH) _wMaxH = h; }
+    }
+    const _wY = _wMaxH + entry.yOff;
     const pos = geo.attributes.position;
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i), z = pos.getY(i); // ShapeのXY平面 → XZ平面へ
