@@ -1013,6 +1013,12 @@ function addFireTower(x, z) {
 // SEA_Yを基準にすると、スライダーを動かした後に新しく生成される橋だけ基準がズレて
 // 混在してしまう。実標高0m基準なら地点・タイミングに関わらず常に同じ結果になる。
 const BRIDGE_MIN_CLEARANCE_M = 1.5; // 実標高0mからの最低クリアランス(実length, m)
+// 【2026-08-03・橋が水面に埋もれる不具合対策】水面(part4.js _computeWaterProfile)の水位が
+// 地形ノード最大値+マージン+単調伝播+上向きスムージングでかさ上げされるようになったため、
+// バンク2点のgetGroundYだけで補間する従来の直線が、橋がまたぐ水面より低くなり橋桁が水没して
+// 見える不具合が発生した。橋が実際にまたぐ水面の水位も見て、それより確実に高い位置に
+// 直線を底上げする(直線であることは保つ=見た目/足場判定は従来通りシンプルなまま)。
+const BRIDGE_CLEARANCE_ABOVE_WATER_M = 2.0; // 水面から橋桁下端までの最低クリアランス(実m)
 
 // 【2026-07-21・橋対応】橋区間の両端の高さ(bridgeInfo.ax/az/bx/bzの地形高さをfracA/fracBで
 // 線形補間したもの)を求める共通ヘルパー。見た目(makeRoadGeo)と足場判定(bridgeSlopes/
@@ -1023,8 +1029,23 @@ function bridgeSegmentY(bridgeInfo) {
   // seaLevelM部分だけ外し、常に0m基準にしたもの。
   const trueSeaY = -elevBase * ELEV_SCALE;
   const floor = trueSeaY + BRIDGE_MIN_CLEARANCE_M * ELEV_SCALE;
-  const yA0 = Math.max(getGroundY(bridgeInfo.ax, bridgeInfo.az), floor);
-  const yB0 = Math.max(getGroundY(bridgeInfo.bx, bridgeInfo.bz), floor);
+  let yA0 = Math.max(getGroundY(bridgeInfo.ax, bridgeInfo.az), floor);
+  let yB0 = Math.max(getGroundY(bridgeInfo.bx, bridgeInfo.bz), floor);
+  // 橋の両端・中間点で実際の水位を問い合わせ、いずれかが直線を上回っていれば
+  // 両端を揃って底上げする(直線を保つため、両端に同じだけ加算する)。
+  if (typeof waterSurfaceYAt === 'function') {
+    const midX = (bridgeInfo.ax + bridgeInfo.bx) / 2, midZ = (bridgeInfo.az + bridgeInfo.bz) / 2;
+    const clearance = BRIDGE_CLEARANCE_ABOVE_WATER_M * ELEV_SCALE;
+    let need = -Infinity;
+    for (const p of [[bridgeInfo.ax, bridgeInfo.az], [midX, midZ], [bridgeInfo.bx, bridgeInfo.bz]]) {
+      const wy = waterSurfaceYAt(p[0], p[1]);
+      if (wy != null) need = Math.max(need, wy + clearance);
+    }
+    if (need > -Infinity) {
+      if (need > yA0) yA0 = need;
+      if (need > yB0) yB0 = need;
+    }
+  }
   return { yA: yA0 + (yB0 - yA0) * bridgeInfo.fracA, yB: yA0 + (yB0 - yA0) * bridgeInfo.fracB };
 }
 

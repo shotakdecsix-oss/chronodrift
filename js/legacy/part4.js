@@ -488,6 +488,26 @@ function _computeWaterProfile(entry) {
   const WATER_MARGIN = 0.3; // 4隅ノード最大+この余裕を必ず超えるようにする(地形は区分線形なので辺も含めて安全)
   return { ux, uz, sMin, M: M2.map(h => h + WATER_MARGIN) };
 }
+// 【2026-08-03・橋が水面に埋もれる不具合対策】(x,z)地点にかかっている水面ポリゴンの
+// 現在の水位を返す(無ければnull)。part3.js側の橋の高さ計算(bridgeSegmentY)が、
+// 川筋の水位を無視してバンク2点のgetGroundYだけを直線補間していたため、水面側の
+// かさ上げ(_computeWaterProfileのmax+マージン+単調伝播+上向きスムージング)が
+// 橋の直線より高くなり、橋桁が水没して見える不具合が発生した。この関数で橋側から
+// 「実際にここの水位はいくつか」を問い合わせられるようにする。
+function waterSurfaceYAt(x, z) {
+  let best = null;
+  for (const e of queryPolyGrid(areaPolyGrid, x, x, z, z)) {
+    if (e.kind !== 'flat' || !e.waterProfile) continue;
+    if (x < e.minX || x > e.maxX || z < e.minZ || z > e.maxZ) continue;
+    if (!pointInPolygon(x, z, e.pts)) continue;
+    let inHole = false;
+    if (e.holes) { for (const hp of e.holes) { if (hp.length >= 4 && pointInPolygon(x, z, hp)) { inHole = true; break; } } }
+    if (inHole) continue;
+    const y = _waterYAt(e, x, z);
+    if (best === null || y > best) best = y;
+  }
+  return best;
+}
 function _waterYAt(entry, x, z) {
   const p = entry.waterProfile;
   const bf = (x * p.ux + z * p.uz - p.sMin) / WATER_BIN;
