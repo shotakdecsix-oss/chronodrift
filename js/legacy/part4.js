@@ -881,14 +881,20 @@ async function loadEdoRealData() {
 // ======= multipolygon 水面(相模川クラスの大河川) =======
 // 大きな水面はOSMでは relation(multipolygon) で表現され、outer が複数wayに
 // 分割されていることが多い。stitchRings(js/lib/pure.js)が端点一致で連結して閉リングを組み立てる。
-const seenOSMRels = new Set();
-
+// 【2026-08-03・修正(水域relationの永久ロスト対策)】以前はここ専用の`seenOSMRels`という
+// 独立したSetで重複排除しており、resetTileForRefetch(part8.js)が触る`seenOSMRelations`
+// (building relation用に既にtile帰属+un-seeの仕組みがある)とは無関係だった。そのため
+// 水域relationの面メッシュは、位置ベースのdropAreaRecordsInTile(part4.js)で一度でも
+// 消されると(相模川のような広いbboxを持つ大河川では、遠く離れたどこかのタイルが
+// staleになるだけで起きうる)、un-seeする手段が無いため二度と復活しなかった
+// (「移動するとすぐにリボンになる」報告の実体)。building relationと同じ共有Set
+// `seenOSMRelations`を使うことで、既存のtile帰属+un-see経路にそのまま乗せる。
 function processWaterRelation(el) {
   if (el.type !== 'relation' || !el.members) return;
   const tags = el.tags || {};
   if (!(tags.natural === 'water' || tags.waterway === 'riverbank' || tags.water)) return;
-  if (seenOSMRels.has(el.id)) return;
-  seenOSMRels.add(el.id);
+  if (seenOSMRelations.has(el.id)) return;
+  seenOSMRelations.add(el.id);
   const outers = el.members.filter(m => m.type === 'way' && m.role !== 'inner' && m.geometry && m.geometry.length >= 2);
   const inners = el.members.filter(m => m.type === 'way' && m.role === 'inner' && m.geometry && m.geometry.length >= 2);
   const innerRings = stitchRings(inners);

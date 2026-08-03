@@ -608,17 +608,36 @@ function processTileData(data, tileCount) {
   // 【2026-07-28】どのタイルのwayかも一緒に覚える(resetTileForRefetchで消せるようにするため)。
   // 所属タイルは要求元ではなくway自身の座標で決める(タイルをまたぐwayは代表点側に属させる)。
   data.elements.forEach(el => {
-    // relation(building/stadiumのマルチポリゴン)も所属タイルを覚えておく
+    // relation(building/stadiumのマルチポリゴン、水域のmultipolygon等)も所属タイルを覚えておく。
+    // 【2026-08-03・修正A追補】以前はbounds中心(または代表点)1つだけに帰属させていた。
+    // 相模川のような大きな水域relationは複数タイルにまたがるため、これだと「帰属タイル」
+    // 以外のタイルがstaleになって作り直されても、そのrelationの帰属を持たない
+    // resetTileForRefetchはun-seeできず、位置ベースのdropAreaRecordsInTile(part4.js)だけが
+    // 先に働いて面メッシュが消え、二度と復活しない(「移動するとすぐにリボンになる」報告の
+    // 実体、[[project_isehara_game_way_tile_attribution]]と同種のバグ)。boundsがあれば
+    // その全体がかかる全タイルへ帰属させる(way側のbbox早期脱出と同じ発想。relationは
+    // el.boundsが最初から数値min/maxなので、ノード走査は不要で軽い)。
     if (el.type === 'relation' && el.id != null && seenOSMRelations.has(el.id)) {
-      const rg = el.bounds
-        ? { lat: (el.bounds.minlat + el.bounds.maxlat) / 2, lon: (el.bounds.minlon + el.bounds.maxlon) / 2 }
-        : (el.members && el.members.find(m => m.geometry && m.geometry[0]) || {}).geometry?.[0];
-      if (rg) {
-        const rp = latLonToXZ(rg.lat, rg.lon);
-        const rk = osmTileKeyOfXZ(rp.x, rp.z);
-        let ra = tileRelations.get(rk);
-        if (!ra) { ra = []; tileRelations.set(rk, ra); }
-        ra.push(el.id);
+      if (el.bounds) {
+        const pA = latLonToXZ(el.bounds.minlat, el.bounds.minlon), pB = latLonToXZ(el.bounds.maxlat, el.bounds.maxlon);
+        const rtx0 = Math.floor(Math.min(pA.x, pB.x) / OSM_TILE_M), rtx1 = Math.floor(Math.max(pA.x, pB.x) / OSM_TILE_M);
+        const rtz0 = Math.floor(Math.min(pA.z, pB.z) / OSM_TILE_M), rtz1 = Math.floor(Math.max(pA.z, pB.z) / OSM_TILE_M);
+        for (let rtx = rtx0; rtx <= rtx1; rtx++) for (let rtz = rtz0; rtz <= rtz1; rtz++) {
+          const rk = rtx + ',' + rtz;
+          let ra = tileRelations.get(rk);
+          if (!ra) { ra = []; tileRelations.set(rk, ra); }
+          ra.push(el.id);
+        }
+      } else {
+        // フォールバック(boundsが無い場合。従来通り代表点1つ)
+        const rg = (el.members && el.members.find(m => m.geometry && m.geometry[0]) || {}).geometry?.[0];
+        if (rg) {
+          const rp = latLonToXZ(rg.lat, rg.lon);
+          const rk = osmTileKeyOfXZ(rp.x, rp.z);
+          let ra = tileRelations.get(rk);
+          if (!ra) { ra = []; tileRelations.set(rk, ra); }
+          ra.push(el.id);
+        }
       }
       return;
     }
