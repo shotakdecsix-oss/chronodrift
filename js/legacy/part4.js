@@ -410,8 +410,17 @@ const areaPolyGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハ�
 // 関数本体の中で参照する分にはランタイム(全script読み込み後)なので安全。値は200でFAR_STEPと
 // 同じ(part5.js: FAR_SIZE/FAR_SEGS = 12000/60 = 200)。
 const WATER_BIN = 200; // 地形格子と同じ解像度(意味のある平滑化半径は元データの解像度以上、という教訓)
+// 細い川では地形ノード(200m間隔)が1本もポリゴン内側に入らないビンがありうるため、
+// 輪郭からmargin以内の外側ノードも候補に含める(pointInPolygonがfalseの場合の救済)。
+function _nearPolygonBoundary(px, pz, pts, margin) {
+  const m2 = margin * margin;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    if (distSqPointToSeg(px, pz, pts[i].x, pts[i].z, pts[j].x, pts[j].z) <= m2) return true;
+  }
+  return false;
+}
 function _computeWaterProfile(entry) {
-  const { pts, minX, maxX, minZ, maxZ } = entry;
+  const { pts, holes, minX, maxX, minZ, maxZ } = entry;
   const dx = maxX - minX, dz = maxZ - minZ;
   const ux = dx >= dz ? 1 : 0, uz = dx >= dz ? 0 : 1; // bbox長辺方向を主軸とする簡易PCA代用
   let sMin = Infinity, sMax = -Infinity;
@@ -424,9 +433,25 @@ function _computeWaterProfile(entry) {
   const M = new Array(nBins + 1).fill(null);
   const i0 = Math.floor(minX / FAR_STEP) - 1, i1 = Math.ceil(maxX / FAR_STEP) + 1;
   const j0 = Math.floor(minZ / FAR_STEP) - 1, j1 = Math.ceil(maxZ / FAR_STEP) + 1;
+  // 【2026-08-03・「まだ浮いている」再報告を受けての修正】外接矩形(bbox)全体のノードを
+  // サンプルしていたのが原因だった。曲がりくねった川ではbboxが川の外側の陸地(堤防・丘・
+  // 中州の外の高台等)を広く含んでしまい、そこの高い標高が該当ビンのM[b]に混入し、
+  // 単調伝播(4)で川の非常に長い区間全体がその1点に引きずられて持ち上がっていた
+  // ——グローバル1値方式(修正2)で経験した「一番高い場所に全体を合わせる」不具合が、
+  // 主軸1次元の中でも部分的に再現していた。ポリゴン内部(HOLE_MARGIN分の余裕を持たせた
+  // 内側判定)のノードだけを候補にすることで、実際の川筋に近い標高だけを拾うようにする。
+  const NODE_MARGIN = FAR_STEP * 0.5; // 境界ぎりぎりの実ノードも拾えるよう半格子分だけ外側にも許容
+  const inAnyHole = (x, z) => {
+    if (!holes) return false;
+    for (const hp of holes) { if (hp.length >= 4 && pointInPolygon(x, z, hp)) return true; }
+    return false;
+  };
   for (let j = j0; j <= j1; j++) {
     for (let i = i0; i <= i1; i++) {
-      const s = (i * FAR_STEP) * ux + (j * FAR_STEP) * uz;
+      const nx = i * FAR_STEP, nz = j * FAR_STEP;
+      if (!pointInPolygon(nx, nz, pts) && !_nearPolygonBoundary(nx, nz, pts, NODE_MARGIN)) continue;
+      if (inAnyHole(nx, nz)) continue; // 中州(島)の標高は「水面がここまで来る必要」の根拠にしない
+      const s = nx * ux + nz * uz;
       let b = Math.floor((s - sMin) / WATER_BIN);
       if (b < 0) b = 0; if (b > nBins) b = nBins;
       const h = farNodeY(i, j);
