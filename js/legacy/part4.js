@@ -386,33 +386,142 @@ function pitchMatFor(sport) {
 // 範囲にかかるものだけ高さを再スナップする(浮き/埋まり対策。道路と同じ考え方)。
 const areaPolyMeshes = [];
 const areaPolyGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
-// 【2026-08-03 3回目修正・ユーザー報告「水面が空中に浮いている」】一律の1値(輪郭/内部の
-// 最大値、または下位パーセンタイル平均)では、川のように緩やかな高低差のある長いポリゴンで
-// 必ずどこかが破綻する——高い側に合わせれば低い場所で水面が浮き、低い側に合わせれば
-// 高い場所で地面が突き抜ける。原理的にグローバル1値では両立しない。
-// 水中には実測の水底標高データが無く、getGroundYは周辺地形の起伏をそのまま漏れ込ませる
-// ため、代わりに「小半径の局所最小値」を各点ごとにサンプルする。広域の緩やかな傾斜
-// (川の上流→下流)にはそのまま追従しつつ、孤立した1点だけの起伏ノイズ(半径WATER_SMOOTH_R
-// より狭い)は周囲の低い値に吸収される。_instantiateAreaPolyMesh(新規構築)・
-// rebuildAreaPolyMesh(NEAR地形更新時の再スナップ)の両方が必ずこれを使うこと
-// (片方だけ直すと、NEAR更新のたびにもう片方が古い計算で上書きし戻してしまう
-// ——実際に2026-08-03に一度この失敗をした)。
-const WATER_SMOOTH_R = 20;
-function _smoothGroundMinWater(x, z) {
-  const r = WATER_SMOOTH_R;
-  return Math.min(
-    getGroundY(x, z),
-    getGroundY(x + r, z), getGroundY(x - r, z),
-    getGroundY(x, z + r), getGroundY(x, z - r)
-  );
+// 【2026-08-03・Fable5相談(claude-fable5-water-surface-consult-prompt.md)の最終設計】
+// 修正1〜3(輪郭下位25%平均→内部格子max→半径20mの局所min)は全て失敗した。相談の結論:
+// 「水中に地形ノイズがある」という前提自体が誤り——地形メッシュはFAR_STEP=200m格子上の
+// 区分線形関数(part5.js farSurfaceY)なので、半径20mの平滑化は同じ三角形の内側しか
+// サンプルできず何も均せない(桁違いに小さすぎた)。また「頂点の高さ」だけ直しても、
+// 間引き後の輪郭点(間隔数十〜数百m)を結ぶ大きな三角形の"辺"が地形を切ってしまう問題
+// (0次元・2次元では解決不能)。正解は水面を「流下方向の1次元プロファイル」としてモデル化
+// すること:横断方向は完全に平ら、縦断方向にだけ地形の局所最大に応じて緩やかに変化する。
+// _computeWaterProfile(1回だけ計算しentry.waterProfileにキャッシュ)+_waterYAt(参照するだけ)
+// の2段構成にし、_instantiateAreaPolyMesh(新規構築)・rebuildAreaPolyMesh(NEAR地形更新時)の
+// 両方が必ず_waterYAtを通ること(片方だけ直すとNEAR更新のたびに上書きし戻る事故を
+// 2026-08-03に一度起こしている)。
+//
+// 1) 主軸(簡易版: bboxの長辺方向。相模川はほぼ南北なので実用上十分)
+// 2) 主軸座標sをBIN=200m(地形格子と同じ解像度)でビン分割
+// 3) 各ビンに掛かる地形格子ノード(farNodeY、200m格子の"真の自由度")のterrain値の最大M_bを取る
+// 4) 生の両端の平均を比べて「高い側」を上流とみなし、上流→下流へ累積最大を伝播
+//    (単調非増加を保証。タグに流向情報が無いため地形の高低差から推定する)
+// 5) 前後3ビンの平均で上向きにのみ均す(下げない。下げると突き抜けが復活するため)
+// 【注意】part4.jsはpart5.js(FAR_STEP定義元)より先にscriptタグで読み込まれるため、
+// トップレベルで`const WATER_BIN = FAR_STEP`のように即時評価すると読み込み時にReferenceErrorになる。
+// 関数本体の中で参照する分にはランタイム(全script読み込み後)なので安全。値は200でFAR_STEPと
+// 同じ(part5.js: FAR_SIZE/FAR_SEGS = 12000/60 = 200)。
+const WATER_BIN = 200; // 地形格子と同じ解像度(意味のある平滑化半径は元データの解像度以上、という教訓)
+function _computeWaterProfile(entry) {
+  const { pts, minX, maxX, minZ, maxZ } = entry;
+  const dx = maxX - minX, dz = maxZ - minZ;
+  const ux = dx >= dz ? 1 : 0, uz = dx >= dz ? 0 : 1; // bbox長辺方向を主軸とする簡易PCA代用
+  let sMin = Infinity, sMax = -Infinity;
+  for (const p of pts) {
+    const s = p.x * ux + p.z * uz;
+    if (s < sMin) sMin = s; if (s > sMax) sMax = s;
+  }
+  if (!(sMax > sMin)) { sMax = sMin + 1; } // 縮退(点が1点等)対策
+  const nBins = Math.max(1, Math.ceil((sMax - sMin) / WATER_BIN));
+  const M = new Array(nBins + 1).fill(null);
+  const i0 = Math.floor(minX / FAR_STEP) - 1, i1 = Math.ceil(maxX / FAR_STEP) + 1;
+  const j0 = Math.floor(minZ / FAR_STEP) - 1, j1 = Math.ceil(maxZ / FAR_STEP) + 1;
+  for (let j = j0; j <= j1; j++) {
+    for (let i = i0; i <= i1; i++) {
+      const s = (i * FAR_STEP) * ux + (j * FAR_STEP) * uz;
+      let b = Math.floor((s - sMin) / WATER_BIN);
+      if (b < 0) b = 0; if (b > nBins) b = nBins;
+      const h = farNodeY(i, j);
+      if (M[b] === null || h > M[b]) M[b] = h;
+    }
+  }
+  // ノードが1つも掛からなかったビン(細い川の格子の隙間等)は近傍から埋める
+  for (let b = 0; b <= nBins; b++) {
+    if (M[b] !== null) continue;
+    for (let d = 1; d <= nBins; d++) {
+      if (b - d >= 0 && M[b - d] !== null) { M[b] = M[b - d]; break; }
+      if (b + d <= nBins && M[b + d] !== null) { M[b] = M[b + d]; break; }
+    }
+    if (M[b] === null) M[b] = 0; // 全滅(理論上起きないはずの保険)
+  }
+  // 4) 高い側を上流とみなし、累積最大で単調非増加にする
+  const q = Math.max(1, Math.floor((nBins + 1) / 4));
+  let headAvg = 0, tailAvg = 0;
+  for (let b = 0; b < q; b++) headAvg += M[b];
+  for (let b = nBins - q + 1; b <= nBins; b++) tailAvg += M[b];
+  headAvg /= q; tailAvg /= q;
+  if (headAvg >= tailAvg) { // b=0側が上流(高い) → 下流側(b大)から上流側(b小)へ辿って伝播
+    for (let b = nBins - 1; b >= 0; b--) M[b] = Math.max(M[b], M[b + 1]);
+  } else { // b=nBins側が上流 → 上流側(b小)から下流側(b大)へ辿って伝播
+    for (let b = 1; b <= nBins; b++) M[b] = Math.max(M[b], M[b - 1]);
+  }
+  // 5) 前後3ビンの平均で上向きにのみ均す(単調性は崩さない。Math.maxなので必ずM[b]以上を維持)
+  const M2 = M.slice();
+  for (let b = 0; b <= nBins; b++) {
+    let sum = 0, cnt = 0;
+    for (let d = -3; d <= 3; d++) { const bb = b + d; if (bb >= 0 && bb <= nBins) { sum += M[bb]; cnt++; } }
+    M2[b] = Math.max(M[b], sum / cnt);
+  }
+  const WATER_MARGIN = 0.3; // 4隅ノード最大+この余裕を必ず超えるようにする(地形は区分線形なので辺も含めて安全)
+  return { ux, uz, sMin, M: M2.map(h => h + WATER_MARGIN) };
+}
+function _waterYAt(entry, x, z) {
+  const p = entry.waterProfile;
+  const bf = (x * p.ux + z * p.uz - p.sMin) / WATER_BIN;
+  const n = p.M.length;
+  let b0 = Math.floor(bf);
+  if (b0 < 0) b0 = 0;
+  if (b0 > n - 2) b0 = Math.max(0, n - 2);
+  const t = n <= 1 ? 0 : Math.min(1, Math.max(0, bf - b0));
+  const m0 = p.M[b0], m1 = p.M[Math.min(n - 1, b0 + 1)];
+  return m0 + (m1 - m0) * t + entry.yOff;
+}
+// 【2026-08-03】辺(弦)が地形を切って「地面が混ざり込む」のを防ぐため、最長辺がMAX_EDGE以下に
+// なるまで三角形を1→4の中点分割で再帰的に細分する。中点は辺キー("小さい方の頂点index_大きい方")
+// でキャッシュし、隣接三角形と必ず同じ中点頂点を共有する(共有しないとT-junction=筋状の隙間ができる)。
+function subdivideTriangles(verts2D, idx, maxEdge) {
+  const maxEdge2 = maxEdge * maxEdge;
+  const midCache = new Map();
+  const vx = i => verts2D[i * 2], vz = i => verts2D[i * 2 + 1];
+  const edgeLen2 = (a, b) => { const dx = vx(a) - vx(b), dz = vz(a) - vz(b); return dx * dx + dz * dz; };
+  function midpoint(a, b) {
+    const key = a < b ? a + '_' + b : b + '_' + a;
+    let m = midCache.get(key);
+    if (m != null) return m;
+    m = verts2D.length / 2;
+    verts2D.push((vx(a) + vx(b)) / 2, (vz(a) + vz(b)) / 2);
+    midCache.set(key, m);
+    return m;
+  }
+  let tris = [];
+  for (let i = 0; i < idx.length; i += 3) tris.push([idx[i], idx[i + 1], idx[i + 2]]);
+  let guard = 0, changed = true;
+  while (changed && guard++ < 12) { // 1周ごとに最長辺は概ね半減するので12周もあれば十分すぎる安全弁
+    changed = false;
+    const next = [];
+    for (const [a, b, c] of tris) {
+      if (Math.max(edgeLen2(a, b), edgeLen2(b, c), edgeLen2(c, a)) <= maxEdge2) { next.push([a, b, c]); continue; }
+      changed = true;
+      const mAB = midpoint(a, b), mBC = midpoint(b, c), mCA = midpoint(c, a);
+      next.push([a, mAB, mCA], [mAB, b, mBC], [mCA, mBC, c], [mAB, mBC, mCA]);
+    }
+    tris = next;
+  }
+  const outIdx = [];
+  for (const [a, b, c] of tris) outIdx.push(a, b, c);
+  return outIdx;
 }
 function rebuildAreaPolyMesh(entry) {
   if (!entry.mesh) return; // 遠方でGPU解放済み(unloadFarAreaPolys参照)。再接近時に自然と再構築される
   const pos = entry.mesh.geometry.attributes.position;
-  const heightAt = entry.kind === 'flat' ? _smoothGroundMinWater : getGroundY;
-  for (let i = 0; i < pos.count; i++) {
-    const x = pos.getX(i), z = pos.getZ(i); // Y(高さ)だけ書き換えるのでX/Zはそのまま読める
-    pos.setY(i, heightAt(x, z) + entry.yOff);
+  if (entry.kind === 'flat') {
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i), z = pos.getZ(i);
+      pos.setY(i, _waterYAt(entry, x, z)); // yOffは_waterYAt内で加算済み
+    }
+  } else {
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i), z = pos.getZ(i); // Y(高さ)だけ書き換えるのでX/Zはそのまま読める
+      pos.setY(i, getGroundY(x, z) + entry.yOff);
+    }
   }
   pos.needsUpdate = true;
   entry.mesh.geometry.computeVertexNormals();
@@ -436,44 +545,41 @@ function rebuildAreaPolysInBounds(x0, x1, z0, z1) {
 function _instantiateAreaPolyMesh(entry) {
   let geo;
   if (entry.kind === 'flat') {
-    // 【2026-08-03 3回目修正】水面はShapeGeometry(輪郭の頂点だけで三角形分割)をやめ、
-    // 'terrain'分岐と同じ格子分割+頂点ごとの高さ追従に統一する(輪郭点は間引き後で
-    // 間隔が広く、その間を大きな三角形で結ぶと地形の起伏をそのまま拾ってしまうため)。
-    // 高さは_smoothGroundMinWater(このファイル上部)で局所ノイズを均しつつ広域の
-    // 緩やかな傾斜には追従する。holesはpointInPolygonで格子点ごとに除外する
-    // (ShapeGeometryのようなネイティブのhole三角形分割が無いための代替)。
-    const { minX, maxX, minZ, maxZ, pts, holes, yOff } = entry;
-    const cellSize = 40;
-    const nx = Math.max(1, Math.min(80, Math.ceil((maxX - minX) / cellSize)));
-    const nz = Math.max(1, Math.min(80, Math.ceil((maxZ - minZ) / cellSize)));
-    const verts = [], uvs = [], idx = [];
-    const grid = [];
-    const inAnyHole = (x, z) => {
-      if (!holes) return false;
-      for (const hp of holes) { if (hp.length >= 4 && pointInPolygon(x, z, hp)) return true; }
-      return false;
-    };
-    for (let j = 0; j <= nz; j++) {
-      const row = [];
-      for (let i = 0; i <= nx; i++) {
-        const x = minX + (maxX - minX) * i / nx;
-        const z = minZ + (maxZ - minZ) * j / nz;
-        if (!pointInPolygon(x, z, pts) || inAnyHole(x, z)) { row.push(-1); continue; }
-        row.push(verts.length / 3);
-        verts.push(x, _smoothGroundMinWater(x, z) + yOff, z);
-        uvs.push(x, z);
+    // 【2026-08-03 Fable5相談・4回目修正】格子分割(3回目修正)は輪郭を軸並行の四角形で
+    // 近似してしまい「川の形が四角」という新たな不具合を生んだため撤回。ShapeGeometry
+    // (OSM輪郭pts/holesをそのまま使う=ネイティブhole対応込み)に戻し、代わりに
+    // 「辺(弦)が地形を切る」問題をsubdivideTriangles(このファイル上部)による
+    // 最長辺100m以下への再分割で解決する。高さは_waterYAt(entry.waterProfileを参照するだけ、
+    // buildAreaPolyでentry生成時に1回だけ計算済み)を使う。
+    const { pts, holes, yOff } = entry;
+    const shape = new THREE.Shape(pts.map(p => new THREE.Vector2(p.x, p.z)));
+    if (holes) {
+      for (const hp of holes) {
+        if (hp.length >= 4) shape.holes.push(new THREE.Path(hp.map(p => new THREE.Vector2(p.x, p.z))));
       }
-      grid.push(row);
     }
-    for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
-      const a = grid[j][i], b = grid[j][i + 1], c = grid[j + 1][i + 1], d = grid[j + 1][i];
-      if (a < 0 || b < 0 || c < 0 || d < 0) continue; // 境界セル(ポリゴン外/hole内の頂点を含む)は張らない
-      idx.push(a, b, c, a, c, d);
+    const shapeGeo = new THREE.ShapeGeometry(shape);
+    const srcPos = shapeGeo.attributes.position;
+    const srcUv = shapeGeo.attributes.uv;
+    const verts2D = []; // [x0,z0, x1,z1, ...] (Y抜きの平面座標。高さは後でsubdivide後の頂点にまとめて計算する)
+    const uvs2D = [];
+    for (let i = 0; i < srcPos.count; i++) { verts2D.push(srcPos.getX(i), srcPos.getY(i)); uvs2D.push(srcUv.getX(i), srcUv.getY(i)); }
+    let idx = shapeGeo.index ? Array.from(shapeGeo.index.array) : null;
+    if (!idx || idx.length === 0) return false; // 退化ポリゴン(自己交差/点不足等)は諦める
+    idx = subdivideTriangles(verts2D, idx, 100);
+    // subdivideTrianglesがverts2Dに中点を追加している可能性があるのでuvsも同じ規則で追い付かせる
+    for (let i = uvs2D.length / 2; i < verts2D.length / 2; i++) { uvs2D.push(verts2D[i * 2], verts2D[i * 2 + 1]); }
+    const nVerts = verts2D.length / 2;
+    const verts = new Float32Array(nVerts * 3);
+    for (let i = 0; i < nVerts; i++) {
+      const x = verts2D[i * 2], z = verts2D[i * 2 + 1];
+      verts[i * 3] = x;
+      verts[i * 3 + 1] = _waterYAt(entry, x, z);
+      verts[i * 3 + 2] = z;
     }
-    if (idx.length === 0) return false; // 細すぎる/境界だけのポリゴンはフォールバックなしで諦める
     geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
-    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs2D, 2));
     geo.setIndex(idx);
     geo.computeVertexNormals();
   } else { // 'terrain'(buildTerrainFollowingAreaPoly)
@@ -520,9 +626,10 @@ function buildAreaPoly(pts, mat, yOff, holes) {
   // 再構築できるようにするため(道路のrebuildRoadMesh/unloadFarRoadsと同じ考え方。
   // CODE_REVIEW_20260717 P8: 以前はここで一度作ったら二度と解放されなかった)。
   const entry = { mesh: null, kind: 'flat', areaKind: areaPolyTakePendingKind(), pts, holes, mat, yOff, minX, maxX, minZ, maxZ };
-  // 【2026-08-03 3回目修正】flat分岐が格子分割になり、buildTerrainFollowingAreaPolyと同じく
-  // 「細すぎて格子点が1つも入らない」失敗がありうるようになったため、戻り値を見て予算を返す
-  // (以前はShapeGeometryが常に何か作れる前提で戻り値を無視していた)。
+  // 【2026-08-03】高さは1回だけ計算してentryにキャッシュする(_instantiateAreaPolyMesh/
+  // rebuildAreaPolyMeshの両方が_waterYAt経由でこれを参照するだけにし、二重実装による
+  // 「片方だけ直した」事故を構造的に防ぐ)。
+  entry.waterProfile = _computeWaterProfile(entry);
   if (!_instantiateAreaPolyMesh(entry)) { areaPolyRefund(entry.areaKind); return; }
   areaPolyMeshes.push(entry);
   polyGridAdd(areaPolyGrid, entry);
@@ -946,6 +1053,13 @@ function processWaterRelation(el) {
   const inners = el.members.filter(m => m.type === 'way' && m.role === 'inner' && m.geometry && m.geometry.length >= 2);
   const innerRings = stitchRings(inners);
   for (const ring of stitchRings(outers)) {
+    // 【2026-08-03 Fable5相談 手順1(診断)】stitchRingsはリングが閉じなかった場合
+    // (if (found < 0) break;)、警告もフラグも返さず開いたまま返す。THREE.Shapeはこれを
+    // 暗黙に直線で閉じてしまい、大河川では数km級の直線がポリゴンを斜めに横切りうる
+    // ——形状の歪みが「輪郭の縫い合わせ」由来か切り分けるためのログ。
+    if (ring.length >= 2 && !_llEq(ring[0], ring[ring.length - 1])) {
+      console.warn('[water] outer ring not closed after stitchRings:', ring.length, 'pts, relation', el.id);
+    }
     let pts = ring.map(g => latLonToXZ(g.lat, g.lon));
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
     pts.forEach(p => { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); });
