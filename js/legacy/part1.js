@@ -1073,6 +1073,10 @@ let worldPosSettled = false;
 // 際限なく積み上がって逆にクラッシュを早める。15秒経ったら位置は確定したものとみなす。
 setTimeout(() => { worldPosSettled = true; }, 15000);
 const pendingRoadMeshes = [];
+// 【2026-08-03・診断計器】遠方判定で「作り直し待ち(_dirty)」のまま握りつぶされた回数。
+// _commitWaterPoly直後にこれが跳ね上がれば「再キューは発火しているのに距離チェックで
+// 消えている」ことの直接証拠になる(IMPL_PROMPT_20260803_BRIDGE_WATER.md 5章の計器)。
+let _bridgeDirtyDropped = 0;
 function queueRoadMesh(r) {
   if (r._q || r._dropped) return; // 二重投入防止 / 距離破棄済みレコード(evictFarRoads参照)は作らない
   r._q = true;
@@ -1111,7 +1115,15 @@ function processRoadMeshQueue() {
     // 高架(motorway)は逆にunloadFarRoadsと同じMOTORWAY_UNLOAD_DIST(長め)を使う。
     const _rlim2 = r.type === 'motorway' ? MOTORWAY_UNLOAD_DIST * MOTORWAY_UNLOAD_DIST
       : isMinorRoadType(r.type) ? MINOR_ROAD_MESH_DIST * MINOR_ROAD_MESH_DIST : lim2;
-    if (mx * mx + mz * mz > _rlim2) { r._dirty = false; continue; }
+    // 【2026-08-03・橋の水没不具合の決定打を修正】以前はここで`r._dirty = false`を書いていた。
+    // 「今は遠いので作らない」という距離都合の見送りを、「もう作り直す必要はない」という
+    // 恒久的な判断に書き換えてしまっていた。水面が先読みで先に届き、その後`_commitWaterPoly`が
+    // 遠方の橋を`_dirty=true`にして再キューしても、ここで即座にfalseへ戻されて握りつぶされ、
+    // プレイヤーが近づいても`if (r.mesh && !r._dirty) continue;`で永久にスキップされていた
+    // (=「捨てる/見送る」と「もう不要」を混同した典型例。IMPL_PROMPT_20260803_BRIDGE_WATER.md
+    // 大原則13「今はやらないをやらなくてよいに変換しない」)。_dirtyは絶対に落とさず、
+    // 範囲内に戻ってきた時にunloadFarRoads側が拾い直す(下記の対応する修正を参照)。
+    if (mx * mx + mz * mz > _rlim2) { if (r._dirty) _bridgeDirtyDropped++; continue; }
     if (r.mesh && !r._dirty) continue; // 既に構築済みで地形も変わっていない
     rebuildRoadMesh(r);
     r._dirty = false;
@@ -1205,7 +1217,12 @@ function unloadFarRoads(force) {
     // 【2026-07-16】範囲内なのにメッシュが無い道路はここで再キューして復元する。
     // 以前はチャンク再生成(960m)頼みだったため、細街路の保持距離(1100m)との間に
     // 「再接近しても細い道路が生成されない帯」ができていた(実機報告)。
-    if (!r.mesh) {
+    // 【2026-08-03追加】メッシュは既にあるが`_dirty=true`(=作り直し待ちのまま距離チェックで
+    // 握りつぶされていた。processRoadMeshQueue参照)の道路も、範囲内に戻ってきたタイミングで
+    // ここで拾い直す。これが無いと「橋が水面より先に構築され、後から水面が届いて
+    // _dirty=trueになったのに、遠方だったせいで永久に反映されない」不具合の対になる修正
+    // (IMPL_PROMPT_20260803_BRIDGE_WATER.md M1)。
+    if (!r.mesh || r._dirty) {
       if (dd <= lim2r) queueRoadMesh(r);
       continue;
     }

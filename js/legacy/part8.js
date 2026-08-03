@@ -434,7 +434,14 @@ function processTileData(data, tileCount) {
         if (isBridge && bridgeTotalLen > 0.01) {
           bridgeY = {
             ax: bridgeAx, az: bridgeAz, bx: bridgeBx, bz: bridgeBz,
-            fracA: bridgeCum[i] / bridgeTotalLen, fracB: bridgeCum[i+1] / bridgeTotalLen
+            fracA: bridgeCum[i] / bridgeTotalLen, fracB: bridgeCum[i+1] / bridgeTotalLen,
+            // 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER.md 4-4対応】このセグメントの
+            // 実座標。以前はbridgeSegmentYがax/az-bx/bz(橋全体の入口・出口2点)を結ぶ直線上の
+            // 位置をfracA/fracBから逆算して水位を問い合わせていたが、橋がカーブしていると
+            // 実際の経路から外れた位置をサンプルしてしまい、本当は水面の真上でも
+            // waterSurfaceYAtがnullを返す(=クリアランス無しになる)区間が生じていた。
+            // 実座標を直接渡せばこの直線近似が丸ごと不要になる。
+            sx: a.x, sz: a.z, ex: b.x, ez: b.z
           };
         }
         addRoad(a.x, a.z, b.x, b.z, width, type, bridgeY, el.id);

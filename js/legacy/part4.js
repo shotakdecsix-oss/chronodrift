@@ -431,7 +431,23 @@ function _nearPolygonBoundary(px, pz, pts, margin) {
   }
   return false;
 }
-function _computeWaterProfile(entry) {
+// 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER.md M2対応】以前は_computeWaterProfileが
+// entry生成時に1回だけ呼ばれ、entry.waterProfileに永久固定されていた。水面ポリゴンは
+// プレイヤーからまだ3km近く離れた「先読み」の段階で届くことが多く、その時点ではNEAR
+// (540m格子)がまだそこを覆っておらず、farNodeYはWIDE(約1km格子。川の谷を潰してしまう
+// 粗い格子)を返す。そのため水位が実際よりかなり高い値で凍結され、プレイヤーが近づいて
+// NEAR地形が正しく届いても、水面側だけ古い(高すぎる)値に取り残されていた
+// ——「_instantiateAreaPolyMesh/rebuildAreaPolyMeshの両方が_waterYAtを通ること」で
+// 二重実装は防いだはずが、「_waterYAtが参照するプロファイル自体を更新する経路が無い」
+// という別の穴が残っていた(大原則14「キャッシュした派生値には無効化のトリガーを対で
+// 設計する」)。
+//
+// 対策: ポリゴン内外判定(pointInPolygon、輪郭が数百点ある大河川では重い)は地形が変わっても
+// 結果が変わらないため、「採用したノード(i,j,bin)」のリストだけ初回にentry.waterNodeInfoへ
+// キャッシュし、以後の再計算(NEAR地形更新のたびに呼ばれるrebuildAreaPolyMesh)は
+// キャッシュ済みノードのfarNodeY(i,j)を読み直すだけ(_computeWaterProfileFromNodes)にする。
+// これでポリゴン内外判定という重い部分を毎回やらずに、地形の更新だけ安く反映できる。
+function _collectWaterNodes(entry) {
   const { pts, holes, minX, maxX, minZ, maxZ } = entry;
   const dx = maxX - minX, dz = maxZ - minZ;
   const ux = dx >= dz ? 1 : 0, uz = dx >= dz ? 0 : 1; // bbox長辺方向を主軸とする簡易PCA代用
@@ -442,7 +458,6 @@ function _computeWaterProfile(entry) {
   }
   if (!(sMax > sMin)) { sMax = sMin + 1; } // 縮退(点が1点等)対策
   const nBins = Math.max(1, Math.ceil((sMax - sMin) / WATER_BIN));
-  const M = new Array(nBins + 1).fill(null);
   const i0 = Math.floor(minX / FAR_STEP) - 1, i1 = Math.ceil(maxX / FAR_STEP) + 1;
   const j0 = Math.floor(minZ / FAR_STEP) - 1, j1 = Math.ceil(maxZ / FAR_STEP) + 1;
   // 【2026-08-03・「まだ浮いている」再報告を受けての修正】外接矩形(bbox)全体のノードを
@@ -458,6 +473,7 @@ function _computeWaterProfile(entry) {
     for (const hp of holes) { if (hp.length >= 4 && pointInPolygon(x, z, hp)) return true; }
     return false;
   };
+  const nodes = []; // フラット配列 [i0,j0,b0, i1,j1,b1, ...] (オブジェクト配列よりGC負荷が軽い)
   for (let j = j0; j <= j1; j++) {
     for (let i = i0; i <= i1; i++) {
       const nx = i * FAR_STEP, nz = j * FAR_STEP;
@@ -466,9 +482,18 @@ function _computeWaterProfile(entry) {
       const s = nx * ux + nz * uz;
       let b = Math.floor((s - sMin) / WATER_BIN);
       if (b < 0) b = 0; if (b > nBins) b = nBins;
-      const h = farNodeY(i, j);
-      if (M[b] === null || h > M[b]) M[b] = h;
+      nodes.push(i, j, b);
     }
+  }
+  return { ux, uz, sMin, nBins, nodes };
+}
+function _computeWaterProfileFromNodes(nodeInfo) {
+  const { ux, uz, sMin, nBins, nodes } = nodeInfo;
+  const M = new Array(nBins + 1).fill(null);
+  for (let k = 0; k < nodes.length; k += 3) {
+    const i = nodes[k], j = nodes[k + 1], b = nodes[k + 2];
+    const h = farNodeY(i, j); // ここを毎回読み直すことで、地形(NEAR到達)の更新を反映する
+    if (M[b] === null || h > M[b]) M[b] = h;
   }
   // ノードが1つも掛からなかったビン(細い川の格子の隙間等)は近傍から埋める
   for (let b = 0; b <= nBins; b++) {
@@ -499,6 +524,36 @@ function _computeWaterProfile(entry) {
   }
   const WATER_MARGIN = 0.3; // 4隅ノード最大+この余裕を必ず超えるようにする(地形は区分線形なので辺も含めて安全)
   return { ux, uz, sMin, M: M2.map(h => h + WATER_MARGIN) };
+}
+// entry生成時の初回呼び出し専用。ノード収集(重い)を1回だけ行い、結果をentry.waterNodeInfoに
+// キャッシュできるよう呼び出し元(buildAreaPoly)に返す。以後の再計算は
+// _computeWaterProfileFromNodes(entry.waterNodeInfo)を直接呼ぶこと。
+// 【診断計器・IMPL_PROMPT_20260803_BRIDGE_WATER.md 5章】このentryのbbox中心がNEAR(高解像度
+// 地形グリッド)に覆われているか。覆われていないのにプロファイルを計算すると、WIDE(粗い
+// 格子)由来の高すぎる値で固定されうる(M2の症状そのもの)。診断ログ専用の軽量判定で、
+// 実際の高さ計算(farNodeY)には使わない。
+function _isNearCoverage(x, z) {
+  if (typeof nearCX === 'undefined' || typeof NEAR_W === 'undefined') return null;
+  return Math.abs(x - nearCX) <= NEAR_W / 2 && Math.abs(z - nearCZ) <= NEAR_D / 2;
+}
+function _computeWaterProfile(entry) {
+  entry.waterNodeInfo = _collectWaterNodes(entry);
+  const profile = _computeWaterProfileFromNodes(entry.waterNodeInfo);
+  const cx = (entry.minX + entry.maxX) / 2, cz = (entry.minZ + entry.maxZ) / 2;
+  const near = _isNearCoverage(cx, cz);
+  console.log('[water] profile bins=' + profile.M.length +
+    ' min=' + Math.min(...profile.M).toFixed(1) + ' max=' + Math.max(...profile.M).toFixed(1) +
+    ' near=' + (near === null ? '?' : (near ? 'yes' : 'NO')));
+  return profile;
+}
+// 【診断計器】水面プロファイルの再計算結果が(NEAR地形の到達等で)実質的に変わったかどうか。
+// 変わっていれば、その範囲の道路(=橋)を作り直させる必要がある(下のrebuildAreaPolyMesh参照)。
+function _waterProfileChanged(a, b, thresholdM) {
+  if (!a || !b || !a.M || !b.M || a.M.length !== b.M.length) return true;
+  for (let i = 0; i < a.M.length; i++) {
+    if (Math.abs(a.M[i] - b.M[i]) > thresholdM) return true;
+  }
+  return false;
 }
 // 【2026-08-03・橋が水面に埋もれる不具合対策】(x,z)地点にかかっている水面ポリゴンの
 // 現在の水位を返す(無ければnull)。part3.js側の橋の高さ計算(bridgeSegmentY)が、
@@ -570,6 +625,20 @@ function rebuildAreaPolyMesh(entry) {
   if (!entry.mesh) return; // 遠方でGPU解放済み(unloadFarAreaPolys参照)。再接近時に自然と再構築される
   const pos = entry.mesh.geometry.attributes.position;
   if (entry.kind === 'flat') {
+    // 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER.md M2対応】NEAR地形が新しく届くたびに
+    // プロファイルを安価に(キャッシュ済みノードのfarNodeY再読込だけで)再計算する。
+    // 生成時にWIDE(粗い格子)で凍結された高すぎる水位が、NEAR到達後に正しい値へ更新される。
+    if (entry.waterNodeInfo) {
+      const before = entry.waterProfile;
+      entry.waterProfile = _computeWaterProfileFromNodes(entry.waterNodeInfo);
+      // 水位が実質的に変わった(=橋の高さ計算がその時点の値で凍結されている可能性がある)場合、
+      // この水面にかかる道路(橋を含む)を作り直させる。_commitWaterPoly初回コミット時の
+      // rebuildRoadsInBoundsと同じ理屈だが、こちらは「後から水位そのものが動いた」場合を拾う。
+      if (_waterProfileChanged(before, entry.waterProfile, 0.2) && typeof rebuildRoadsInBounds === 'function') {
+        const m = 60;
+        rebuildRoadsInBounds(entry.minX - m, entry.maxX + m, entry.minZ - m, entry.maxZ + m);
+      }
+    }
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i), z = pos.getZ(i);
       pos.setY(i, _waterYAt(entry, x, z)); // yOffは_waterYAt内で加算済み

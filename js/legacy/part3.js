@@ -903,6 +903,23 @@ function makeMotorwayGeo(x1, z1, x2, z2) {
 // その場のx,zに応じた高さをその都度計算する(=段差が原理的に発生しない、なめらかな斜面)。
 // wouldCollide(横移動のブロック)には一切登録しない(floorHeightAtだけが参照する)。
 const motorwaySlopes = [];
+// 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER.md 4-5対応(最後の穴埋め)】motorwayは
+// isBridge判定から明示的に除外され(part8.js: `type !== 'motorway'`)、bridgeSegmentYの
+// 水位対応を一切受けていなかった。常時「その場のgetGroundYにMWY_H固定オフセット」だけで
+// 空中に浮くため、水面が地形よりかさ上げされた場合にそのオフセットを超えて水没しうる
+// 構造的な穴だった。高架は「橋脚なしで常に空中に浮く」設計(見た目上ほぼ水平)なので、
+// bridgeSegmentYのようなsmoothstepランプではなく、2端点のうち必要な方に合わせて
+// 一律にmaxを取る(=このway区間全体を水平に近いまま底上げする。急な折れを作らない)。
+function _motorwayWaterLift(x1, z1, x2, z2) {
+  if (typeof waterSurfaceYAt !== 'function') return null;
+  const clearance = BRIDGE_CLEARANCE_ABOVE_WATER_M * ELEV_SCALE;
+  let need = -Infinity;
+  for (const p of [[x1, z1], [x2, z2]]) {
+    const wy = waterSurfaceYAt(p[0], p[1]);
+    if (wy != null) need = Math.max(need, wy + clearance);
+  }
+  return need > -Infinity ? need : null;
+}
 function rebuildMotorwayMesh(r) {
   if (!r.mesh) return;
   const geo = makeMotorwayGeo(r.x1, r.z1, r.x2, r.z2);
@@ -910,8 +927,10 @@ function rebuildMotorwayMesh(r) {
   r.mesh.geometry.dispose();
   r.mesh.geometry = geo;
   if (r.slope) {
-    r.slope.y1 = getGroundY(r.x1, r.z1) + MWY_H;
-    r.slope.y2 = getGroundY(r.x2, r.z2) + MWY_H;
+    let y1 = getGroundY(r.x1, r.z1) + MWY_H, y2 = getGroundY(r.x2, r.z2) + MWY_H;
+    const need = _motorwayWaterLift(r.x1, r.z1, r.x2, r.z2);
+    if (need != null) { if (need > y1) y1 = need; if (need > y2) y2 = need; }
+    r.slope.y1 = y1; r.slope.y2 = y2;
   }
   // 橋脚(見た目・当たり判定とも)は挙動が不安定だったため廃止。高速道路は橋脚なしで空中に浮く形で表示する。
 }
@@ -932,7 +951,9 @@ function addMotorway(x1, z1, x2, z2, wayId=null) {
   // 高速道路は橋脚なしで空中に浮く形で表示する。
   // 桁上の「乗れる床」は見た目(makeMotorwayGeo)と全く同じ2端点の直線補間の斜面として持つ
   // (Box3の積み重ねではないので、登り坂でも段差・ガタつきが原理的に発生しない)。
-  const y1 = getGroundY(x1, z1) + MWY_H, y2 = getGroundY(x2, z2) + MWY_H;
+  let y1 = getGroundY(x1, z1) + MWY_H, y2 = getGroundY(x2, z2) + MWY_H;
+  const need = _motorwayWaterLift(x1, z1, x2, z2);
+  if (need != null) { if (need > y1) y1 = need; if (need > y2) y2 = need; }
   const slope = { x1, z1, y1, x2, z2, y2, nx, nz, len, hw: hw2 };
   motorwaySlopes.push(slope);
   // mesh・斜面の座標を記録し、NEAR地形更新時に桁と当たり判定を一緒に
@@ -1026,35 +1047,62 @@ const BRIDGE_MIN_CLEARANCE_M = 1.5; // 実標高0mからの最低クリアラン
 // 底上げ量が必ずゼロになる(=地面道路の高さと完全に一致する)ようにする。
 const BRIDGE_CLEARANCE_ABOVE_WATER_M = 2.0; // 水面から橋桁下端までの最低クリアランス(実m)
 const BRIDGE_RAMP_FRAC = 0.15; // 橋の両端から何割の区間を立ち上がりの助走に使うか
+// 【2026-08-03・診断計器】橋の中央付近(f=0.3〜0.7)なのにwaterSurfaceYAtがnullを返した回数。
+// 増え続けるなら「本当は水面の真上なのに水面ポリゴンが見つかっていない」ケース
+// (直線近似のズレ・水面ポリゴン未コミット等、疑い3/4)が実在する証拠になる。
+let _bridgeMidNoWater = 0;
 
 // 【2026-07-21・橋対応】橋区間の両端の高さ(bridgeInfo.ax/az/bx/bzの地形高さをfracA/fracBで
 // 線形補間したもの)を求める共通ヘルパー。見た目(makeRoadGeo)と足場判定(bridgeSlopes/
 // floorHeightAt)の両方がこれを使うことで、常に同じ高さになることを保証する
 // (別々に計算式を持つと将来どちらかだけ直し忘れてズレる)。
+// 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER.md 4-3/4-4対応・3回目の橋修正】
+// 「頻発する」との再報告を受けて外部相談した結果、以前の設計の前提2つに穴があると判明した。
+// (1) 「f=0/1ちょうど=地面との接続点」という前提は、OSMが1本の物理的な橋を複数のwayに
+//     分割してタグ付けしている場合に成立しない(珍しくない)。分割断片同士の継ぎ目
+//     (=そのwayのf=0やf=1)が実際には川の上にあることがあり、無条件にクリアランスを
+//     ゼロへ戻すとそこだけ沈んで見える。「橋によって/同じ橋の一部だけ埋もれる」という
+//     ムラの正体だった。→ 位置(f)ではなく実データ(そこに水があるか)で判定する。
+// (2) heightAt内の位置サンプリングが、橋全体の入口・出口2点(ax/az-bx/bz)を結ぶ直線上の
+//     推定位置だった。橋がカーブしていると実経路とズレて水面の外を誤ってサンプルする
+//     ことがある。→ part8.jsから渡されるこのセグメントの実座標(sx/sz, ex/ez)を使う。
 function bridgeSegmentY(bridgeInfo) {
   // 実標高0m(海面調整スライダーの影響を受けない固定基準)のゲーム高さ。SEA_Yの式から
   // seaLevelM部分だけ外し、常に0m基準にしたもの。
   const trueSeaY = -elevBase * ELEV_SCALE;
   const floor = trueSeaY + BRIDGE_MIN_CLEARANCE_M * ELEV_SCALE;
-  // yA0/yB0は「地面道路と接続する固定端」なので水位由来の底上げは一切加えない。
+  // yA0/yB0は「地面道路と接続する固定端」の基準線(水位由来の底上げは加えない)。
   const yA0 = Math.max(getGroundY(bridgeInfo.ax, bridgeInfo.az), floor);
   const yB0 = Math.max(getGroundY(bridgeInfo.bx, bridgeInfo.bz), floor);
-  const heightAt = (f) => {
+  const hasWaterFn = typeof waterSurfaceYAt === 'function';
+  // このway全体の入口(a)・出口(b)が、それぞれ水面の真上かどうか(=地面への接続点では
+  // なく、隣のway断片との継ぎ目である可能性が高いか)。way全体で一度だけ判定すればよい。
+  const aOnWater = hasWaterFn && waterSurfaceYAt(bridgeInfo.ax, bridgeInfo.az) != null;
+  const bOnWater = hasWaterFn && waterSurfaceYAt(bridgeInfo.bx, bridgeInfo.bz) != null;
+  const heightAt = (f, x, z) => {
     const base = yA0 + (yB0 - yA0) * f;
-    if (typeof waterSurfaceYAt !== 'function') return base;
-    const x = bridgeInfo.ax + (bridgeInfo.bx - bridgeInfo.ax) * f;
-    const z = bridgeInfo.az + (bridgeInfo.bz - bridgeInfo.az) * f;
+    if (!hasWaterFn) return base;
     const wy = waterSurfaceYAt(x, z);
-    if (wy == null) return base; // 水面の外(=橋の地面側の区間)はそのまま地面基準
+    if (wy == null) {
+      if (f > 0.3 && f < 0.7) _bridgeMidNoWater++; // 【診断計器】中央なのに水が無い=疑い3/4
+      return base; // 水面の外(=橋の地面側の区間)はそのまま地面基準
+    }
     const needed = wy + BRIDGE_CLEARANCE_ABOVE_WATER_M * ELEV_SCALE;
     if (needed <= base) return base;
-    // f=0/1ちょうどでは助走の進捗0=底上げゼロ(地面道路と完全一致)、
-    // BRIDGE_RAMP_FRAC以上離れた区間では進捗1=必要な底上げを満額適用。
-    const edgeT = Math.min(f, 1 - f) / BRIDGE_RAMP_FRAC;
+    let edgeT;
+    if (aOnWater && bOnWater) edgeT = 1; // 両端とも川の上=中間断片。ランプ無しで満額クリアランス
+    else if (aOnWater) edgeT = (1 - f) / BRIDGE_RAMP_FRAC; // a側は隣の断片との継ぎ目、b側だけ地面
+    else if (bOnWater) edgeT = f / BRIDGE_RAMP_FRAC; // b側が継ぎ目、a側だけ地面
+    else edgeT = Math.min(f, 1 - f) / BRIDGE_RAMP_FRAC; // 両端とも地面(従来通りの通常の橋)
     const ease = edgeT >= 1 ? 1 : (edgeT <= 0 ? 0 : edgeT * edgeT * (3 - 2 * edgeT)); // smoothstep
     return base + (needed - base) * ease;
   };
-  return { yA: heightAt(bridgeInfo.fracA), yB: heightAt(bridgeInfo.fracB) };
+  // このセグメントの実座標(part8.jsが渡す)。無ければ従来通り直線近似にフォールバックする。
+  const sx = bridgeInfo.sx != null ? bridgeInfo.sx : bridgeInfo.ax + (bridgeInfo.bx - bridgeInfo.ax) * bridgeInfo.fracA;
+  const sz = bridgeInfo.sz != null ? bridgeInfo.sz : bridgeInfo.az + (bridgeInfo.bz - bridgeInfo.az) * bridgeInfo.fracA;
+  const ex = bridgeInfo.ex != null ? bridgeInfo.ex : bridgeInfo.ax + (bridgeInfo.bx - bridgeInfo.ax) * bridgeInfo.fracB;
+  const ez = bridgeInfo.ez != null ? bridgeInfo.ez : bridgeInfo.az + (bridgeInfo.bz - bridgeInfo.az) * bridgeInfo.fracB;
+  return { yA: heightAt(bridgeInfo.fracA, sx, sz), yB: heightAt(bridgeInfo.fracB, ex, ez) };
 }
 
 // 橋(bridge=yes等)の「乗れる床」。motorwaySlopes(高速道路の桁)と全く同じ考え方で、
