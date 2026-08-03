@@ -1126,6 +1126,7 @@ function animate() {
   compactPools(); // 枯渇寸前のインスタンスプールから遠方の小物を回収する(part2.js)
   scanGateWaitQueues(); // 【2026-07-21・Fable5診断(b)】ゲート待ち隔離キューの低頻度スキャン
   scanPendingAreaTrees(); // 【2026-08-03・修正B暫定】森・公園の木、ゲート待ち隔離キューの低頻度スキャン(part4.js)
+  scanPendingAreaWaterPolys(); // 【2026-08-03・修正B】水域、予算切れ再試行キューの低頻度スキャン(part4.js)
   // (2026-07-16: 高度LOD(updateAltitudeLOD)は撤去 — 40m/300mまで絞ってもクラッシュ防止に
   //  効かないことが実証され、上空の「スカスカ感」の害だけが残ったため。クラッシュの実対策は
   //  建物総数キャップ(PERF.bMax)+細街路メッシュ距離制限で達成済み)

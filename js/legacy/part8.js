@@ -162,6 +162,8 @@ function resetOSMTileQueueForJump() {
   // 隔離キュー)は古い座標のポリゴンを持ったままなので、ここでクリアしないと近距離ジャンプ後に
   // 前の場所のポリゴン座標で木が湧く事故になる。
   if (typeof pendingAreaTrees !== 'undefined') pendingAreaTrees.length = 0;
+  // 【2026-08-03・修正B】pendingAreaWaterPolys(part4.js、水域の予算切れ再試行キュー)も同じ理由。
+  if (typeof pendingAreaWaterPolys !== 'undefined') pendingAreaWaterPolys.length = 0;
 }
 let _osmMoveUx = 0, _osmMoveUz = 0; // プレイヤーの進行方向(単位ベクトル)。取得順の前方優先に使う
 const osmTileFailCount = new Map(); // タイルごとの失敗回数(3回まで再試行)

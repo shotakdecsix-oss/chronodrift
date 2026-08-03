@@ -226,6 +226,40 @@ function areaPolyBudgetOK(kind) {
   }
   return false;
 }
+// 【2026-08-03・修正B(水域限定の再試行キュー)】予算切れ(areaPolyBudgetOK('water')===false)
+// で捨てた水域ポリゴンは、以前は二度と再試行されず永久に失われていた——OSMの実データが
+// 確定して届いているのに、リソース制約(面メッシュのドローコール予算)だけを理由に消える。
+// 「マップデータに忠実に」の大原則([[project_isehara_game_map_fidelity_first_principle]])に
+// 反するため、捨てる代わりに構築済みの記述子(既に間引き済みのpts/holesと外接矩形)を
+// キューへ退避し、低頻度スキャンで予算に空きができ次第(dropAreaRecordsInTileの
+// areaPolyRefund等)実際にメッシュを張る。相模川のような大河川で「予算切れの警告が出ている」
+// とユーザー報告・確認済み(2026-08-03)。
+const pendingAreaWaterPolys = []; // { pts, holes, minX, maxX, minZ, maxZ }
+function _commitWaterPoly(pts, holes, minX, maxX, minZ, maxZ) {
+  buildAreaPoly(pts, waterAreaMat, 0.15, holes);
+  const entry = { pts, minX, maxX, minZ, maxZ };
+  minimapWaterPolys.push(entry);
+  polyGridAdd(minimapWaterGrid, entry);
+}
+function queueWaterPolyRetry(pts, holes, minX, maxX, minZ, maxZ) {
+  pendingAreaWaterPolys.push({ pts, holes, minX, maxX, minZ, maxZ });
+}
+let _waterRetryScanFrame = 0;
+function scanPendingAreaWaterPolys() {
+  _waterRetryScanFrame++;
+  if (_waterRetryScanFrame % 90 !== 0) return; // 他の低頻度スキャナ(scanGateWaitQueues等)と同じ周期
+  if (pendingAreaWaterPolys.length === 0) return;
+  const keep = [];
+  for (const e of pendingAreaWaterPolys) {
+    if (areaPolyBudgetOK('water')) {
+      _commitWaterPoly(e.pts, e.holes, e.minX, e.maxX, e.minZ, e.maxZ);
+    } else {
+      keep.push(e); // 予算がまだ無ければ次回スキャンへ持ち越す
+    }
+  }
+  pendingAreaWaterPolys.length = 0;
+  for (const e of keep) pendingAreaWaterPolys.push(e);
+}
 const lawnMat  = new THREE.MeshLambertMaterial({ color: MODE_CONF.lawn, side: THREE.DoubleSide });
 // リボン(ROAD_MAT.water)と同じMeshBasicにして、重なっても境目が見えないようにする
 const waterAreaMat = new THREE.MeshBasicMaterial({ color: MODE_CONF.water, side: THREE.DoubleSide });
@@ -525,6 +559,20 @@ function dropAreaRecordsInTile(tx, tz, tileM) {
       pendingAreaTrees[pw++] = e;
     }
     pendingAreaTrees.length = pw;
+  }
+  // 【2026-08-03・修正B】pendingAreaWaterPolys(水域の予算切れ再試行キュー)も同じ理由で
+  // パージする。way単位の水域(handleAreaFeature経由)はタイル再取得でun-seeされ再度
+  // handleAreaFeatureが呼ばれるため、古い記述子を残すと予算が空いた時に二重にメッシュが
+  // 張られる(z-fighting)。relation単位(processWaterRelation)はseenOSMRelsが現状
+  // resetTileForRefetchで解除されないため実際には再処理されないが、念のため同じ扱いにする。
+  if (typeof pendingAreaWaterPolys !== 'undefined' && pendingAreaWaterPolys.length) {
+    let ww = 0;
+    for (const e of pendingAreaWaterPolys) {
+      const cx = (e.minX + e.maxX) / 2, cz = (e.minZ + e.maxZ) / 2;
+      if (cx >= x0 && cx < x1 && cz >= z0 && cz < z1) { dropped++; continue; }
+      pendingAreaWaterPolys[ww++] = e;
+    }
+    pendingAreaWaterPolys.length = ww;
   }
   return dropped;
 }
@@ -856,16 +904,19 @@ function processWaterRelation(el) {
     const poly = { pts, minX, maxX, minZ, maxZ };
     avoidPolygons.push(poly); // 水面内には建物を生成しない
     polyGridAdd(avoidGrid, poly);
+    // このouterのbbox内にある中州(inner)を穴として追加。
+    // 【2026-08-03・修正B】以前はareaPolyBudgetOK成功時のみ計算していたが、予算切れでも
+    // 再試行キューへ積むために必要なので、holesは無条件で計算する(相模川のような大河川の
+    // multipolygonがこの経路。budgetOK失敗時に永久に消えていた不具合の実体)。
+    const holes = innerRings
+      .map(r => thinPts(r.map(g => latLonToXZ(g.lat, g.lon)), tol))
+      .filter(hp => hp.length >= 4 &&
+              hp[0].x >= minX && hp[0].x <= maxX && hp[0].z >= minZ && hp[0].z <= maxZ);
+    // (2026-07-16: 水面1m下降補正を試したが見た目が崩れたためリバート。+0.15が正)
     if (areaPolyBudgetOK('water')) {
-      // このouterのbbox内にある中州(inner)を穴として追加
-      const holes = innerRings
-        .map(r => thinPts(r.map(g => latLonToXZ(g.lat, g.lon)), tol))
-        .filter(hp => hp.length >= 4 &&
-                hp[0].x >= minX && hp[0].x <= maxX && hp[0].z >= minZ && hp[0].z <= maxZ);
-      // (2026-07-16: 水面1m下降補正を試したが見た目が崩れたためリバート。+0.15が正)
-      buildAreaPoly(pts, waterAreaMat, 0.15, holes);
-      minimapWaterPolys.push(poly);
-      polyGridAdd(minimapWaterGrid, poly);
+      _commitWaterPoly(pts, holes, minX, maxX, minZ, maxZ);
+    } else {
+      queueWaterPolyRetry(pts, holes, minX, maxX, minZ, maxZ);
     }
   }
 }
@@ -915,12 +966,14 @@ function handleAreaFeature(el) {
   } else if (isWater) {
     // 【2026-07-16】span上限3000→8000。大河川の岸ポリゴンがスキップされて細いリボンだけに
     // なっていた。大きいものは間引きを強めて頂点数を抑える。
-    if (span < 8000 && areaPolyBudgetOK('water')) {
+    if (span < 8000) {
       const tp = thinPts(pts, span > 3000 ? 30 : span > 400 ? 10 : 0);
-      buildAreaPoly(tp, waterAreaMat, 0.15);
-      const _wpEntry = { pts: tp, minX, maxX, minZ, maxZ };
-      minimapWaterPolys.push(_wpEntry);
-      polyGridAdd(minimapWaterGrid, _wpEntry);
+      // 【2026-08-03・修正B】予算切れなら即座に諦めず再試行キューへ(上のpendingAreaWaterPolys参照)。
+      if (areaPolyBudgetOK('water')) {
+        _commitWaterPoly(tp, null, minX, maxX, minZ, maxZ);
+      } else {
+        queueWaterPolyRetry(tp, null, minX, maxX, minZ, maxZ);
+      }
     }
   } else if (isFarm) {
     if (span >= 15 && span < 500 && areaPolyBudgetOK('farm')) buildTerrainFollowingAreaPoly(pts, farmMat, 0.1, 20, true);
