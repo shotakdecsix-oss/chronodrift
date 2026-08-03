@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>EXIF GPS 検証</title>
+<style>
+  body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:16px;background:#111;color:#eee;font-size:15px;line-height:1.5}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{color:#999;font-size:13px;margin-bottom:16px}
+  .pick{display:block;width:100%;padding:18px;margin-bottom:8px;background:#2b6cff;color:#fff;border:0;border-radius:10px;font-size:17px;font-weight:600;text-align:center}
+  .pick.alt{background:#444}
+  input[type=file]{display:none}
+  #sum{margin:16px 0;padding:12px;border-radius:10px;background:#1c1c1c;font-weight:600}
+  .card{background:#1c1c1c;border-radius:10px;padding:12px;margin-bottom:10px;border-left:4px solid #666;word-break:break-all}
+  .card.ok{border-left-color:#2ecc71}
+  .card.ng{border-left-color:#e74c3c}
+  .k{color:#888;font-size:12px}
+  .v{font-family:ui-monospace,Menlo,monospace;font-size:13px;margin-bottom:6px}
+  .big{font-size:16px;font-weight:700;margin-bottom:8px}
+  .ok .big{color:#2ecc71}.ng .big{color:#e74c3c}
+  #lib{font-size:12px;color:#777;margin-top:20px}
+</style>
+</head>
+<body>
+<h1>写真の位置情報(EXIF GPS)検証</h1>
+<div class="sub">iOS/Android のブラウザから写真を選び、緯度経度が取れるか確認します。<br>画像はどこにも送信されず、端末内で読むだけです。</div>
+
+<label class="pick" for="f1">📷 写真ライブラリから選ぶ</label>
+<input id="f1" type="file" accept="image/*" multiple>
+
+<label class="pick alt" for="f2">📁 ファイルとして選ぶ(比較用)</label>
+<input id="f2" type="file" multiple>
+
+<div id="sum">写真を選んでください</div>
+<div id="out"></div>
+<div id="lib">exifr: 読み込み中…</div>
+
+<script src="https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.umd.js"></script>
+<script>
+const out = document.getElementById('out');
+const sum = document.getElementById('sum');
+document.getElementById('lib').textContent =
+  (typeof exifr !== 'undefined') ? 'exifr: 読み込みOK' : 'exifr: 読み込み失敗(自前パーサのみで判定)';
+
+// --- 自前の最小チェック: JPEG の APP1(Exif) 内に GPS IFD ポインタ(0x8825)があるか ---
+function rawGpsProbe(buf){
+  const d = new DataView(buf), n = d.byteLength;
+  if(n < 4) return {jpeg:false, app1:false, gpsTag:false};
+  const jpeg = d.getUint16(0) === 0xFFD8;
+  if(!jpeg) return {jpeg:false, app1:false, gpsTag:false};
+  let p = 2, app1 = false, tiff = -1;
+  while(p + 4 < n){
+    if(d.getUint8(p) !== 0xFF) break;
+    const marker = d.getUint8(p+1), len = d.getUint16(p+2);
+    if(marker === 0xE1){
+      app1 = true;
+      if(p+10 < n && d.getUint32(p+4) === 0x45786966) tiff = p + 10;
+      break;
+    }
+    if(marker === 0xDA) break;
+    p += 2 + len;
+  }
+  if(tiff < 0) return {jpeg, app1, gpsTag:false};
+  const le = d.getUint16(tiff) === 0x4949;
+  const u16 = o => d.getUint16(o, le), u32 = o => d.getUint32(o, le);
+  let gpsTag = false;
+  try{
+    const ifd0 = tiff + u32(tiff + 4);
+    const cnt = u16(ifd0);
+    for(let i=0;i<cnt;i++){ if(u16(ifd0 + 2 + i*12) === 0x8825){ gpsTag = true; break; } }
+  }catch(e){}
+  return {jpeg, app1, gpsTag};
+}
+
+async function handle(files, source){
+  out.innerHTML = ''; sum.textContent = '解析中…';
+  let ok = 0;
+  for(const f of files){
+    const buf = await f.arrayBuffer();
+    const probe = rawGpsProbe(buf);
+    let gps = null, extra = {}, err = '';
+    if(typeof exifr !== 'undefined'){
+      try{ gps = await exifr.gps(buf); }catch(e){ err = String(e && e.message || e); }
+      try{
+        const p = await exifr.parse(buf, {pick:['DateTimeOriginal','Make','Model','GPSLatitude','GPSLongitude','GPSAltitude']});
+        if(p) extra = p;
+      }catch(e){}
+    }
+    const has = !!(gps && gps.latitude != null);
+    if(has) ok++;
+    const c = document.createElement('div');
+    c.className = 'card ' + (has ? 'ok' : 'ng');
+    c.innerHTML =
+      '<div class="big">' + (has ? '✅ 位置情報あり' : '❌ 位置情報なし') + '</div>' +
+      (has ? '<div class="k">緯度 / 経度</div><div class="v">' +
+              gps.latitude.toFixed(6) + ', ' + gps.longitude.toFixed(6) + '</div>' : '') +
+      (extra.GPSAltitude != null ? '<div class="k">標高</div><div class="v">' + extra.GPSAltitude + ' m</div>' : '') +
+      (extra.DateTimeOriginal ? '<div class="k">撮影日時</div><div class="v">' + new Date(extra.DateTimeOriginal).toLocaleString('ja-JP') + '</div>' : '') +
+      (extra.Make || extra.Model ? '<div class="k">機種</div><div class="v">' + [extra.Make, extra.Model].filter(Boolean).join(' ') + '</div>' : '') +
+      '<div class="k">ファイル</div><div class="v">' + f.name + '<br>' + (f.type || '不明') + ' / ' + (f.size/1024/1024).toFixed(2) + ' MB</div>' +
+      '<div class="k">生バイト判定</div><div class="v">JPEG:' + (probe.jpeg?'Y':'N') +
+        ' APP1(Exif):' + (probe.app1?'Y':'N') + ' GPStag:' + (probe.gpsTag?'Y':'N') + '</div>' +
+      '<div class="k">入力経路</div><div class="v">' + source + (err ? ' / err: ' + err : '') + '</div>';
+    out.appendChild(c);
+  }
+  sum.textContent = files.length + ' 枚中 ' + ok + ' 枚で緯度経度が取得できました';
+  sum.style.color = ok > 0 ? '#2ecc71' : '#e74c3c';
+}
+
+document.getElementById('f1').addEventListener('change', e => e.target.files.length && handle(e.target.files, 'accept=image/* (写真ライブラリ)'));
+document.getElementById('f2').addEventListener('change', e => e.target.files.length && handle(e.target.files, 'accept指定なし (ファイル)'));
+</script>
+</body>
+</html>
