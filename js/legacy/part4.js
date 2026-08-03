@@ -386,47 +386,33 @@ function pitchMatFor(sport) {
 // 範囲にかかるものだけ高さを再スナップする(浮き/埋まり対策。道路と同じ考え方)。
 const areaPolyMeshes = [];
 const areaPolyGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
-// 【2026-08-03】水面(entry.kind==='flat')専用: 地形に関係なく必ず水面で覆うため、
-// ポリゴン内部を含めて格子状にサンプルした最大の地面高さ+yOffを返す(_instantiateAreaPolyMesh・
-// rebuildAreaPolyMeshの両方から呼ぶ共有ヘルパー。片方だけ直しても、NEAR地形更新のたびに
-// 呼ばれるもう片方が地形追従の高さへ上書きし戻してしまい「まだ直っていない」の原因になった
-// ため、必ず両方で同じ計算を使うこと)。
-function _computeWaterLevel(entry) {
-  const _wCell = 40;
-  const _wNx = Math.max(1, Math.min(80, Math.ceil((entry.maxX - entry.minX) / _wCell)));
-  const _wNz = Math.max(1, Math.min(80, Math.ceil((entry.maxZ - entry.minZ) / _wCell)));
-  let _wMaxH = -Infinity;
-  for (let j = 0; j <= _wNz; j++) {
-    const z = entry.minZ + (entry.maxZ - entry.minZ) * j / _wNz;
-    for (let i = 0; i <= _wNx; i++) {
-      const x = entry.minX + (entry.maxX - entry.minX) * i / _wNx;
-      if (!pointInPolygon(x, z, entry.pts)) continue;
-      const h = getGroundY(x, z);
-      if (h > _wMaxH) _wMaxH = h;
-    }
-  }
-  if (_wMaxH === -Infinity) { // 内部サンプルが1点も無い(細長すぎる等) → 輪郭頂点で代用
-    for (const p of entry.pts) { const h = getGroundY(p.x, p.z); if (h > _wMaxH) _wMaxH = h; }
-  }
-  return _wMaxH + entry.yOff;
+// 【2026-08-03 3回目修正・ユーザー報告「水面が空中に浮いている」】一律の1値(輪郭/内部の
+// 最大値、または下位パーセンタイル平均)では、川のように緩やかな高低差のある長いポリゴンで
+// 必ずどこかが破綻する——高い側に合わせれば低い場所で水面が浮き、低い側に合わせれば
+// 高い場所で地面が突き抜ける。原理的にグローバル1値では両立しない。
+// 水中には実測の水底標高データが無く、getGroundYは周辺地形の起伏をそのまま漏れ込ませる
+// ため、代わりに「小半径の局所最小値」を各点ごとにサンプルする。広域の緩やかな傾斜
+// (川の上流→下流)にはそのまま追従しつつ、孤立した1点だけの起伏ノイズ(半径WATER_SMOOTH_R
+// より狭い)は周囲の低い値に吸収される。_instantiateAreaPolyMesh(新規構築)・
+// rebuildAreaPolyMesh(NEAR地形更新時の再スナップ)の両方が必ずこれを使うこと
+// (片方だけ直すと、NEAR更新のたびにもう片方が古い計算で上書きし戻してしまう
+// ——実際に2026-08-03に一度この失敗をした)。
+const WATER_SMOOTH_R = 20;
+function _smoothGroundMinWater(x, z) {
+  const r = WATER_SMOOTH_R;
+  return Math.min(
+    getGroundY(x, z),
+    getGroundY(x + r, z), getGroundY(x - r, z),
+    getGroundY(x, z + r), getGroundY(x, z - r)
+  );
 }
 function rebuildAreaPolyMesh(entry) {
   if (!entry.mesh) return; // 遠方でGPU解放済み(unloadFarAreaPolys参照)。再接近時に自然と再構築される
   const pos = entry.mesh.geometry.attributes.position;
-  // 【2026-08-03・ユーザー報告「まだ直っていない、地面が出てきてしまう」の真因】
-  // NEAR地形が更新される(rebuildAreaPolysInBounds経由、part1.js rebuildRoadsNearChunk等
-  // から頻繁に呼ばれる)たびにこの関数が無条件でgetGroundY追従の高さへ上書きしていた。
-  // _instantiateAreaPolyMesh側だけ水面を一律高さに直しても、プレイヤーが近づいて地形が
-  // 更新されるたびにこちらが古い地形追従ロジックへ戻してしまい、修正が効いていないように
-  // 見えていた。水面(kind='flat')は_computeWaterLevelで一律の高さを使う。
-  if (entry.kind === 'flat') {
-    const wy = _computeWaterLevel(entry);
-    for (let i = 0; i < pos.count; i++) pos.setY(i, wy);
-  } else {
-    for (let i = 0; i < pos.count; i++) {
-      const x = pos.getX(i), z = pos.getZ(i); // Y(高さ)だけ書き換えるのでX/Zはそのまま読める
-      pos.setY(i, getGroundY(x, z) + entry.yOff);
-    }
+  const heightAt = entry.kind === 'flat' ? _smoothGroundMinWater : getGroundY;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = pos.getZ(i); // Y(高さ)だけ書き換えるのでX/Zはそのまま読める
+    pos.setY(i, heightAt(x, z) + entry.yOff);
   }
   pos.needsUpdate = true;
   entry.mesh.geometry.computeVertexNormals();
@@ -450,26 +436,45 @@ function rebuildAreaPolysInBounds(x0, x1, z0, z1) {
 function _instantiateAreaPolyMesh(entry) {
   let geo;
   if (entry.kind === 'flat') {
-    const shape = new THREE.Shape();
-    shape.moveTo(entry.pts[0].x, entry.pts[0].z);
-    for (let i = 1; i < entry.pts.length; i++) shape.lineTo(entry.pts[i].x, entry.pts[i].z);
-    if (entry.holes) for (const hp of entry.holes) {
-      if (hp.length < 4) continue;
-      const hpath = new THREE.Path();
-      hpath.moveTo(hp[0].x, hp[0].z);
-      for (let i = 1; i < hp.length; i++) hpath.lineTo(hp[i].x, hp[i].z);
-      shape.holes.push(hpath);
+    // 【2026-08-03 3回目修正】水面はShapeGeometry(輪郭の頂点だけで三角形分割)をやめ、
+    // 'terrain'分岐と同じ格子分割+頂点ごとの高さ追従に統一する(輪郭点は間引き後で
+    // 間隔が広く、その間を大きな三角形で結ぶと地形の起伏をそのまま拾ってしまうため)。
+    // 高さは_smoothGroundMinWater(このファイル上部)で局所ノイズを均しつつ広域の
+    // 緩やかな傾斜には追従する。holesはpointInPolygonで格子点ごとに除外する
+    // (ShapeGeometryのようなネイティブのhole三角形分割が無いための代替)。
+    const { minX, maxX, minZ, maxZ, pts, holes, yOff } = entry;
+    const cellSize = 40;
+    const nx = Math.max(1, Math.min(80, Math.ceil((maxX - minX) / cellSize)));
+    const nz = Math.max(1, Math.min(80, Math.ceil((maxZ - minZ) / cellSize)));
+    const verts = [], uvs = [], idx = [];
+    const grid = [];
+    const inAnyHole = (x, z) => {
+      if (!holes) return false;
+      for (const hp of holes) { if (hp.length >= 4 && pointInPolygon(x, z, hp)) return true; }
+      return false;
+    };
+    for (let j = 0; j <= nz; j++) {
+      const row = [];
+      for (let i = 0; i <= nx; i++) {
+        const x = minX + (maxX - minX) * i / nx;
+        const z = minZ + (maxZ - minZ) * j / nz;
+        if (!pointInPolygon(x, z, pts) || inAnyHole(x, z)) { row.push(-1); continue; }
+        row.push(verts.length / 3);
+        verts.push(x, _smoothGroundMinWater(x, z) + yOff, z);
+        uvs.push(x, z);
+      }
+      grid.push(row);
     }
-    geo = new THREE.ShapeGeometry(shape);
-    // 水面(kind='flat')は地形追従ではなく、_computeWaterLevel(このファイル上部、
-    // rebuildAreaPolyMeshの直前)が算出する一律の高さを使う。NEAR地形更新時の
-    // rebuildAreaPolyMeshも必ず同じ関数を使うこと(片方だけ直すと上書きされ戻る)。
-    const _wY = _computeWaterLevel(entry);
-    const pos = geo.attributes.position;
-    for (let i = 0; i < pos.count; i++) {
-      const x = pos.getX(i), z = pos.getY(i); // ShapeのXY平面 → XZ平面へ
-      pos.setXYZ(i, x, _wY, z);
+    for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) {
+      const a = grid[j][i], b = grid[j][i + 1], c = grid[j + 1][i + 1], d = grid[j + 1][i];
+      if (a < 0 || b < 0 || c < 0 || d < 0) continue; // 境界セル(ポリゴン外/hole内の頂点を含む)は張らない
+      idx.push(a, b, c, a, c, d);
     }
+    if (idx.length === 0) return false; // 細すぎる/境界だけのポリゴンはフォールバックなしで諦める
+    geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geo.setIndex(idx);
     geo.computeVertexNormals();
   } else { // 'terrain'(buildTerrainFollowingAreaPoly)
     const { minX, maxX, minZ, maxZ, pts, yOff, cellSize, worldUV } = entry;
@@ -515,7 +520,10 @@ function buildAreaPoly(pts, mat, yOff, holes) {
   // 再構築できるようにするため(道路のrebuildRoadMesh/unloadFarRoadsと同じ考え方。
   // CODE_REVIEW_20260717 P8: 以前はここで一度作ったら二度と解放されなかった)。
   const entry = { mesh: null, kind: 'flat', areaKind: areaPolyTakePendingKind(), pts, holes, mat, yOff, minX, maxX, minZ, maxZ };
-  _instantiateAreaPolyMesh(entry);
+  // 【2026-08-03 3回目修正】flat分岐が格子分割になり、buildTerrainFollowingAreaPolyと同じく
+  // 「細すぎて格子点が1つも入らない」失敗がありうるようになったため、戻り値を見て予算を返す
+  // (以前はShapeGeometryが常に何か作れる前提で戻り値を無視していた)。
+  if (!_instantiateAreaPolyMesh(entry)) { areaPolyRefund(entry.areaKind); return; }
   areaPolyMeshes.push(entry);
   polyGridAdd(areaPolyGrid, entry);
 }
