@@ -904,11 +904,29 @@ const seenCoastlineTiles = new Set();
 function processCoastlineFill(elements, tileList) {
   if (!tileList || tileList.length === 0) return;
   if (tileList[0].kind === 'building') return; // このkindのクエリはnatural=coastlineを含まない
-  const segs = [];
+  const segs = []; // 開いた(=本土沿いの)coastline。半平面クリップの基準線に使う
+  const islands = []; // 閉じた(=島1周)coastline。海側判定には使わず、穴として除外するだけ
+  const CLOSE_EPS = 1; // 始点・終点がこの距離(m)以内なら閉じたリング(=島)とみなす
   for (const el of elements) {
     if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) continue;
     if (!el.tags || el.tags.natural !== 'coastline') continue;
     const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
+    const p0 = pts[0], pN = pts[pts.length - 1];
+    const closed = pts.length >= 4 &&
+      Math.hypot(p0.x - pN.x, p0.z - pN.z) <= CLOSE_EPS;
+    // 【2026-08-04・江の島が海に沈む不具合の対策】閉じたリング(=島1周のcoastline)は、
+    // その全周が「陸が左・海が右」の規約通りだとしても、島の外周をぐるっと囲む半平面群を
+    // そのまま逐次クリップに使うと、島の中心付近まで「全ての辺から見て海側」に判定されて
+    // しまい(凸包の内側は基本的にどの辺からも「陸側」のはずが、逐次交差はそう動かない)、
+    // 結果的に島の陸地部分まで固定海面で塗りつぶしてしまっていた。開いた本土coastlineと
+    // 閉じた島coastlineを区別し、島は半平面クリップの基準線には使わず、後段でホール
+    // (buildFixedFlatAreaPolyのholes)として海面ポリゴンから除外するだけにする。
+    if (closed) {
+      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+      for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
+      islands.push({ pts, minX, maxX, minZ, maxZ });
+      continue;
+    }
     for (let i = 0; i < pts.length - 1; i++) {
       const a = pts[i], b = pts[i + 1];
       if (a.x === b.x && a.z === b.z) continue;
@@ -924,7 +942,7 @@ function processCoastlineFill(elements, tileList) {
     const key = t.tx + ',' + t.tz;
     if (seenCoastlineTiles.has(key)) continue;
     seenCoastlineTiles.add(key);
-    if (segs.length === 0) continue;
+    if (segs.length === 0) continue; // 島(閉じたリング)しか無いタイルは埋めない(=従来通り何もしない)
     const x0 = t.tx * OSM_TILE_M, x1 = x0 + OSM_TILE_M, z0 = t.tz * OSM_TILE_M, z1 = z0 + OSM_TILE_M;
     const near = segs.filter(s => s.minX <= x1 && s.maxX >= x0 && s.minZ <= z1 && s.maxZ >= z0);
     if (near.length === 0) continue;
@@ -934,8 +952,10 @@ function processCoastlineFill(elements, tileList) {
       if (poly.length < 3) break;
     }
     if (poly.length < 3) continue;
+    const nearIslands = islands.filter(is => is.minX <= x1 && is.maxX >= x0 && is.minZ <= z1 && is.maxZ >= z0);
+    const holes = nearIslands.length ? nearIslands.map(is => is.pts) : null;
     if (areaPolyBudgetOK('sea')) {
-      buildFixedFlatAreaPoly(poly, waterAreaMat, 0.15, seaY, null);
+      buildFixedFlatAreaPoly(poly, waterAreaMat, 0.15, seaY, holes);
     }
   }
 }
