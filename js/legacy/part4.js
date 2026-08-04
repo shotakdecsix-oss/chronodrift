@@ -876,7 +876,9 @@ function _lineIntersect(p1, p2, ax, az, bx, bz) {
   const t = (d1 - d2) !== 0 ? d1 / (d1 - d2) : 0;
   return { x: p1.x + (p2.x - p1.x) * t, z: p1.z + (p2.z - p1.z) * t };
 }
-// Sutherland-Hodgman: 凸多角形polyを、直線(ax,az)-(bx,bz)の海側(_crossSide>=0)だけに切り詰める。
+// Sutherland-Hodgman: 多角形polyを、直線(ax,az)-(bx,bz)の海側(_crossSide>=0)だけに切り詰める。
+// polyの凸性は問わないが、clip側の直線が凸なクリップ窓(タイル矩形の1辺)である前提で使う
+// (下のclipPolyToTile参照。多角形polyそのものが非凸=実際の海岸線の湾曲でもここは正しく動く)。
 function _clipPolyBySeaSide(poly, ax, az, bx, bz) {
   const out = [];
   const n = poly.length;
@@ -893,18 +895,51 @@ function _clipPolyBySeaSide(poly, ax, az, bx, bz) {
   }
   return out;
 }
+// タイル矩形(x0,z0)-(x1,z1)でpolyを切り詰める(4辺で_clipPolyBySeaSideを順に適用)。
+// タイル自体は凸なので、poly側が非凸(実際の海岸線ribbon)でも正しくクリップできる
+// (Sutherland-Hodgmanはクリップ窓が凸であることだけを要求し、被クリップ側の凸性は問わない)。
+function _clipPolyToTile(poly, x0, x1, z0, z1) {
+  poly = _clipPolyBySeaSide(poly, x0, z0, x1, z0);
+  if (poly.length < 3) return poly;
+  poly = _clipPolyBySeaSide(poly, x1, z0, x1, z1);
+  if (poly.length < 3) return poly;
+  poly = _clipPolyBySeaSide(poly, x1, z1, x0, z1);
+  if (poly.length < 3) return poly;
+  poly = _clipPolyBySeaSide(poly, x0, z1, x0, z0);
+  return poly;
+}
 // タイルに一度でも海面を試みたら(coastlineが無く何もしなかった場合も含め)二度と再試行しない
 // —— coastlineの位置は実データなので、同じタイルへ何度到着しても結果は変わらない。
 const seenCoastlineTiles = new Set();
+// 開いたcoastline wayの実ジオメトリを保ったまま「海側に大きくはみ出したリボン」を作る:
+// [way全点(順序通り)] + [終点を海側へFARだけオフセット] + [始点を海側へFARだけオフセット]。
+// これを地図に忠実な「最低限これだけは海」というポリゴンとみなし、後でタイル矩形(凸)で
+// クリップする。半平面の逐次交差(旧実装)は被クリップ側=タイルが凸である前提が必要だが、
+// 現実の海岸線は湾曲・入江で非凸なため、直線近似のクリップだと「地図に忠実じゃない」形に
+// なっていた(2026-08-04ユーザー報告)。ribbon側で実ジオメトリを保持し、タイル側だけを
+// クリップ窓にすることで、この制約を満たしたまま実際の海岸線の曲がりをそのまま活かせる。
+const COASTLINE_SEA_FAR = 3000; // タイル(1600m四方、対角線≈2263m)を確実に覆う沖合オフセット
+function _buildCoastlineRibbon(pts) {
+  const p0 = pts[0], p1 = pts[1], pNm1 = pts[pts.length - 2], pN = pts[pts.length - 1];
+  const d0x = p1.x - p0.x, d0z = p1.z - p0.z, d0len = Math.hypot(d0x, d0z) || 1;
+  const dNx = pN.x - pNm1.x, dNz = pN.z - pNm1.z, dNlen = Math.hypot(dNx, dNz) || 1;
+  // 海側=進行方向の右手側=(-dz,dx)(_crossSideの導出と同じ規約)
+  const seaP0 = { x: p0.x + (-d0z / d0len) * COASTLINE_SEA_FAR, z: p0.z + (d0x / d0len) * COASTLINE_SEA_FAR };
+  const seaPN = { x: pN.x + (-dNz / dNlen) * COASTLINE_SEA_FAR, z: pN.z + (dNx / dNlen) * COASTLINE_SEA_FAR };
+  const ribbon = pts.concat([seaPN, seaP0]);
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const p of ribbon) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
+  return { ribbon, minX, maxX, minZ, maxZ };
+}
 // data.elements(1バッチ分のOverpass応答)からnatural=coastlineのwayを集め、tileList
 // (このバッチが対象にしたタイル位置の配列 {tx,tz})に含まれる各タイルについて、
-// タイル矩形をcoastlineの海側でクリップした簡易ポリゴンを1枚だけ生成する。
+// 海側リボン(_buildCoastlineRibbon)をタイル矩形でクリップした海面ポリゴンを生成する。
 // batchKind==='building'は natural=coastline を含まないクエリなので何もしない
 // (OSM_TILE_CLAUSES_BUILDING参照)。
 function processCoastlineFill(elements, tileList) {
   if (!tileList || tileList.length === 0) return;
   if (tileList[0].kind === 'building') return; // このkindのクエリはnatural=coastlineを含まない
-  const segs = []; // 開いた(=本土沿いの)coastline。半平面クリップの基準線に使う
+  const ribbons = []; // 開いた(=本土沿いの)coastline。実ジオメトリを保った海側リボン
   const islands = []; // 閉じた(=島1周)coastline。海側判定には使わず、穴として除外するだけ
   const CLOSE_EPS = 1; // 始点・終点がこの距離(m)以内なら閉じたリング(=島)とみなす
   for (const el of elements) {
@@ -915,47 +950,36 @@ function processCoastlineFill(elements, tileList) {
     const closed = pts.length >= 4 &&
       Math.hypot(p0.x - pN.x, p0.z - pN.z) <= CLOSE_EPS;
     // 【2026-08-04・江の島が海に沈む不具合の対策】閉じたリング(=島1周のcoastline)は、
-    // その全周が「陸が左・海が右」の規約通りだとしても、島の外周をぐるっと囲む半平面群を
-    // そのまま逐次クリップに使うと、島の中心付近まで「全ての辺から見て海側」に判定されて
-    // しまい(凸包の内側は基本的にどの辺からも「陸側」のはずが、逐次交差はそう動かない)、
-    // 結果的に島の陸地部分まで固定海面で塗りつぶしてしまっていた。開いた本土coastlineと
-    // 閉じた島coastlineを区別し、島は半平面クリップの基準線には使わず、後段でホール
-    // (buildFixedFlatAreaPolyのholes)として海面ポリゴンから除外するだけにする。
+    // 開いた本土coastlineと同じ「海側リボン」を作ると、島の外周をぐるっと囲む形になり
+    // 内側(島の陸地)まで海扱いになってしまう。開いた本土coastlineと閉じた島coastlineを
+    // 区別し、島はribbon化せず、後段でホール(buildFixedFlatAreaPolyのholes)として
+    // 海面ポリゴンから除外するだけにする。
     if (closed) {
       let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
       for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
       islands.push({ pts, minX, maxX, minZ, maxZ });
       continue;
     }
-    for (let i = 0; i < pts.length - 1; i++) {
-      const a = pts[i], b = pts[i + 1];
-      if (a.x === b.x && a.z === b.z) continue;
-      segs.push({
-        ax: a.x, az: a.z, bx: b.x, bz: b.z,
-        minX: Math.min(a.x, b.x), maxX: Math.max(a.x, b.x),
-        minZ: Math.min(a.z, b.z), maxZ: Math.max(a.z, b.z)
-      });
-    }
+    if (pts.length < 2) continue;
+    ribbons.push(_buildCoastlineRibbon(pts));
   }
   const seaY = seaLevelY();
   for (const t of tileList) {
     const key = t.tx + ',' + t.tz;
     if (seenCoastlineTiles.has(key)) continue;
     seenCoastlineTiles.add(key);
-    if (segs.length === 0) continue; // 島(閉じたリング)しか無いタイルは埋めない(=従来通り何もしない)
+    if (ribbons.length === 0) continue; // 島(閉じたリング)しか無いタイルは埋めない(=従来通り何もしない)
     const x0 = t.tx * OSM_TILE_M, x1 = x0 + OSM_TILE_M, z0 = t.tz * OSM_TILE_M, z1 = z0 + OSM_TILE_M;
-    const near = segs.filter(s => s.minX <= x1 && s.maxX >= x0 && s.minZ <= z1 && s.maxZ >= z0);
-    if (near.length === 0) continue;
-    let poly = [{ x: x0, z: z0 }, { x: x1, z: z0 }, { x: x1, z: z1 }, { x: x0, z: z1 }];
-    for (const s of near) {
-      poly = _clipPolyBySeaSide(poly, s.ax, s.az, s.bx, s.bz);
-      if (poly.length < 3) break;
-    }
-    if (poly.length < 3) continue;
+    const nearRibbons = ribbons.filter(r => r.minX <= x1 && r.maxX >= x0 && r.minZ <= z1 && r.maxZ >= z0);
+    if (nearRibbons.length === 0) continue;
     const nearIslands = islands.filter(is => is.minX <= x1 && is.maxX >= x0 && is.minZ <= z1 && is.maxZ >= z0);
     const holes = nearIslands.length ? nearIslands.map(is => is.pts) : null;
-    if (areaPolyBudgetOK('sea')) {
-      buildFixedFlatAreaPoly(poly, waterAreaMat, 0.15, seaY, holes);
+    for (const r of nearRibbons) {
+      const poly = _clipPolyToTile(r.ribbon, x0, x1, z0, z1);
+      if (poly.length < 3) continue;
+      if (areaPolyBudgetOK('sea')) {
+        buildFixedFlatAreaPoly(poly, waterAreaMat, 0.15, seaY, holes);
+      }
     }
   }
 }
