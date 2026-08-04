@@ -56,7 +56,10 @@ let nearElev = null, nearCX = 0, nearCZ = 0, nearLoading = false;
 // 海面は常に実標高0m(現実の海抜0m)固定とし、地域を移動しても変わらない。
 // 江東区等の0m地帯が沈んで見える問題は、海面側ではなく陸地側の底上げ(下のLAND_FLOOR_MARGIN_M
 // 参照)で解消する。
-let seaLevelM = 0;             // 海面の実標高(m)。常に0固定(スライダーでの手動調整のみ可)
+// 【2026-08-04・ユーザー方針】海面調整スライダーを撤去し、常に実標高0m固定にした
+// (旧: -10〜10mの手動調整+localStorage永続化スライダーがあった)。これで距離・海景・橋・
+// 海面ポリゴン([[project_isehara_game_sea_coastline]])が全て同じ「実標高0m」基準に揃う。
+const seaLevelM = 0;           // 海面の実標高(m)。常に0固定
 // 陸地(標高データが実際に存在する地点)は、海面(0m)からこの高さぶんは必ず上に来るよう
 // 底上げする。実際の海(標高データ無し=oceanFloor扱い)には適用しないため、海岸線は
 // これまで通り0m地点に出る。江東区のような実標高0m前後(あるいは測量上わずかにマイナス)の
@@ -379,16 +382,12 @@ const waterOverlay = document.getElementById('waterOverlay');
 let _wasSubmerged = false;
 function initDistantSea() {
   if (seaMesh) return;
-  // 海面標高の初期値: 保存値(ユーザーがスライダーで手動調整した値)があれば優先。
-  // 無ければ常に実標高0m(現実の海抜0m)固定。以前は地域ごとに「詳細エリアの最低標高より
-  // 少し下」に置く想定だった(未実装のまま3固定だった)が、地点移動のたびに海面の
-  // 実質的な意味がズレるのは不自然なのでやめ、常に絶対値0mで統一する
+  // 【2026-08-04】以前はここでlocalStorage保存値(スライダー手動調整)を読んで上書きして
+  // いたが、スライダーごと撤去し常に実標高0m(現実の海抜0m)固定にした。地点移動のたびに
+  // 海面の実質的な意味がズレるのは不自然、という理由は以前から変わらず
   // ([[project_isehara_game_distance_perf_tuning]]の「road-submersion」課題とは別件。
-  // 陸地側の底上げはLAND_FLOOR_MARGIN_M、橋はpart8.js/part3.js参照)。
-  let saved = NaN;
-  try { saved = parseFloat(localStorage.getItem('iseharaSeaLevel')); } catch (e) {}
-  seaLevelM = Number.isFinite(saved) ? saved : 0;
-  seaLevelM = Math.max(-10, Math.min(10, seaLevelM)); // -10〜10m
+  // 陸地側の底上げはLAND_FLOOR_MARGIN_M、橋はpart3.js、海面ポリゴンは
+  // [[project_isehara_game_sea_coastline]]参照)。
   SEA_Y = (seaLevelM - elevBase) * ELEV_SCALE;
   const c = document.createElement('canvas'); c.width = 128; c.height = 128;
   const g = c.getContext('2d');
@@ -414,30 +413,6 @@ function initDistantSea() {
   seaMesh.frustumCulled = false;
   seaMesh.renderOrder = -1; // 空(-2)の後・地形の前。depthTestで陸には隠れる
   scene.add(seaMesh);
-  setupSeaSlider();
-}
-
-// 海面標高スライダーの初期化・配線(max = 詳細エリア最低標高 → 街は水没しない範囲で調整)
-function setupSeaSlider() {
-  const sl = document.getElementById('seaSlider');
-  const lab = document.getElementById('seaVal');
-  // 【2026-07-21】海面スライダーは独立した#seaCtrlポップオーバーから⚙設定パネル
-  // (#perfCtrl)内のセクションへ統合されたため、タッチドラッグがカメラ回転ハンドラに
-  // 奪われないようにするstopPropagationの対象も、パネル全体(#perfCtrl)に合わせる。
-  const box = document.getElementById('perfCtrl');
-  if (!sl || !lab) return;
-  sl.min = -10; sl.max = 10; sl.step = 0.5;   // 海面標高 -10〜10m を 0.5m 刻みで
-  sl.value = seaLevelM;
-  lab.textContent = seaLevelM.toFixed(1);
-  sl.addEventListener('input', () => {
-    seaLevelM = Math.max(-10, Math.min(10, +sl.value));
-    lab.textContent = seaLevelM.toFixed(1);
-    try { localStorage.setItem('iseharaSeaLevel', String(seaLevelM)); } catch (e) {}
-    setSeaLevel();
-  });
-  // スマホ: スライダー操作がカメラ回転ハンドラに奪われないようにする
-  if (box) ['touchstart', 'touchmove', 'pointerdown'].forEach(ev =>
-    box.addEventListener(ev, e => e.stopPropagation(), { passive: false }));
 }
 
 // OSM(Overpass)データの取得は、常にpart8.jsのタイル取得システム(checkOSMTiles/

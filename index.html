@@ -105,7 +105,6 @@ body {
 }
 #perfCtrl .settingsSection:first-of-type { margin-top:10px; padding-top:0; border-top:none; }
 #perfCtrl input[type=range] { width:100%; margin-top:8px; accent-color:var(--accent); }
-#seaVal { color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; }
 
 /* デバッグ: タイル読み込み状況オーバーレイの色凡例(🩺ONの間だけ常時表示) */
 #debugTileLegend {
@@ -484,11 +483,6 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
       <button id="hardResetBtn" data-i18n="hardResetBtn">🔄 データを全消去して再読込</button>
     </div>
     <div id="perfDesc" data-i18n="hardResetDesc">読み込み・生成が滞って直らない時用: 保持している地形・道路・線路・建物データとキャッシュを全て消去し、現在地のまま再読み込みします(今すぐ整理より強力ですが、再読み込みが発生します)</div>
-  </div>
-
-  <div class="settingsSection">
-    <span data-i18n="seaLevelLabel">🌊 海面の高さ</span> <span id="seaVal">3.0</span>m
-    <input id="seaSlider" type="range" min="-10" max="10" step="0.5" value="3">
   </div>
 
   <div class="settingsSection">
