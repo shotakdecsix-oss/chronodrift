@@ -963,6 +963,13 @@ function processCoastlineFill(elements, tileList) {
     if (pts.length < 2) continue;
     ribbons.push(_buildCoastlineRibbon(pts));
   }
+  // 【2026-08-04・診断計器】「直っていない」再報告を受け、パイプラインのどこで止まっているか
+  // (a)Overpassがcoastlineを返しているか (b)開いた/閉じたの分類 (c)タイルとの重なり判定
+  // (d)予算切れ、を切り分けるためのログ。coastline要素が1件でもあるバッチでだけ出す。
+  if (ribbons.length > 0 || islands.length > 0) {
+    console.log('[coastline] batch: ribbons=' + ribbons.length + ' islands=' + islands.length +
+      ' tiles=' + tileList.length);
+  }
   const seaY = seaLevelY();
   for (const t of tileList) {
     const key = t.tx + ',' + t.tz;
@@ -974,13 +981,20 @@ function processCoastlineFill(elements, tileList) {
     if (nearRibbons.length === 0) continue;
     const nearIslands = islands.filter(is => is.minX <= x1 && is.maxX >= x0 && is.minZ <= z1 && is.maxZ >= z0);
     const holes = nearIslands.length ? nearIslands.map(is => is.pts) : null;
+    let builtCount = 0, emptyCount = 0, budgetFailCount = 0;
     for (const r of nearRibbons) {
       const poly = _clipPolyToTile(r.ribbon, x0, x1, z0, z1);
-      if (poly.length < 3) continue;
+      if (poly.length < 3) { emptyCount++; continue; }
       if (areaPolyBudgetOK('sea')) {
         buildFixedFlatAreaPoly(poly, waterAreaMat, 0.15, seaY, holes);
+        builtCount++;
+      } else {
+        budgetFailCount++;
       }
     }
+    console.log('[coastline] tile ' + key + ': nearRibbons=' + nearRibbons.length +
+      ' nearIslands=' + nearIslands.length + ' built=' + builtCount +
+      ' empty=' + emptyCount + ' budgetFail=' + budgetFailCount);
   }
 }
 
