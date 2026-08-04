@@ -207,7 +207,9 @@ const avoidGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッ�
 // 【2026-08-01】distance based eviction(evictFarAreaPolys)を試したが「すぐにリボンだけに
 // なった」と実機報告があり無効化(above unloadFarAreaPolys呼び出し箇所参照)。回収して
 // 再利用する方式の代わりに、同じ「面メッシュは軽い」根拠でwaterをさらに増枠する安全側の対応。
-const areaPolyBudget = { park: 400, water: 1600, farm: 250, campus: 400, sea: 800 }; // 面メッシュのドローコール予算
+// 【2026-08-04】sea 800→2000。NYのように狭い水路(イーストリバー等)の両岸が同じタイルに
+// 複数区間(chain)ぶん収まる密な海岸線では、800だと使い切る恐れがあったため引き上げ。
+const areaPolyBudget = { park: 400, water: 1600, farm: 250, campus: 400, sea: 2000 }; // 面メッシュのドローコール予算
 // 予算が尽きた事実を可視化する(以前は静かに回避判定のみへフォールバックし気づけなかった)。
 // 種類ごとに初回だけコンソールへ警告し、ログが埋もれないようにする。
 const _areaPolyWarned = new Set();
@@ -911,13 +913,12 @@ function _clipPolyToTile(poly, x0, x1, z0, z1) {
 // タイルに一度でも海面を試みたら(coastlineが無く何もしなかった場合も含め)二度と再試行しない
 // —— coastlineの位置は実データなので、同じタイルへ何度到着しても結果は変わらない。
 const seenCoastlineTiles = new Set();
-// 開いたcoastline wayの実ジオメトリを保ったまま「海側に大きくはみ出したリボン」を作る:
-// [way全点(順序通り)] + [終点を海側へFARだけオフセット] + [始点を海側へFARだけオフセット]。
+// 点列chain(順序通り、2点以上)から「海側に大きくはみ出したリボン」を作る:
+// [chain全点] + [終点を海側へFARだけオフセット] + [始点を海側へFARだけオフセット]。
 // これを地図に忠実な「最低限これだけは海」というポリゴンとみなし、後でタイル矩形(凸)で
-// クリップする。半平面の逐次交差(旧実装)は被クリップ側=タイルが凸である前提が必要だが、
+// クリップする。半平面の逐次交差(旧v3実装)は被クリップ側=タイルが凸である前提が必要だが、
 // 現実の海岸線は湾曲・入江で非凸なため、直線近似のクリップだと「地図に忠実じゃない」形に
-// なっていた(2026-08-04ユーザー報告)。ribbon側で実ジオメトリを保持し、タイル側だけを
-// クリップ窓にすることで、この制約を満たしたまま実際の海岸線の曲がりをそのまま活かせる。
+// なっていた(2026-08-04ユーザー報告→v4でribbon化)。
 const COASTLINE_SEA_FAR = 3000; // タイル(1600m四方、対角線≈2263m)を確実に覆う沖合オフセット
 function _buildCoastlineRibbon(pts) {
   const p0 = pts[0], p1 = pts[1], pNm1 = pts[pts.length - 2], pN = pts[pts.length - 1];
@@ -926,20 +927,50 @@ function _buildCoastlineRibbon(pts) {
   // 海側=進行方向の右手側=(-dz,dx)(_crossSideの導出と同じ規約)
   const seaP0 = { x: p0.x + (-d0z / d0len) * COASTLINE_SEA_FAR, z: p0.z + (d0x / d0len) * COASTLINE_SEA_FAR };
   const seaPN = { x: pN.x + (-dNz / dNlen) * COASTLINE_SEA_FAR, z: pN.z + (dNx / dNlen) * COASTLINE_SEA_FAR };
-  const ribbon = pts.concat([seaPN, seaP0]);
-  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-  for (const p of ribbon) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
-  return { ribbon, minX, maxX, minZ, maxZ };
+  return pts.concat([seaPN, seaP0]);
+}
+// 【2026-08-04・NYの川面(ハドソン川・イーストリバー等)が全く表示されない不具合の対策】
+// v4はway全体1本から1枚の巨大リボンを作り、それをタイルでクリップしていた。伊勢原の
+// 短い海岸線では問題なかったが、マンハッタンのように長く曲がりくねったwayでは、両端点
+// だけをFAR(3000m)オフセットして閉じる「リボンを閉じる辺」が、途中の湾曲したway自体と
+// 交差してしまい(=自己交差ポリゴン)、_instantiateAreaPolyMeshが退化ポリゴンとして
+// 黙って諦めていた(「全く表示されない」という症状と一致)。加えて川幅の狭い水路(East
+// River等)では対岸のwayのFARオフセットが対岸の陸地を越えて伸びるため、そもそも
+// FAR=3000mという大きさ自体がこの手の狭い水域と相性が悪い。
+// 対策: リボンをway全体ではなく「そのタイルに実際にかかる連続区間(chain)」単位で作る。
+// タイルは1600m四方なので、区間はその近辺だけの短い折れ線になり、自己交差のリスクが
+// 大きく下がる(短い区間なら湾曲していても両端FARオフセットの閉じ辺と交差しにくい)。
+function _wayLocalRibbonsForTile(pts, x0, x1, z0, z1) {
+  const n = pts.length;
+  const chains = [];
+  let i = 0;
+  while (i < n - 1) {
+    const a = pts[i], b = pts[i + 1];
+    const overlaps = Math.min(a.x, b.x) <= x1 && Math.max(a.x, b.x) >= x0 &&
+      Math.min(a.z, b.z) <= z1 && Math.max(a.z, b.z) >= z0;
+    if (!overlaps) { i++; continue; }
+    let j = i;
+    while (j < n - 1) {
+      const aa = pts[j], bb = pts[j + 1];
+      const ov = Math.min(aa.x, bb.x) <= x1 && Math.max(aa.x, bb.x) >= x0 &&
+        Math.min(aa.z, bb.z) <= z1 && Math.max(aa.z, bb.z) >= z0;
+      if (!ov) break;
+      j++;
+    }
+    if (j - i + 1 >= 2) chains.push(pts.slice(i, j + 1));
+    i = j + 1;
+  }
+  return chains.map(_buildCoastlineRibbon);
 }
 // data.elements(1バッチ分のOverpass応答)からnatural=coastlineのwayを集め、tileList
 // (このバッチが対象にしたタイル位置の配列 {tx,tz})に含まれる各タイルについて、
-// 海側リボン(_buildCoastlineRibbon)をタイル矩形でクリップした海面ポリゴンを生成する。
-// batchKind==='building'は natural=coastline を含まないクエリなので何もしない
-// (OSM_TILE_CLAUSES_BUILDING参照)。
+// そのタイル近辺だけの海側リボン(_wayLocalRibbonsForTile)をタイル矩形でクリップした
+// 海面ポリゴンを生成する。batchKind==='building'は natural=coastline を含まないクエリ
+// なので何もしない(OSM_TILE_CLAUSES_BUILDING参照)。
 function processCoastlineFill(elements, tileList) {
   if (!tileList || tileList.length === 0) return;
   if (tileList[0].kind === 'building') return; // このkindのクエリはnatural=coastlineを含まない
-  const ribbons = []; // 開いた(=本土沿いの)coastline。実ジオメトリを保った海側リボン
+  const openWays = []; // 開いた(=本土沿いの)coastline way。{pts,minX,maxX,minZ,maxZ}
   const islands = []; // 閉じた(=島1周)coastline。海側判定には使わず、穴として除外するだけ
   const CLOSE_EPS = 1; // 始点・終点がこの距離(m)以内なら閉じたリング(=島)とみなす
   for (const el of elements) {
@@ -949,25 +980,18 @@ function processCoastlineFill(elements, tileList) {
     const p0 = pts[0], pN = pts[pts.length - 1];
     const closed = pts.length >= 4 &&
       Math.hypot(p0.x - pN.x, p0.z - pN.z) <= CLOSE_EPS;
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
     // 【2026-08-04・江の島が海に沈む不具合の対策】閉じたリング(=島1周のcoastline)は、
     // 開いた本土coastlineと同じ「海側リボン」を作ると、島の外周をぐるっと囲む形になり
     // 内側(島の陸地)まで海扱いになってしまう。開いた本土coastlineと閉じた島coastlineを
     // 区別し、島はribbon化せず、後段でホール(buildFixedFlatAreaPolyのholes)として
     // 海面ポリゴンから除外するだけにする。
-    if (closed) {
-      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-      for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
-      islands.push({ pts, minX, maxX, minZ, maxZ });
-      continue;
-    }
-    if (pts.length < 2) continue;
-    ribbons.push(_buildCoastlineRibbon(pts));
+    if (closed) { islands.push({ pts, minX, maxX, minZ, maxZ }); continue; }
+    openWays.push({ pts, minX, maxX, minZ, maxZ });
   }
-  // 【2026-08-04・診断計器】「直っていない」再報告を受け、パイプラインのどこで止まっているか
-  // (a)Overpassがcoastlineを返しているか (b)開いた/閉じたの分類 (c)タイルとの重なり判定
-  // (d)予算切れ、を切り分けるためのログ。coastline要素が1件でもあるバッチでだけ出す。
-  if (ribbons.length > 0 || islands.length > 0) {
-    console.log('[coastline] batch: ribbons=' + ribbons.length + ' islands=' + islands.length +
+  if (openWays.length > 0 || islands.length > 0) {
+    console.log('[coastline] batch: openWays=' + openWays.length + ' islands=' + islands.length +
       ' tiles=' + tileList.length);
   }
   const seaY = seaLevelY();
@@ -975,24 +999,28 @@ function processCoastlineFill(elements, tileList) {
     const key = t.tx + ',' + t.tz;
     if (seenCoastlineTiles.has(key)) continue;
     seenCoastlineTiles.add(key);
-    if (ribbons.length === 0) continue; // 島(閉じたリング)しか無いタイルは埋めない(=従来通り何もしない)
+    if (openWays.length === 0) continue; // 島(閉じたリング)しか無いタイルは埋めない(=従来通り何もしない)
     const x0 = t.tx * OSM_TILE_M, x1 = x0 + OSM_TILE_M, z0 = t.tz * OSM_TILE_M, z1 = z0 + OSM_TILE_M;
-    const nearRibbons = ribbons.filter(r => r.minX <= x1 && r.maxX >= x0 && r.minZ <= z1 && r.maxZ >= z0);
-    if (nearRibbons.length === 0) continue;
+    const nearWays = openWays.filter(w => w.minX <= x1 && w.maxX >= x0 && w.minZ <= z1 && w.maxZ >= z0);
+    if (nearWays.length === 0) continue;
     const nearIslands = islands.filter(is => is.minX <= x1 && is.maxX >= x0 && is.minZ <= z1 && is.maxZ >= z0);
     const holes = nearIslands.length ? nearIslands.map(is => is.pts) : null;
-    let builtCount = 0, emptyCount = 0, budgetFailCount = 0;
-    for (const r of nearRibbons) {
-      const poly = _clipPolyToTile(r.ribbon, x0, x1, z0, z1);
-      if (poly.length < 3) { emptyCount++; continue; }
-      if (areaPolyBudgetOK('sea')) {
-        buildFixedFlatAreaPoly(poly, waterAreaMat, 0.15, seaY, holes);
-        builtCount++;
-      } else {
-        budgetFailCount++;
+    let builtCount = 0, emptyCount = 0, budgetFailCount = 0, ribbonCount = 0;
+    for (const w of nearWays) {
+      const localRibbons = _wayLocalRibbonsForTile(w.pts, x0, x1, z0, z1);
+      for (const ribbon of localRibbons) {
+        ribbonCount++;
+        const poly = _clipPolyToTile(ribbon, x0, x1, z0, z1);
+        if (poly.length < 3) { emptyCount++; continue; }
+        if (areaPolyBudgetOK('sea')) {
+          buildFixedFlatAreaPoly(poly, waterAreaMat, 0.15, seaY, holes);
+          builtCount++;
+        } else {
+          budgetFailCount++;
+        }
       }
     }
-    console.log('[coastline] tile ' + key + ': nearRibbons=' + nearRibbons.length +
+    console.log('[coastline] tile ' + key + ': nearWays=' + nearWays.length + ' ribbons=' + ribbonCount +
       ' nearIslands=' + nearIslands.length + ' built=' + builtCount +
       ' empty=' + emptyCount + ' budgetFail=' + budgetFailCount);
   }
