@@ -487,33 +487,71 @@ function _collectWaterNodes(entry) {
   }
   return { ux, uz, sMin, nBins, nodes };
 }
+// 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER_v2.md 修正B】ビン内の集約を単純な最大値
+// ではなく、ノード数が十分あれば高位パーセンタイル(90%点)にする。最大値は定義上「1点の
+// 外れ値」に対して脆弱(堤防・橋脚・中州の縁など、実際の川筋とは無関係な1ノードがそのまま
+// ビンの代表値になってしまう)。ノードが1〜2個しかない狭いビンでは percentile を取る意味が
+// 薄いので、従来通り最大値にフォールバックする。
+function _binPercentileMax(heights) {
+  if (heights.length <= 2) {
+    let m = heights[0];
+    for (let k = 1; k < heights.length; k++) if (heights[k] > m) m = heights[k];
+    return m;
+  }
+  const sorted = heights.slice().sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.ceil(0.9 * sorted.length) - 1);
+  return sorted[idx];
+}
 function _computeWaterProfileFromNodes(nodeInfo) {
   const { ux, uz, sMin, nBins, nodes } = nodeInfo;
-  const M = new Array(nBins + 1).fill(null);
+  const buckets = new Array(nBins + 1);
+  for (let b = 0; b <= nBins; b++) buckets[b] = [];
   for (let k = 0; k < nodes.length; k += 3) {
     const i = nodes[k], j = nodes[k + 1], b = nodes[k + 2];
-    const h = farNodeY(i, j); // ここを毎回読み直すことで、地形(NEAR到達)の更新を反映する
-    if (M[b] === null || h > M[b]) M[b] = h;
+    // 【2026-08-03・修正A-2】欠測(GSIタイル404等でterrainYOrNullがnullを返す)ノードは候補から
+    // 外す。以前はfarNodeYの`|| 0`で欠測が「標高0m」に化けて紛れ込み、実測でこれが橋の水没の
+    // 主因(欠測地点の水位が地面より3m以上高い0.3で確定していた)と判明した。
+    const h = farNodeYOrNull(i, j);
+    if (h === null) continue;
+    buckets[b].push(h);
   }
-  // ノードが1つも掛からなかったビン(細い川の格子の隙間等)は近傍から埋める
+  let anyData = false;
+  const M = new Array(nBins + 1).fill(null);
+  for (let b = 0; b <= nBins; b++) {
+    if (buckets[b].length === 0) continue;
+    anyData = true;
+    M[b] = _binPercentileMax(buckets[b]);
+  }
+  // 【2026-08-03・修正A-3】この水面ポリゴンの全ビンが欠測(=周辺のGSIタイルが軒並み404、
+  // NEARもWIDEも届いていない)なら、プロファイルを確定させない。不完全なデータで水位を
+  // でっち上げず、地形データが実際に届くまで保留する(大原則1・16と同じ考え方)。
+  if (!anyData) return null;
+  // ノードはあったが特定のビンだけ欠測(細い川の格子の隙間・GSIタイル境界等、局所的な穴)は
+  // 同じ川の中の近傍ビンから埋める。全滅(GSI全域404)とは別の、正常なケース。
   for (let b = 0; b <= nBins; b++) {
     if (M[b] !== null) continue;
     for (let d = 1; d <= nBins; d++) {
       if (b - d >= 0 && M[b - d] !== null) { M[b] = M[b - d]; break; }
       if (b + d <= nBins && M[b + d] !== null) { M[b] = M[b + d]; break; }
     }
-    if (M[b] === null) M[b] = 0; // 全滅(理論上起きないはずの保険)
   }
-  // 4) 高い側を上流とみなし、累積最大で単調非増加にする
+  // 4) 高い側を上流とみなし、累積最大で単調非増加にする。
+  // 【2026-08-03・修正B】以前は無制限の累積最大だったため、1点だけ高いノード(堤防・橋脚・
+  // 中州の縁等)が川の片側全域にそのまま配られる「増幅器」になっていた。隣接ビンから
+  // 引き継げる上げ幅をMAX_RISE_PER_BIN(200mあたり)までに制限する「ラチェット」方式にする。
+  // 遠くの異常値がいきなり全域に効くことはなくなるが、実際の川の緩やかな縦断勾配
+  // (複数ビンにまたがる正当な高低差)はビンを跨ぐごとに少しずつ積み上がるので表現できる。
+  const M0 = M.slice(); // 各ビン自身の(伝播前の)基準値。ラチェットの上限計算に使う
+  const MAX_RISE_PER_BIN = 0.5; // ゲーム単位/200m(実勾配0.125%相当を超える持ち上がりは異常とみなす)
   const q = Math.max(1, Math.floor((nBins + 1) / 4));
   let headAvg = 0, tailAvg = 0;
-  for (let b = 0; b < q; b++) headAvg += M[b];
-  for (let b = nBins - q + 1; b <= nBins; b++) tailAvg += M[b];
+  for (let b = 0; b < q; b++) headAvg += M0[b];
+  for (let b = nBins - q + 1; b <= nBins; b++) tailAvg += M0[b];
   headAvg /= q; tailAvg /= q;
   if (headAvg >= tailAvg) { // b=0側が上流(高い) → 下流側(b大)から上流側(b小)へ辿って伝播
-    for (let b = nBins - 1; b >= 0; b--) M[b] = Math.max(M[b], M[b + 1]);
+    for (let b = nBins - 1; b >= 0; b--) M[b] = Math.max(M0[b], Math.min(M[b + 1], M0[b] + MAX_RISE_PER_BIN));
   } else { // b=nBins側が上流 → 上流側(b小)から下流側(b大)へ辿って伝播
-    for (let b = 1; b <= nBins; b++) M[b] = Math.max(M[b], M[b - 1]);
+    for (let b = 1; b <= nBins; b++) M[b] = Math.max(M0[b], Math.min(M[b - 1], M0[b] + MAX_RISE_PER_BIN));
   }
   // 5) 前後3ビンの平均で上向きにのみ均す(単調性は崩さない。Math.maxなので必ずM[b]以上を維持)
   const M2 = M.slice();
@@ -541,15 +579,23 @@ function _computeWaterProfile(entry) {
   const profile = _computeWaterProfileFromNodes(entry.waterNodeInfo);
   const cx = (entry.minX + entry.maxX) / 2, cz = (entry.minZ + entry.maxZ) / 2;
   const near = _isNearCoverage(cx, cz);
-  console.log('[water] profile bins=' + profile.M.length +
-    ' min=' + Math.min(...profile.M).toFixed(1) + ' max=' + Math.max(...profile.M).toFixed(1) +
-    ' near=' + (near === null ? '?' : (near ? 'yes' : 'NO')));
+  if (profile) {
+    console.log('[water] profile bins=' + profile.M.length +
+      ' min=' + Math.min(...profile.M).toFixed(1) + ' max=' + Math.max(...profile.M).toFixed(1) +
+      ' near=' + (near === null ? '?' : (near ? 'yes' : 'NO')));
+  } else {
+    // 【修正A-3】全ビン欠測。地形データ(GSIタイル)が届き次第rebuildAreaPolyMeshが
+    // 再計算するので、その時点でこのログが消えて通常のログに置き換わるはずが正しい状態。
+    console.log('[water] profile UNAVAILABLE (全ビン欠測、地形データ待ち) near=' + (near === null ? '?' : (near ? 'yes' : 'NO')));
+  }
   return profile;
 }
 // 【診断計器】水面プロファイルの再計算結果が(NEAR地形の到達等で)実質的に変わったかどうか。
 // 変わっていれば、その範囲の道路(=橋)を作り直させる必要がある(下のrebuildAreaPolyMesh参照)。
+// null⇔非nullの遷移(データが揃った/失われた)も「変わった」として扱う。
 function _waterProfileChanged(a, b, thresholdM) {
-  if (!a || !b || !a.M || !b.M || a.M.length !== b.M.length) return true;
+  if (!a || !b) return a !== b;
+  if (!a.M || !b.M || a.M.length !== b.M.length) return true;
   for (let i = 0; i < a.M.length; i++) {
     if (Math.abs(a.M[i] - b.M[i]) > thresholdM) return true;
   }
@@ -561,13 +607,24 @@ function _waterProfileChanged(a, b, thresholdM) {
 // かさ上げ(_computeWaterProfileのmax+マージン+単調伝播+上向きスムージング)が
 // 橋の直線より高くなり、橋桁が水没して見える不具合が発生した。この関数で橋側から
 // 「実際にここの水位はいくつか」を問い合わせられるようにする。
+// 【2026-08-03・v3(ログ無しでの推測修正)】v2までの一連の修正後も「潜って見ると水面の下に
+// 橋路面がある」と再報告された。厳密な`pointInPolygon`だけでは、橋のOSM way(道路として
+// 別途デジタイズされている)の経路と、水面ポリゴンの輪郭(河岸として別途デジタイズされて
+// いる)の間にメートル単位のズレがあるケースを取りこぼす可能性がある(道と水域は別の
+// 実測起源のデータで、境界が数m〜十数mずれて噛み合わないことは珍しくない)。橋の
+// クリアランス判定という用途では「水を見逃す(=水没)」方が「陸地なのに少し余分に
+// 底上げする」より実害が大きいため、輪郭から`WATER_QUERY_MARGIN`だけ外側も「水がある」
+// とみなす。
+const WATER_QUERY_MARGIN = 20; // 水域ポリゴン輪郭からのマージン(m)。橋の見逃しより誤検出の方が実害が小さいため寄せる
 function waterSurfaceYAt(x, z) {
   let best = null;
-  for (const e of queryPolyGrid(areaPolyGrid, x, x, z, z)) {
+  const m = WATER_QUERY_MARGIN;
+  for (const e of queryPolyGrid(areaPolyGrid, x - m, x + m, z - m, z + m)) {
     if (e.kind !== 'flat' || !e.waterProfile) continue;
-    if (x < e.minX || x > e.maxX || z < e.minZ || z > e.maxZ) continue;
-    if (!pointInPolygon(x, z, e.pts)) continue;
+    if (x < e.minX - m || x > e.maxX + m || z < e.minZ - m || z > e.maxZ + m) continue;
+    if (!pointInPolygon(x, z, e.pts) && !_nearPolygonBoundary(x, z, e.pts, m)) continue;
     let inHole = false;
+    // 中州(hole)の「内側の奥」までマージンで拾ってしまわないよう、hole側は厳密判定のまま
     if (e.holes) { for (const hp of e.holes) { if (hp.length >= 4 && pointInPolygon(x, z, hp)) { inHole = true; break; } } }
     if (inHole) continue;
     const y = _waterYAt(e, x, z);
@@ -577,6 +634,12 @@ function waterSurfaceYAt(x, z) {
 }
 function _waterYAt(entry, x, z) {
   const p = entry.waterProfile;
+  // 【2026-08-03・修正A-3】プロファイル未確定(全ビン欠測、地形データ待ち)の間は、メッシュを
+  // 完全に消すわけにもいかないため一時的にgetGroundY基準で表示しておく(rebuildAreaPolyMeshが
+  // NEAR地形の到達ごとに再計算するので、データが揃い次第自動的に正しいプロファイルへ置き換わる)。
+  // waterSurfaceYAt側は`!e.waterProfile`で弾いているため、この一時値が橋のクリアランス判定に
+  // 誤って使われることは無い。
+  if (!p) return getGroundY(x, z) + entry.yOff;
   const bf = (x * p.ux + z * p.uz - p.sMin) / WATER_BIN;
   const n = p.M.length;
   let b0 = Math.floor(bf);

@@ -1047,25 +1047,31 @@ const BRIDGE_MIN_CLEARANCE_M = 1.5; // 実標高0mからの最低クリアラン
 // 底上げ量が必ずゼロになる(=地面道路の高さと完全に一致する)ようにする。
 const BRIDGE_CLEARANCE_ABOVE_WATER_M = 2.0; // 水面から橋桁下端までの最低クリアランス(実m)
 const BRIDGE_RAMP_FRAC = 0.15; // 橋の両端から何割の区間を立ち上がりの助走に使うか
-// 【2026-08-03・診断計器】橋の中央付近(f=0.3〜0.7)なのにwaterSurfaceYAtがnullを返した回数。
-// 増え続けるなら「本当は水面の真上なのに水面ポリゴンが見つかっていない」ケース
-// (直線近似のズレ・水面ポリゴン未コミット等、疑い3/4)が実在する証拠になる。
+// 【2026-08-03・診断計器・v2で意味を変更】橋(bridge=yesのway)なのに、20m間隔の密サンプルで
+// way全体を通じて一度も水面が検出されなかった回数。谷・線路またぎ等の水以外の橋なら
+// 正常だが、相模川周辺のwayでこれが多発するなら「水面ポリゴンがまだ届いていない
+// (M1/M2は直したが、なお水面側のコミット自体が遅れているケース)」を疑う材料になる。
 let _bridgeMidNoWater = 0;
 
 // 【2026-07-21・橋対応】橋区間の両端の高さ(bridgeInfo.ax/az/bx/bzの地形高さをfracA/fracBで
 // 線形補間したもの)を求める共通ヘルパー。見た目(makeRoadGeo)と足場判定(bridgeSlopes/
 // floorHeightAt)の両方がこれを使うことで、常に同じ高さになることを保証する
 // (別々に計算式を持つと将来どちらかだけ直し忘れてズレる)。
-// 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER.md 4-3/4-4対応・3回目の橋修正】
-// 「頻発する」との再報告を受けて外部相談した結果、以前の設計の前提2つに穴があると判明した。
-// (1) 「f=0/1ちょうど=地面との接続点」という前提は、OSMが1本の物理的な橋を複数のwayに
-//     分割してタグ付けしている場合に成立しない(珍しくない)。分割断片同士の継ぎ目
-//     (=そのwayのf=0やf=1)が実際には川の上にあることがあり、無条件にクリアランスを
-//     ゼロへ戻すとそこだけ沈んで見える。「橋によって/同じ橋の一部だけ埋もれる」という
-//     ムラの正体だった。→ 位置(f)ではなく実データ(そこに水があるか)で判定する。
-// (2) heightAt内の位置サンプリングが、橋全体の入口・出口2点(ax/az-bx/bz)を結ぶ直線上の
-//     推定位置だった。橋がカーブしていると実経路とズレて水面の外を誤ってサンプルする
-//     ことがある。→ part8.jsから渡されるこのセグメントの実座標(sx/sz, ex/ez)を使う。
+// 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER_v2.md 修正D・4回目の橋修正(設計変更)】
+// PC Chrome DevTools実測により、v1(点ごとの判定+aOnWater/bOnWater)には2つの欠陥が残って
+// いたと確定した: (a) 計測点(セグメント中点)と実際のサンプリング位置(ax-bx直線上の推定
+// 位置)がズレているケースがあった(疑い3が実測で確定)。(b) smoothstepのランプ区間の途中で
+// 「必要な底上げ」に到達しきる前の高さのまま桁下が水面に浸かる行があった。
+// 根本的な設計変更: 「点ごとに水があるか」を都度判定するのをやめ、**way全体**を20m間隔で
+// 実ジオメトリ(part8.jsが共有参照で渡すwayPts/wayCum/wayTotalLen)に沿って密にサンプルし、
+// (1) way全体で検出した水位の最大値Wmax、(2) 水を検出した区間[s0,s1](way全長に対する
+// 0..1の比率)の2つだけをway単位で1回求める。デッキ高さはs0..s1の全区間で一律Wmax基準に
+// 揃え(1点の判定漏れが致命傷にならない)、ランプはs0より手前/s1より奥の、確実に陸地側の
+// 区間にだけ置く。way分割で継ぎ目(=そのwayのf=0/1)が実は川の上にある場合も、s0=0や
+// s1=1になるだけで自然に処理される(v1のaOnWater/bOnWaterによる場合分けが丸ごと不要になる)。
+// wayPts等はway全体の全セグメントで同じ配列を共有しているため、呼ばれるたびに再サンプルする
+// (=水面が後から届いても、次に道路が再構築された時に自己修復する。M1のrebuildRoadsInBounds
+// と組み合わせて機能する)。
 function bridgeSegmentY(bridgeInfo) {
   // 実標高0m(海面調整スライダーの影響を受けない固定基準)のゲーム高さ。SEA_Yの式から
   // seaLevelM部分だけ外し、常に0m基準にしたもの。
@@ -1074,35 +1080,43 @@ function bridgeSegmentY(bridgeInfo) {
   // yA0/yB0は「地面道路と接続する固定端」の基準線(水位由来の底上げは加えない)。
   const yA0 = Math.max(getGroundY(bridgeInfo.ax, bridgeInfo.az), floor);
   const yB0 = Math.max(getGroundY(bridgeInfo.bx, bridgeInfo.bz), floor);
-  const hasWaterFn = typeof waterSurfaceYAt === 'function';
-  // このway全体の入口(a)・出口(b)が、それぞれ水面の真上かどうか(=地面への接続点では
-  // なく、隣のway断片との継ぎ目である可能性が高いか)。way全体で一度だけ判定すればよい。
-  const aOnWater = hasWaterFn && waterSurfaceYAt(bridgeInfo.ax, bridgeInfo.az) != null;
-  const bOnWater = hasWaterFn && waterSurfaceYAt(bridgeInfo.bx, bridgeInfo.bz) != null;
-  const heightAt = (f, x, z) => {
-    const base = yA0 + (yB0 - yA0) * f;
-    if (!hasWaterFn) return base;
-    const wy = waterSurfaceYAt(x, z);
-    if (wy == null) {
-      if (f > 0.3 && f < 0.7) _bridgeMidNoWater++; // 【診断計器】中央なのに水が無い=疑い3/4
-      return base; // 水面の外(=橋の地面側の区間)はそのまま地面基準
+  let Wmax = null, s0 = null, s1 = null;
+  if (typeof waterSurfaceYAt === 'function' && bridgeInfo.wayPts && bridgeInfo.wayTotalLen > 0.01) {
+    const pts = bridgeInfo.wayPts, cum = bridgeInfo.wayCum, totalLen = bridgeInfo.wayTotalLen;
+    const STEP = 20; // 20m間隔で密にサンプル
+    const nSteps = Math.max(1, Math.ceil(totalLen / STEP));
+    let segIdx = 0;
+    for (let k = 0; k <= nSteps; k++) {
+      const s = Math.min(totalLen, k * STEP);
+      while (segIdx < cum.length - 2 && cum[segIdx + 1] < s) segIdx++;
+      const segLen = cum[segIdx + 1] - cum[segIdx];
+      const t = segLen > 0 ? (s - cum[segIdx]) / segLen : 0;
+      const px = pts[segIdx].x + (pts[segIdx + 1].x - pts[segIdx].x) * t;
+      const pz = pts[segIdx].z + (pts[segIdx + 1].z - pts[segIdx].z) * t;
+      const wy = waterSurfaceYAt(px, pz);
+      if (wy != null) {
+        if (Wmax === null || wy > Wmax) Wmax = wy;
+        const sf = s / totalLen;
+        if (s0 === null) s0 = sf;
+        s1 = sf;
+      }
     }
-    const needed = wy + BRIDGE_CLEARANCE_ABOVE_WATER_M * ELEV_SCALE;
+  }
+  if (Wmax === null) _bridgeMidNoWater++; // 【診断計器】このway全体で一度も水面が検出されなかった回数
+  const heightAt = (f) => {
+    const base = yA0 + (yB0 - yA0) * f;
+    if (Wmax === null) return base; // way全体で水面が一度も検出されなかった(=水のかかっていない普通の橋)
+    const needed = Wmax + BRIDGE_CLEARANCE_ABOVE_WATER_M * ELEV_SCALE;
     if (needed <= base) return base;
+    if (f >= s0 && f <= s1) return needed; // 水に掛かる区間は一律満額(1点の判定漏れが効かない)
     let edgeT;
-    if (aOnWater && bOnWater) edgeT = 1; // 両端とも川の上=中間断片。ランプ無しで満額クリアランス
-    else if (aOnWater) edgeT = (1 - f) / BRIDGE_RAMP_FRAC; // a側は隣の断片との継ぎ目、b側だけ地面
-    else if (bOnWater) edgeT = f / BRIDGE_RAMP_FRAC; // b側が継ぎ目、a側だけ地面
-    else edgeT = Math.min(f, 1 - f) / BRIDGE_RAMP_FRAC; // 両端とも地面(従来通りの通常の橋)
-    const ease = edgeT >= 1 ? 1 : (edgeT <= 0 ? 0 : edgeT * edgeT * (3 - 2 * edgeT)); // smoothstep
+    if (f < s0) edgeT = 1 - Math.min(1, (s0 - f) / BRIDGE_RAMP_FRAC);
+    else edgeT = 1 - Math.min(1, (f - s1) / BRIDGE_RAMP_FRAC);
+    if (edgeT < 0) edgeT = 0;
+    const ease = edgeT * edgeT * (3 - 2 * edgeT); // smoothstep
     return base + (needed - base) * ease;
   };
-  // このセグメントの実座標(part8.jsが渡す)。無ければ従来通り直線近似にフォールバックする。
-  const sx = bridgeInfo.sx != null ? bridgeInfo.sx : bridgeInfo.ax + (bridgeInfo.bx - bridgeInfo.ax) * bridgeInfo.fracA;
-  const sz = bridgeInfo.sz != null ? bridgeInfo.sz : bridgeInfo.az + (bridgeInfo.bz - bridgeInfo.az) * bridgeInfo.fracA;
-  const ex = bridgeInfo.ex != null ? bridgeInfo.ex : bridgeInfo.ax + (bridgeInfo.bx - bridgeInfo.ax) * bridgeInfo.fracB;
-  const ez = bridgeInfo.ez != null ? bridgeInfo.ez : bridgeInfo.az + (bridgeInfo.bz - bridgeInfo.az) * bridgeInfo.fracB;
-  return { yA: heightAt(bridgeInfo.fracA, sx, sz), yB: heightAt(bridgeInfo.fracB, ex, ez) };
+  return { yA: heightAt(bridgeInfo.fracA), yB: heightAt(bridgeInfo.fracB) };
 }
 
 // 橋(bridge=yes等)の「乗れる床」。motorwaySlopes(高速道路の桁)と全く同じ考え方で、
@@ -1145,6 +1159,18 @@ function makeRoadGeo(x1, z1, x2, z2, width, yOffset, bridgeInfo) {
     const bh = bridgeSegmentY(bridgeInfo);
     bridgeYA = bh.yA; bridgeYB = bh.yB;
   }
+  // 【2026-08-03・v3(ログ無しでの推測修正)】ここまでの一連の修正後も橋の水没が再報告された。
+  // 有力な未検証の可能性として、OSM側で`bridge=yes`タグが実際には付いていない(データの
+  // 欠落・タグ漏れ)実在の橋があり、`isBridge`判定(part8.js)に一切引っかからず`bridgeInfo`が
+  // nullのまま、地形追従(getGroundY)だけで水没していることがありうる。全道路頂点で毎回
+  // waterSurfaceYAtを呼ぶのは道路本数(数万本規模)を考えるとコスト的に許容できないため、
+  // まずこの区間の3点(両端+中点)だけで安く「近くに水面があるか」を判定し、該当した区間だけ
+  // 頂点ごとの底上げ判定を有効にする(=水面から離れた大多数の道路には一切コストをかけない)。
+  let waterFloorActive = false;
+  if (!bridgeInfo && typeof waterSurfaceYAt === 'function') {
+    waterFloorActive = waterSurfaceYAt((x1 + x2) / 2, (z1 + z2) / 2) != null ||
+      waterSurfaceYAt(x1, z1) != null || waterSurfaceYAt(x2, z2) != null;
+  }
 
   const verts = [], idxs = [], uvs = [];
   for (let i = 0; i <= segs; i++) {
@@ -1159,7 +1185,19 @@ function makeRoadGeo(x1, z1, x2, z2, width, yOffset, bridgeInfo) {
       const u = c / (cols - 1); // 0=left .. 1=right
       const off = hw - u * width;
       const vx = cx + px*off, vz = cz + pz*off;
-      const vy = bridgeVy != null ? bridgeVy + yOffset : getGroundY(vx, vz) + yOffset;
+      let vy;
+      if (bridgeVy != null) {
+        vy = bridgeVy + yOffset;
+      } else {
+        vy = getGroundY(vx, vz) + yOffset;
+        if (waterFloorActive) {
+          const wy = waterSurfaceYAt(vx, vz);
+          if (wy != null) {
+            const needed = wy + BRIDGE_CLEARANCE_ABOVE_WATER_M * ELEV_SCALE;
+            if (needed > vy) vy = needed;
+          }
+        }
+      }
       verts.push(vx, vy, vz);
       // u=横断方向0..1 / v=道なり距離[m](テクスチャ側のrepeatで車線・枕木の周期に変換)
       uvs.push(u, t * len);

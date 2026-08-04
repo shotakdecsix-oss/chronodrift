@@ -97,6 +97,19 @@ function establishRegionBase(raw) {
 
 // 【2026-07-17】sampleGridはjs/lib/pure.jsへ移動(CODE_REVIEW_20260717 P13-1)。
 
+// 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER_v2.md 修正A-1】terrainYの`|| 0`は、
+// 地形メッシュ・当たり判定など既存の広範な呼び出し元が「欠測なら海抜0扱い」に依存しているため
+// 変えない。ただし「欠測(データが無い)」と「実測で標高0m」を区別できないままだと、
+// 水面の高さ計算(part4.js _computeWaterProfile)のように「欠測を0という具体的な数値として
+// 最大値・伝播計算に混ぜてはいけない」用途で誤動作する(GSIタイル404で欠測が起きた地点の
+// 水位が、標高0m相当まで押し上げられてしまい、実測で橋の水没の主因と確定した)。
+// 欠測を欠測のまま(null)呼び出し側へ返す専用の関数を別途用意する。
+function terrainYOrNull(x, z) {
+  const near = sampleGrid(nearElev, nearCX, nearCZ, NEAR_W, NEAR_D, NEAR_SEGS, NEAR_SEGS1, x, z, true);
+  if (near !== null) return near;
+  const wide = sampleGrid(wideElev, wideCX, wideCZ, WIDE_W, WIDE_D, WIDE_SEGS, WIDE_SEGS1, x, z, false);
+  return (wide === null || wide === undefined) ? null : wide; // 0に潰さない
+}
 function terrainY(x, z) {
   // まずプレイヤー追従の高解像度NEARグリッドの範囲内かを見る(範囲外ならnull)
   const near = sampleGrid(nearElev, nearCX, nearCZ, NEAR_W, NEAR_D, NEAR_SEGS, NEAR_SEGS1, x, z, true);

@@ -59,6 +59,12 @@ function farNodeY(i, j) {
   if (typeof terrainY !== 'function') return 0;
   return terrainY(i * FAR_STEP, j * FAR_STEP) || 0;
 }
+// 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER_v2.md 修正A-1】farNodeYの`|| 0`と同じ理由で、
+// 欠測を区別できるノードクエリを別途用意する(part4.jsの水面プロファイル計算専用)。
+function farNodeYOrNull(i, j) {
+  if (typeof terrainYOrNull !== 'function') return null;
+  return terrainYOrNull(i * FAR_STEP, j * FAR_STEP);
+}
 
 // 描画されるメッシュ表面と厳密に一致する高さ(三角形分割もPlaneGeometryと同一)
 function farSurfaceY(x, z) {
