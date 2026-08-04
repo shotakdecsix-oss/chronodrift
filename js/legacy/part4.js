@@ -1052,18 +1052,33 @@ function processCoastlineFill(elements, tileList) {
     // 関わらず常にPhase2(タイル中心の海側判定)も行う(同じ色・高さなので重ね塗りになっても
     // 無害。むしろ「際の精密な形」と「中心の粗い全塗り」を両方敷く方が穴が残らない)。
     {
-      const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
-      let bestDist = Infinity, bestSeg = null;
-      for (const w of nearWays) {
-        const pts = w.pts;
-        for (let i = 0; i < pts.length - 1; i++) {
-          const a = pts[i], b = pts[i + 1];
-          const d = _distPointToSegment(cx, cz, a.x, a.z, b.x, b.z);
-          if (d < bestDist) { bestDist = d; bestSeg = { ax: a.x, az: a.z, bx: b.x, bz: b.z }; }
+      // 【2026-08-04・実機報告(NYジャージーシティ沖、同じ場所がまだ地面)】タイル中心
+      // 1点だけの判定だと、桟橋・入江等で海岸線が複雑な場所では中心がたまたま陸側寄りに
+      // 誤判定され、Phase1のribbon(渚のごく近くだけ)とPhase2(中心1点)の両方が
+      // カバーしない「隙間」がタイル内に残ることがあった。中心+4隅の計5点それぞれで
+      // 最寄り区間を判定し、過半数(3点以上)が海側ならタイル全体を塗る(1点だけの判定より
+      // 頑健)。
+      const samples = [
+        { x: (x0 + x1) / 2, z: (z0 + z1) / 2 },
+        { x: x0, z: z0 }, { x: x1, z: z0 }, { x: x1, z: z1 }, { x: x0, z: z1 }
+      ];
+      let seaVotes = 0;
+      for (const s of samples) {
+        let bestDist = Infinity, bestSeg = null;
+        for (const w of nearWays) {
+          const pts = w.pts;
+          for (let i = 0; i < pts.length - 1; i++) {
+            const a = pts[i], b = pts[i + 1];
+            const d = _distPointToSegment(s.x, s.z, a.x, a.z, b.x, b.z);
+            if (d < bestDist) { bestDist = d; bestSeg = { ax: a.x, az: a.z, bx: b.x, bz: b.z }; }
+          }
+        }
+        if (bestSeg && bestDist <= COASTLINE_SEA_FAR &&
+            _crossSide(bestSeg.ax, bestSeg.az, bestSeg.bx, bestSeg.bz, s.x, s.z) >= 0) {
+          seaVotes++;
         }
       }
-      if (bestSeg && bestDist <= COASTLINE_SEA_FAR &&
-          _crossSide(bestSeg.ax, bestSeg.az, bestSeg.bx, bestSeg.bz, cx, cz) >= 0) {
+      if (seaVotes >= 3) {
         const wholeTile = [{ x: x0, z: z0 }, { x: x1, z: z0 }, { x: x1, z: z1 }, { x: x0, z: z1 }];
         if (areaPolyBudgetOK('sea')) {
           buildFixedFlatAreaPoly(wholeTile, waterAreaMat, 0.15, seaY, holes);
