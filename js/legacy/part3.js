@@ -1141,7 +1141,7 @@ const bridgeSlopes = [];
 // 後から届いた際に通常の道路と同じタイミングで橋の高さも追従して精度が上がるようにするため
 // (高さを一度きり確定させて焼き込むと、地形がまだ粗い段階の値のまま固定されてしまう)。
 // 横断方向(cols)も全列で同じ高さにする(橋の路面は地形に倣わずフラットな板であるべきため)。
-function makeRoadGeo(x1, z1, x2, z2, width, yOffset, bridgeInfo) {
+function makeRoadGeo(x1, z1, x2, z2, width, yOffset, bridgeInfo, roadType) {
   const dx = x2-x1, dz = z2-z1;
   const len = Math.sqrt(dx*dx+dz*dz);
   if (len < 0.1) return null;
@@ -1166,8 +1166,13 @@ function makeRoadGeo(x1, z1, x2, z2, width, yOffset, bridgeInfo) {
   // waterSurfaceYAtを呼ぶのは道路本数(数万本規模)を考えるとコスト的に許容できないため、
   // まずこの区間の3点(両端+中点)だけで安く「近くに水面があるか」を判定し、該当した区間だけ
   // 頂点ごとの底上げ判定を有効にする(=水面から離れた大多数の道路には一切コストをかけない)。
+  // 【2026-08-03・v4で除外追加】type==='water'(waterway中心線の推定幅リボン)自身は対象外
+  // にする。このリボンは実形状の水面ポリゴン(+0.15)より意図的に低い+0.05に置かれ、実形状が
+  // ある区間では完全に隠れる設計(addRoad参照)。v3の安全網はこれを無視してリボンを水面+4
+  // 単位まで持ち上げてしまい、水面ポリゴンから浮き上がって橋との交差点でz-fightingし
+  // 「橋が途切れて見える」不具合を生んでいた。
   let waterFloorActive = false;
-  if (!bridgeInfo && typeof waterSurfaceYAt === 'function') {
+  if (!bridgeInfo && roadType !== 'water' && typeof waterSurfaceYAt === 'function') {
     waterFloorActive = waterSurfaceYAt((x1 + x2) / 2, (z1 + z2) / 2) != null ||
       waterSurfaceYAt(x1, z1) != null || waterSurfaceYAt(x2, z2) != null;
   }

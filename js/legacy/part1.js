@@ -994,7 +994,7 @@ function rebuildRoadMesh(r) {
     }
     return;
   }
-  const geo = makeRoadGeo(r.x1, r.z1, r.x2, r.z2, r.rw, r.yOff, r.bridgeY);
+  const geo = makeRoadGeo(r.x1, r.z1, r.x2, r.z2, r.rw, r.yOff, r.bridgeY, r.type);
   if (!geo) return;
   // 橋区間: 見た目のジオメトリと同じタイミングで「乗れる床」(bridgeSlopes)も
   // 同じ高さへ更新する(bridgeSegmentYで両方が全く同じ式を使うため、見た目と
