@@ -962,6 +962,15 @@ function _wayLocalRibbonsForTile(pts, x0, x1, z0, z1) {
   }
   return chains.map(_buildCoastlineRibbon);
 }
+// 点(px,pz)から線分(ax,az)-(bx,bz)までの最短距離。
+function _distPointToSegment(px, pz, ax, az, bx, bz) {
+  const dx = bx - ax, dz = bz - az;
+  const len2 = dx * dx + dz * dz;
+  let t = len2 > 0 ? ((px - ax) * dx + (pz - az) * dz) / len2 : 0;
+  if (t < 0) t = 0; else if (t > 1) t = 1;
+  const cx = ax + dx * t, cz = az + dz * t;
+  return Math.hypot(px - cx, pz - cz);
+}
 // data.elements(1バッチ分のOverpass応答)からnatural=coastlineのwayを集め、tileList
 // (このバッチが対象にしたタイル位置の配列 {tx,tz})に含まれる各タイルについて、
 // そのタイル近辺だけの海側リボン(_wayLocalRibbonsForTile)をタイル矩形でクリップした
@@ -1001,12 +1010,23 @@ function processCoastlineFill(elements, tileList) {
     seenCoastlineTiles.add(key);
     if (openWays.length === 0) continue; // 島(閉じたリング)しか無いタイルは埋めない(=従来通り何もしない)
     const x0 = t.tx * OSM_TILE_M, x1 = x0 + OSM_TILE_M, z0 = t.tz * OSM_TILE_M, z1 = z0 + OSM_TILE_M;
-    const nearWays = openWays.filter(w => w.minX <= x1 && w.maxX >= x0 && w.minZ <= z1 && w.maxZ >= z0);
+    // 【2026-08-04・NYの川面(ハドソン川等)の途中から先が地面になる不具合の対策】
+    // 従来はway自身の点(=渚のすぐ際)がこのタイルにかからない限りnearWaysに入らなかった
+    // ため、海岸線タイルから1〜2枚(COASTLINE_SEA_FAR=3000m相当)先の広い水面(川幅が
+    // タイル1枚を超える大河川・港湾)は、coastline wayが直接通っていないという理由だけで
+    // 何も塗られず地形がそのまま見えていた。粗いフィルタをCOASTLINE_SEA_FARぶん広げ、
+    // 「wayの点そのものはこのタイルに無いが、海側にFARだけ張り出すribbonなら届きうる」
+    // wayも候補に含める。
+    const m = COASTLINE_SEA_FAR;
+    const nearWays = openWays.filter(w => w.minX <= x1 + m && w.maxX >= x0 - m && w.minZ <= z1 + m && w.maxZ >= z0 - m);
     if (nearWays.length === 0) continue;
     const nearIslands = islands.filter(is => is.minX <= x1 && is.maxX >= x0 && is.minZ <= z1 && is.maxZ >= z0);
     const holes = nearIslands.length ? nearIslands.map(is => is.pts) : null;
     let builtCount = 0, emptyCount = 0, budgetFailCount = 0, ribbonCount = 0;
     for (const w of nearWays) {
+      // _wayLocalRibbonsForTileの区間判定自体は「実際にタイルへかかる区間」限定のまま
+      // (自己交差防止のため広げない)。区間が見つからないway(=渚がこのタイルに無い)は、
+      // 後段のPhase2(最寄り区間の半平面)に任せる。
       const localRibbons = _wayLocalRibbonsForTile(w.pts, x0, x1, z0, z1);
       for (const ribbon of localRibbons) {
         ribbonCount++;
@@ -1014,6 +1034,33 @@ function processCoastlineFill(elements, tileList) {
         if (poly.length < 3) { emptyCount++; continue; }
         if (areaPolyBudgetOK('sea')) {
           buildFixedFlatAreaPoly(poly, waterAreaMat, 0.15, seaY, holes);
+          builtCount++;
+        } else {
+          budgetFailCount++;
+        }
+      }
+    }
+    // 【Phase2】このタイルを実際に横切るcoastline区間が1つも無かった(=渚から離れた
+    // 開けた水面、または純粋な陸地)場合、タイル中心から最寄りのcoastline区間を探し、
+    // その海側かどうかだけで判定する。海側なら(区間が実際にはこのタイルを横切って
+    // いないので、地形は途中で陸/海が切り替わらない=タイル全体が一様に海のはず)
+    // タイル全体をそのまま海で塗る。COASTLINE_SEA_FAR(m)より遠い区間は対象にしない。
+    if (builtCount === 0 && emptyCount === 0) {
+      const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+      let bestDist = Infinity, bestSeg = null;
+      for (const w of nearWays) {
+        const pts = w.pts;
+        for (let i = 0; i < pts.length - 1; i++) {
+          const a = pts[i], b = pts[i + 1];
+          const d = _distPointToSegment(cx, cz, a.x, a.z, b.x, b.z);
+          if (d < bestDist) { bestDist = d; bestSeg = { ax: a.x, az: a.z, bx: b.x, bz: b.z }; }
+        }
+      }
+      if (bestSeg && bestDist <= COASTLINE_SEA_FAR &&
+          _crossSide(bestSeg.ax, bestSeg.az, bestSeg.bx, bestSeg.bz, cx, cz) >= 0) {
+        const wholeTile = [{ x: x0, z: z0 }, { x: x1, z: z0 }, { x: x1, z: z1 }, { x: x0, z: z1 }];
+        if (areaPolyBudgetOK('sea')) {
+          buildFixedFlatAreaPoly(wholeTile, waterAreaMat, 0.15, seaY, holes);
           builtCount++;
         } else {
           budgetFailCount++;
