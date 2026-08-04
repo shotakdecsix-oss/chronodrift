@@ -846,6 +846,19 @@ function buildAreaPoly(pts, mat, yOff, holes) {
 function seaLevelY() {
   return -elevBase * ELEV_SCALE;
 }
+// 【2026-08-04・実機報告「水面が地面の下に入ってしまっている」で発覚】地形側(part6.js
+// loadWideTerrain/loadNearTerrain)は、標高データがnullでない限り
+// Math.max(m, landFloorM)で必ずLAND_FLOOR_MARGIN_M(海抜+0.5m)以上に底上げする。これは
+// 江東区等の0m地帯が沈んで見える対策だが、「標高データが無い(null)場所だけが海」という
+// 前提に基づいており、実際にはSRTM等は広い河川・港湾の水面にもnullではない実標高値
+// (0m前後)を返すことが多い。その場合、地形がlandFloorM分まで底上げされ、海面ポリゴンの
+// 固定Y(seaLevelY()+0.15)より上に来てしまい、地形の下に海面が隠れて見えなくなる
+// (ニューヨーク/ジャージーシティで再現・ユーザーが直接指摘)。地形側が底上げされる
+// 最大量(LAND_FLOOR_MARGIN_M*ELEV_SCALE)を必ず上回る高さに海面を置くことで、
+// 地形がどちらの高さになっても海面が隠れないようにする。
+function seaYOffset() {
+  return LAND_FLOOR_MARGIN_M * ELEV_SCALE + 0.3;
+}
 // buildAreaPolyと同じ'flat'種別のentryを作るが、_computeWaterProfile(地形ノードを集めて
 // 集計する重い処理)を一切呼ばず、常に同じ高さを返す1ビンの固定プロファイルを直接埋め込む。
 // waterNodeInfoをあえて設定しないため、rebuildAreaPolyMesh側の再計算分岐も素通りし、
@@ -1034,7 +1047,7 @@ function processCoastlineFill(elements, tileList) {
         const poly = _clipPolyToTile(ribbon, x0, x1, z0, z1);
         if (poly.length < 3) { emptyCount++; continue; }
         if (areaPolyBudgetOK('sea')) {
-          buildFixedFlatAreaPoly(poly, waterAreaMat, 0.15, seaY, holes);
+          buildFixedFlatAreaPoly(poly, waterAreaMat, seaYOffset(), seaY, holes);
           builtCount++;
         } else {
           budgetFailCount++;
@@ -1081,7 +1094,7 @@ function processCoastlineFill(elements, tileList) {
       if (seaVotes >= 3) {
         const wholeTile = [{ x: x0, z: z0 }, { x: x1, z: z0 }, { x: x1, z: z1 }, { x: x0, z: z1 }];
         if (areaPolyBudgetOK('sea')) {
-          buildFixedFlatAreaPoly(wholeTile, waterAreaMat, 0.15, seaY, holes);
+          buildFixedFlatAreaPoly(wholeTile, waterAreaMat, seaYOffset(), seaY, holes);
           builtCount++;
         } else {
           budgetFailCount++;
