@@ -207,7 +207,7 @@ const avoidGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッ�
 // 【2026-08-01】distance based eviction(evictFarAreaPolys)を試したが「すぐにリボンだけに
 // なった」と実機報告があり無効化(above unloadFarAreaPolys呼び出し箇所参照)。回収して
 // 再利用する方式の代わりに、同じ「面メッシュは軽い」根拠でwaterをさらに増枠する安全側の対応。
-const areaPolyBudget = { park: 400, water: 1600, farm: 250, campus: 400 }; // 面メッシュのドローコール予算
+const areaPolyBudget = { park: 400, water: 1600, farm: 250, campus: 400, sea: 800 }; // 面メッシュのドローコール予算
 // 予算が尽きた事実を可視化する(以前は静かに回避判定のみへフォールバックし気づけなかった)。
 // 種類ごとに初回だけコンソールへ警告し、ログが埋もれないようにする。
 const _areaPolyWarned = new Set();
@@ -824,6 +824,122 @@ function buildAreaPoly(pts, mat, yOff, holes) {
   polyGridAdd(areaPolyGrid, entry);
 }
 
+// ======= 【2026-08-04】外洋(海)の水面 =======
+// OSMは外洋を natural=water では表現しない。natural=coastline という「線」データで陸/海の
+// 境界を表すだけで、面としての海はレンダラー側が組み立てる責任になる(osmcoastline等の
+// 専用ツールが担う処理)。今までnatural=coastlineを一切取得しておらず、川ポリゴン(natural=water/
+// waterway=riverbank)が終わる河口から先には面データが何も存在しなかったため、水路センター
+// ラインのリボンだけが残っていた(「河口付近がリボンだけになる」不具合の真因、ユーザー確認済み)。
+//
+// 簡易版として、coastlineの線が実際に通過するOSMタイル(OSM_TILE_M四方)だけ、タイル矩形を
+// coastlineの海側半平面で逐次クリップ(Sutherland-Hodgman)して塗る。海から離れた開けた外洋
+// (coastlineが通らないタイル)までは埋めない — 描画/生成距離内ではほぼ海岸沿いのタイルしか
+// 見えないため、実用上はこれで十分という判断(processCoastlineFill呼び出し元コメント参照)。
+//
+// 高さは複雑な地形サンプリング(GSI標高)を一切使わず、固定の海抜0m相当(elevBase由来、
+// bridgeSegmentYのtrueSeaYと同じ式)にする——ユーザー方針(2026-08-04、川の水面のような
+// 地形追従サンプリングは河口付近のGSI欠測で不安定になることが今回の一連の不具合の元凶
+// だったため、海は最初から「地図に忠実な固定値」にする)。
+function seaLevelY() {
+  return -elevBase * ELEV_SCALE;
+}
+// buildAreaPolyと同じ'flat'種別のentryを作るが、_computeWaterProfile(地形ノードを集めて
+// 集計する重い処理)を一切呼ばず、常に同じ高さを返す1ビンの固定プロファイルを直接埋め込む。
+// waterNodeInfoをあえて設定しないため、rebuildAreaPolyMesh側の再計算分岐も素通りし、
+// 高さは未来永劫この値のまま(=地形データの後着で変わりうる川とは異なり、海は変わる理由が無い)。
+function buildFixedFlatAreaPoly(pts, mat, yOff, fixedY, holes) {
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
+  const entry = { mesh: null, kind: 'flat', areaKind: areaPolyTakePendingKind(), pts, holes, mat, yOff, minX, maxX, minZ, maxZ };
+  entry.waterProfile = { ux: 1, uz: 0, sMin: 0, M: [fixedY] };
+  if (!_instantiateAreaPolyMesh(entry)) { areaPolyRefund(entry.areaKind); return false; }
+  areaPolyMeshes.push(entry);
+  polyGridAdd(areaPolyGrid, entry);
+  // ミニマップにも川・池と同じ扱いで載せる(海だけミニマップに出ないと不自然なため)。
+  const mmEntry = { pts, minX, maxX, minZ, maxZ };
+  minimapWaterPolys.push(mmEntry);
+  polyGridAdd(minimapWaterGrid, mmEntry);
+  // 川・池と同様、海の中には手続き生成の建物を建てさせない(handleAreaFeatureの水面と同じ扱い)。
+  const avoidPoly = { pts, minX, maxX, minZ, maxZ };
+  avoidPolygons.push(avoidPoly);
+  polyGridAdd(avoidGrid, avoidPoly);
+  return true;
+}
+// 直線(ax,az)-(bx,bz)を基準に、点(px,pz)が「海側」(進行方向(a→b)の右手側、OSMのcoastline
+// 規約=陸が左・海が右)にあれば正の値を返す。x=東・z=南の座標系での導出はコード変更履歴参照。
+function _crossSide(ax, az, bx, bz, px, pz) {
+  return (bx - ax) * (pz - az) - (bz - az) * (px - ax);
+}
+function _lineIntersect(p1, p2, ax, az, bx, bz) {
+  const d1 = _crossSide(ax, az, bx, bz, p1.x, p1.z);
+  const d2 = _crossSide(ax, az, bx, bz, p2.x, p2.z);
+  const t = (d1 - d2) !== 0 ? d1 / (d1 - d2) : 0;
+  return { x: p1.x + (p2.x - p1.x) * t, z: p1.z + (p2.z - p1.z) * t };
+}
+// Sutherland-Hodgman: 凸多角形polyを、直線(ax,az)-(bx,bz)の海側(_crossSide>=0)だけに切り詰める。
+function _clipPolyBySeaSide(poly, ax, az, bx, bz) {
+  const out = [];
+  const n = poly.length;
+  for (let i = 0; i < n; i++) {
+    const cur = poly[i], prev = poly[(i - 1 + n) % n];
+    const curIn = _crossSide(ax, az, bx, bz, cur.x, cur.z) >= 0;
+    const prevIn = _crossSide(ax, az, bx, bz, prev.x, prev.z) >= 0;
+    if (curIn) {
+      if (!prevIn) out.push(_lineIntersect(prev, cur, ax, az, bx, bz));
+      out.push(cur);
+    } else if (prevIn) {
+      out.push(_lineIntersect(prev, cur, ax, az, bx, bz));
+    }
+  }
+  return out;
+}
+// タイルに一度でも海面を試みたら(coastlineが無く何もしなかった場合も含め)二度と再試行しない
+// —— coastlineの位置は実データなので、同じタイルへ何度到着しても結果は変わらない。
+const seenCoastlineTiles = new Set();
+// data.elements(1バッチ分のOverpass応答)からnatural=coastlineのwayを集め、tileList
+// (このバッチが対象にしたタイル位置の配列 {tx,tz})に含まれる各タイルについて、
+// タイル矩形をcoastlineの海側でクリップした簡易ポリゴンを1枚だけ生成する。
+// batchKind==='building'は natural=coastline を含まないクエリなので何もしない
+// (OSM_TILE_CLAUSES_BUILDING参照)。
+function processCoastlineFill(elements, tileList) {
+  if (!tileList || tileList.length === 0) return;
+  if (tileList[0].kind === 'building') return; // このkindのクエリはnatural=coastlineを含まない
+  const segs = [];
+  for (const el of elements) {
+    if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) continue;
+    if (!el.tags || el.tags.natural !== 'coastline') continue;
+    const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1];
+      if (a.x === b.x && a.z === b.z) continue;
+      segs.push({
+        ax: a.x, az: a.z, bx: b.x, bz: b.z,
+        minX: Math.min(a.x, b.x), maxX: Math.max(a.x, b.x),
+        minZ: Math.min(a.z, b.z), maxZ: Math.max(a.z, b.z)
+      });
+    }
+  }
+  const seaY = seaLevelY();
+  for (const t of tileList) {
+    const key = t.tx + ',' + t.tz;
+    if (seenCoastlineTiles.has(key)) continue;
+    seenCoastlineTiles.add(key);
+    if (segs.length === 0) continue;
+    const x0 = t.tx * OSM_TILE_M, x1 = x0 + OSM_TILE_M, z0 = t.tz * OSM_TILE_M, z1 = z0 + OSM_TILE_M;
+    const near = segs.filter(s => s.minX <= x1 && s.maxX >= x0 && s.minZ <= z1 && s.maxZ >= z0);
+    if (near.length === 0) continue;
+    let poly = [{ x: x0, z: z0 }, { x: x1, z: z0 }, { x: x1, z: z1 }, { x: x0, z: z1 }];
+    for (const s of near) {
+      poly = _clipPolyBySeaSide(poly, s.ax, s.az, s.bx, s.bz);
+      if (poly.length < 3) break;
+    }
+    if (poly.length < 3) continue;
+    if (areaPolyBudgetOK('sea')) {
+      buildFixedFlatAreaPoly(poly, waterAreaMat, 0.15, seaY, null);
+    }
+  }
+}
+
 // buildAreaPolyは元のOSM way頂点(数個)だけで平らな三角形を張るため、起伏のある地形では
 // 頂点間で地面から浮いたり埋まったりする(校庭・田畑など、実際に上を歩く地物で顕著)。
 // この版はポリゴンの外接矩形をcellSize間隔の格子に分割し、格子点ごとにgetGroundYを
@@ -849,6 +965,11 @@ function buildTerrainFollowingAreaPoly(pts, mat, yOff, cellSize, worldUV) {
 // 判定はポリゴンの外接矩形の中心。タイルをまたぐ大きなポリゴン(湾・大河川など)は
 // 中心が属する側のタイルにだけ紐づくので、二重にも消え残りにもならない。
 function dropAreaRecordsInTile(tx, tz, tileM) {
+  // 【2026-08-04・海面塗りの再試行漏れ対策】このタイルの海面ポリゴンを消すなら、
+  // seenCoastlineTilesも一緒に忘れさせないと、staleTile再取得後にprocessCoastlineFillが
+  // 「もう処理済み」と誤判定して二度と塗り直されない(水域relationで既に踏んだのと同じ罠、
+  // [[project_isehara_game_way_tile_attribution]]参照)。
+  if (typeof seenCoastlineTiles !== 'undefined') seenCoastlineTiles.delete(tx + ',' + tz);
   const x0 = tx * tileM, x1 = x0 + tileM, z0 = tz * tileM, z1 = z0 + tileM;
   const inTile = (e) => {
     const cx = (e.minX + e.maxX) / 2, cz = (e.minZ + e.maxZ) / 2;

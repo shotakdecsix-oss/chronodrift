@@ -365,7 +365,7 @@ function processStationNodes(elements) {
 // 舗装/未舗装の判別用(OSM surfaceタグ)。タグが無い場合はhighway種別からの推定にフォールバックする。
 const UNPAVED_SURFACES = new Set(['unpaved','dirt','earth','ground','gravel','fine_gravel','grass','sand','mud','pebblestone','compacted','woodchips','clay','grass_paver']);
 
-function processTileData(data, tileCount) {
+function processTileData(data, tileCount, tileList) {
   if (!data || !data.elements) return;
   // 【2026-08-03・v3計測】完全同期のこの関数がフレームループをどれだけ止めているかを
   // 密集地で確認するための計測。P1(bbox早期脱出)前後で比較する(IMPL_PROMPT_20260803_
@@ -472,6 +472,9 @@ function processTileData(data, tileCount) {
     if (el.type === 'way' && el.id && seenOSMWays.has(el.id)) return;
     handleAreaFeature(el);
   });
+  // 海(natural=coastline)。川ポリゴンと違いwayが多数のタイルを跨ぐため、way単位ではなく
+  // タイル単位(tileList=このバッチが対象にした{tx,tz}群)で1回ずつ塗る(part4.js参照)。
+  if (typeof processCoastlineFill === 'function') processCoastlineFill(data.elements, tileList);
   // Buildings — 直接生成せずキューに積み、フレーム分割して生成する
   // (以前は1タイル分の建物を1フレームで同期生成し、大きなカクつきの原因だった)
   const _buildingStart8 = pendingBuildings.length; // このバッチで新規投入する分の開始位置(近傍優先ソート用)
@@ -789,6 +792,7 @@ const OSM_TILE_CLAUSES = [
   'way["landuse"~"residential|commercial|industrial|retail|mixed_use|farmland|orchard|meadow|allotments|forest"]',
   'way["leisure"~"park|garden|playground"]',
   'way["natural"~"water|wood"]',
+  'way["natural"="coastline"]',
   'way["waterway"~"river|stream|canal|riverbank"]',
   'relation["natural"="water"]',
   'relation["waterway"="riverbank"]',
@@ -907,7 +911,10 @@ function buildOSMBatchQuery(bboxes, boosted, kind) {
 // 水面回避データの無い手続き生成物(木など)が配置される「水上の木」の実体)。
 // キーをタイル座標ではなく絶対緯度経度のbbox文字列(下のbboxes[i])に変えることで
 // 都市をまたいだ衝突自体を無くす。VERもv2へ上げ、汚染済みの旧キャッシュを一括無効化する。
-const OSM_TILE_CACHE_VER = 'v2';
+// 【2026-08-04】OSM_TILE_CLAUSESにnatural=coastlineを追加したためv3へ。旧キャッシュ(v2以前)は
+// coastlineを含まないので、無効化しないと海面ポリゴンがいつまでも生成されない(まさに今回
+// ユーザーが報告した河口を再訪しても直らないことになる)。
+const OSM_TILE_CACHE_VER = 'v3';
 const OSM_TILE_CACHE_TTL = 30 * 86400e3; // 30日(OSM編集の反映が最大30日遅れるのは許容)
 let _osmDBPromise = null;
 function osmCacheDB() {
@@ -1392,7 +1399,11 @@ async function fetchOSMTileBatch(opts) {
         // 【2026-07-26・Phase2】await の間にマップジャンプが起きていたら(=世代が変わって
         // いたら)、このタイルはもう関係ない場所の話。ワールドには反映せず静かに捨てる。
         if (myEpoch === osmEpoch) {
-          processTileData(cached, 1);
+          // 【2026-08-04・海面塗り用】effKindは複合クエリ時代のキーへフォールバックした場合
+          // undefinedになる(=このcachedは実際にはnatural=coastlineも含む複合データ)。
+          // batch[0].kind(本来のジョブ種別)ではなくeffKindを使わないと、buildingジョブなのに
+          // 実は複合データだったケースでcoastline処理を誤ってスキップしてしまう。
+          processTileData(cached, 1, batch.map(t => ({ tx: t.tx, tz: t.tz, kind: effKind })));
           markTileSuccess(keys[0], stateKeys[0], effKind);
           // 【2026-07-19】以前はkeys.includes(ptKey)=自タイル1枚が届いた時点で「表示しました」に
           // 差し替えていたが、建物はosmTilesReadyAround(64m)で隣接タイルも待つため、トーストが
@@ -1542,7 +1553,7 @@ async function fetchOSMTileBatch(opts) {
     if (myEpoch === osmEpoch) {
       // 複数タイル分の要素が1つの配列で混ざって届くが、seenOSMWaysでway ID重複排除される
       // ので、1タイルの時と同じ processTileData にそのまま渡してよい。密度計算用にタイル枚数も渡す。
-      processTileData(data, batch.length);
+      processTileData(data, batch.length, batch);
       keys.forEach((k, i) => markTileSuccess(k, stateKeys[i], batchKind));
       // loadOSM()(part6.js)は起動直後に「🗺 マップを読み込み中...」のstickyトーストを
       // 出したまま抜ける(道路・建物の実際の生成はここが担当するため)。
