@@ -1071,6 +1071,26 @@ function processCoastlineFill(elements, tileList) {
       // カバーしない「隙間」がタイル内に残ることがあった。中心+4隅の計5点それぞれで
       // 最寄り区間を判定し、過半数(3点以上)が海側ならタイル全体を塗る(1点だけの判定より
       // 頑健)。
+      // 【2026-08-04・実機報告「マップの読み込みが遅くなった」】5点判定(直上のコメント)は
+      // サンプル点ごとにnearWaysの全way・全点を毎回線形走査するため、単純に従来(1点判定)の
+      // 5倍のコストになっていた。coastline wayは(局所チェーン分割前の)元の点列そのものなので
+      // 1本が数百〜数千点に及ぶことがあり、これがタイルの数だけ繰り返される。5点で共有できる
+      // 「このタイル近辺の区間だけ」の短いリストを先に1回だけ作っておき、各サンプル点は
+      // そのリストだけを見るようにする(タイル矩形からCOASTLINE_SEA_FARより明らかに遠い区間は
+      // どのサンプル点からもしきい値を満たせないので除外して良い→判定結果は変えずに計算量だけ
+      // 削減できる)。
+      const localSegs = [];
+      for (const w of nearWays) {
+        const pts = w.pts;
+        for (let i = 0; i < pts.length - 1; i++) {
+          const a = pts[i], b = pts[i + 1];
+          const segMinX = Math.min(a.x, b.x), segMaxX = Math.max(a.x, b.x);
+          const segMinZ = Math.min(a.z, b.z), segMaxZ = Math.max(a.z, b.z);
+          if (segMaxX < x0 - COASTLINE_SEA_FAR || segMinX > x1 + COASTLINE_SEA_FAR ||
+              segMaxZ < z0 - COASTLINE_SEA_FAR || segMinZ > z1 + COASTLINE_SEA_FAR) continue;
+          localSegs.push({ ax: a.x, az: a.z, bx: b.x, bz: b.z });
+        }
+      }
       const samples = [
         { x: (x0 + x1) / 2, z: (z0 + z1) / 2 },
         { x: x0, z: z0 }, { x: x1, z: z0 }, { x: x1, z: z1 }, { x: x0, z: z1 }
@@ -1078,13 +1098,9 @@ function processCoastlineFill(elements, tileList) {
       let seaVotes = 0;
       for (const s of samples) {
         let bestDist = Infinity, bestSeg = null;
-        for (const w of nearWays) {
-          const pts = w.pts;
-          for (let i = 0; i < pts.length - 1; i++) {
-            const a = pts[i], b = pts[i + 1];
-            const d = _distPointToSegment(s.x, s.z, a.x, a.z, b.x, b.z);
-            if (d < bestDist) { bestDist = d; bestSeg = { ax: a.x, az: a.z, bx: b.x, bz: b.z }; }
-          }
+        for (const seg of localSegs) {
+          const d = _distPointToSegment(s.x, s.z, seg.ax, seg.az, seg.bx, seg.bz);
+          if (d < bestDist) { bestDist = d; bestSeg = seg; }
         }
         if (bestSeg && bestDist <= COASTLINE_SEA_FAR &&
             _crossSide(bestSeg.ax, bestSeg.az, bestSeg.bx, bestSeg.bz, s.x, s.z) >= 0) {
