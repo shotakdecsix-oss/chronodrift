@@ -476,16 +476,26 @@ function _collectWaterNodes(entry) {
     for (const hp of holes) { if (hp.length >= 4 && pointInPolygon(x, z, hp)) return true; }
     return false;
   };
-  const nodes = []; // フラット配列 [i0,j0,b0, i1,j1,b1, ...] (オブジェクト配列よりGC負荷が軽い)
+  const nodes = []; // フラット配列 [i0,j0,b0,inside0, i1,j1,b1,inside1, ...] (オブジェクト配列よりGC負荷が軽い)
+  // insideは0/1(pointInPolygonの結果そのもの。margin救済で拾った外側ノードは0)。
+  // ストライドは4。読む側(_computeWaterProfileFromNodes)と必ず対で変更すること。
   for (let j = j0; j <= j1; j++) {
     for (let i = i0; i <= i1; i++) {
       const nx = i * FAR_STEP, nz = j * FAR_STEP;
-      if (!pointInPolygon(nx, nz, pts) && !_nearPolygonBoundary(nx, nz, pts, NODE_MARGIN)) continue;
+      // 【2026-08-04・IMPL_PROMPT_20260804_RIVER_FLOATING.md 修正A】pointInPolygonの結果を
+      // inside/margin救済で区別せず同じノード扱いにしていたため、広い都市河川(ハドソン川等)
+      // では両岸の岸壁ノード(実標高4〜10m)が内側ノード(landFloorM底上げ後の0.8m程度)と
+      // 同じビンに混ざり、90%点(_binPercentileMax)がほぼ確実に岸ノードを選んでしまい
+      // 水面が5m近く浮く原因になっていた(NYで実測確認)。marginノードは「内側にノードが
+      // 1つも無い細い川」の救済専用に格下げし(_computeWaterProfileFromNodes側でinside有無を
+      // 見て使い分ける)、ここでは内外判定の結果をinsideフラグとして一緒に記録するだけにする。
+      const inside = pointInPolygon(nx, nz, pts);
+      if (!inside && !_nearPolygonBoundary(nx, nz, pts, NODE_MARGIN)) continue;
       if (inAnyHole(nx, nz)) continue; // 中州(島)の標高は「水面がここまで来る必要」の根拠にしない
       const s = nx * ux + nz * uz;
       let b = Math.floor((s - sMin) / WATER_BIN);
       if (b < 0) b = 0; if (b > nBins) b = nBins;
-      nodes.push(i, j, b);
+      nodes.push(i, j, b, inside ? 1 : 0);
     }
   }
   return { ux, uz, sMin, nBins, nodes };
@@ -507,23 +517,29 @@ function _binPercentileMax(heights) {
 }
 function _computeWaterProfileFromNodes(nodeInfo) {
   const { ux, uz, sMin, nBins, nodes } = nodeInfo;
-  const buckets = new Array(nBins + 1);
-  for (let b = 0; b <= nBins; b++) buckets[b] = [];
-  for (let k = 0; k < nodes.length; k += 3) {
-    const i = nodes[k], j = nodes[k + 1], b = nodes[k + 2];
+  // 【2026-08-04・IMPL_PROMPT_20260804_RIVER_FLOATING.md 修正A】inside(ポリゴン内側)と
+  // outer(境界margin救済で拾った外側=岸)を別バケツに分ける。marginノードは「内側に
+  // ノードが1つも無いビン(細い川)」だけの救済に限定し、内側ノードが1つでもあれば
+  // 内側だけで決める(=岸壁・堤防の標高が混入して水面が浮く不具合の直接の修正)。
+  const inner = new Array(nBins + 1), outer = new Array(nBins + 1);
+  for (let b = 0; b <= nBins; b++) { inner[b] = []; outer[b] = []; }
+  for (let k = 0; k < nodes.length; k += 4) {
+    const i = nodes[k], j = nodes[k + 1], b = nodes[k + 2], isInside = nodes[k + 3];
     // 【2026-08-03・修正A-2】欠測(GSIタイル404等でterrainYOrNullがnullを返す)ノードは候補から
     // 外す。以前はfarNodeYの`|| 0`で欠測が「標高0m」に化けて紛れ込み、実測でこれが橋の水没の
     // 主因(欠測地点の水位が地面より3m以上高い0.3で確定していた)と判明した。
     const h = farNodeYOrNull(i, j);
     if (h === null) continue;
-    buckets[b].push(h);
+    (isInside ? inner : outer)[b].push(h);
   }
   let anyData = false;
   const M = new Array(nBins + 1).fill(null);
   for (let b = 0; b <= nBins; b++) {
-    if (buckets[b].length === 0) continue;
+    // 内側ノードが1つでもあればそれだけで決める。無いビンだけ外側(岸)ノードで救済する。
+    const src = inner[b].length ? inner[b] : outer[b];
+    if (src.length === 0) continue;
     anyData = true;
-    M[b] = _binPercentileMax(buckets[b]);
+    M[b] = _binPercentileMax(src);
   }
   // 【2026-08-03・修正A-3】この水面ポリゴンの全ビンが欠測(=周辺のGSIタイルが軒並み404、
   // NEARもWIDEも届いていない)なら、プロファイルを確定させない。不完全なデータで水位を
@@ -551,6 +567,17 @@ function _computeWaterProfileFromNodes(nodeInfo) {
   for (let b = 0; b < q; b++) headAvg += M0[b];
   for (let b = nBins - q + 1; b <= nBins; b++) tailAvg += M0[b];
   headAvg /= q; tailAvg /= q;
+  // 【2026-08-04・IMPL_PROMPT_20260804_RIVER_FLOATING.md 修正B】下流端(河口)は海面より
+  // 低くなり得ない、という物理制約をここで明示的に強制する。修正Aで内側ノードだけを使う
+  // ようになった結果、河口付近のビンが実際の海面(seaLevelY()+seaYOffset())をわずかに
+  // 下回るケースがありうる。単純に「同じ高さ」でクランプすると河口一帯で川面と海面の
+  // ポリゴンが同一平面になりz-fightingでちらつく(過去に道路交差点で経験した現象と同種)ため、
+  // ここでは「川は海より確実に上」という規約に決め、RIVER_MOUTH_ABOVE_SEA_MARGINぶん
+  // 上に置く(=河口区間は必ず川側が海側より前面に描かれる)。
+  const RIVER_MOUTH_ABOVE_SEA_MARGIN = 0.2; // ゲーム単位。z-fighting回避のための最小マージン
+  const mouthBin = headAvg >= tailAvg ? nBins : 0;
+  const mouthFloorY = seaLevelY() + seaYOffset() + RIVER_MOUTH_ABOVE_SEA_MARGIN;
+  if (M0[mouthBin] < mouthFloorY) { M0[mouthBin] = mouthFloorY; M[mouthBin] = mouthFloorY; }
   if (headAvg >= tailAvg) { // b=0側が上流(高い) → 下流側(b大)から上流側(b小)へ辿って伝播
     for (let b = nBins - 1; b >= 0; b--) M[b] = Math.max(M0[b], Math.min(M[b + 1], M0[b] + MAX_RISE_PER_BIN));
   } else { // b=nBins側が上流 → 上流側(b小)から下流側(b大)へ辿って伝播
