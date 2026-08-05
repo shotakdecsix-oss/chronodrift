@@ -43,6 +43,39 @@ farMesh.frustumCulled = false; // 頂点変位+移動するためカリングさ
 farMesh.renderOrder = 0;
 scene.add(farMesh);
 
+// 【2026-08-04・DESIGN_20260804_WATER.md 4章】水域境界セルの陸側パッチ。
+// updateFarMeshの穴あけ(4隅すべて水面内側のセルだけ)は岸線が最大200mずれる(「大原則に
+// 照らして不合格」)。境界セル(1〜3隅が水面内側)は通常の2三角形を張らず、水域の輪郭で
+// セル矩形を切った陸側の凸多角形(part4.js computeLandPatchPolygon)を別メッシュとして描く。
+// farMeshと違い回転・追従オフセットを持たない絶対ワールド座標のメッシュにする
+// (computeLandPatchPolygon/areaPolyGridの座標系がそのまま絶対座標のため、そちらに合わせる
+// 方が変換ミスの余地が無い)。三角形の巻き順を厳密にfarGeo側と一致させる保証が無いため、
+// (裏返って見えなくなる事故を避けるため)専用にDoubleSideの複製マテリアルを使う。
+const terrainPatchMat = new THREE.MeshLambertMaterial({
+  vertexColors: true,
+  polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 4,
+  side: THREE.DoubleSide,
+});
+const farBoundaryPatchGeo = new THREE.BufferGeometry();
+const farBoundaryPatchMesh = new THREE.Mesh(farBoundaryPatchGeo, terrainPatchMat);
+farBoundaryPatchMesh.frustumCulled = false;
+farBoundaryPatchMesh.renderOrder = 0;
+scene.add(farBoundaryPatchMesh);
+// 凸多角形(computeLandPatchPolygonの戻り値)をvertsPos/vertsColへ扇形三角形分割で追記する。
+// Sutherland-Hodgmanクリップの出力は必ず凸なので、頂点0からの扇形分割で正しく三角形化できる
+// (part4.js computeLandPatchPolygonのコメント参照)。
+function _pushLandPatchTriangles(poly, vertsPos, vertsCol) {
+  if (poly.length < 3) return;
+  for (let i = 1; i < poly.length - 1; i++) {
+    for (const p of [poly[0], poly[i], poly[i + 1]]) {
+      const h = farSurfaceY(p.x, p.z); // 【重要】必ずfarSurfaceYで取る(c-3、描画面との不変条件)
+      vertsPos.push(p.x, h, p.z);
+      const c = terrainColorRGB(h - FAR_Y); // terrainColorRGBは「素の高さ」基準(FAR_Y分だけ差し引いて戻す)
+      vertsCol.push(c[0], c[1], c[2]);
+    }
+  }
+}
+
 // --- 地形メッシュの高さは farNodeY / farSurfaceY に一本化する ---
 // 頂点は世界座標に固定された FAR_STEP(200m) 格子上にあり(中心スナップも FAR_STEP 単位)、
 // 「描画されるメッシュ表面」= farSurfaceY が返す値、が厳密に成り立つ。
@@ -105,17 +138,23 @@ function updateFarMesh(force) {
   }
   pos.needsUpdate = true;
   col.needsUpdate = true;
-  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】水面ポリゴンの内側(200mセルの
-  // 4隅ノードすべてがwaterNodeMaskに含まれる)は三角形を張らない=地形に穴を開ける。
-  // 「浮く/沈む」を10回往復した根本原因(200m地形と100m水面という分割の異なる2枚の面を
-  // わずかなマージンだけで重ねようとしていた)を、そもそも重ねないことで構造的に解消する。
-  // 【重要・絶対に壊さないこと】ここの三角形の張り方(a,b,d と b,c,d)は、farSurfaceY
-  // (このファイル69行目付近)の補間式(u+v<=1でha/hb/hdの面、それ以外でhc/hb/hdの面)と
-  // 厳密に一致させること。ここがズレると、プレイヤーの足元・建物・道路の高さが全部狂う
-  // (本プロジェクトの数少ない健全な不変条件——「描画されるメッシュ表面」=farSurfaceYが
-  // 返す値、が厳密に成り立つこと——を壊さない)。THREE.PlaneGeometryの標準分割
+  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md→DESIGN_20260804_WATER.md 4章で発展】
+  // 水面ポリゴンの内側(200mセルの4隅ノードすべてがwaterNodeMaskに含まれる)は三角形を
+  // 張らない=地形に穴を開ける。「浮く/沈む」を10回往復した根本原因(200m地形と100m水面と
+  // いう分割の異なる2枚の面を、わずかなマージンだけで重ねようとしていた)を、そもそも
+  // 重ねないことで構造的に解消する。
+  // 境界セル(1〜3隅だけが水面内側)は、旧実装では素通りで通常の2三角形を張っていたため
+  // 岸線が最大200mずれていた(DESIGN 4章「大原則に照らして不合格」)。ここでは通常の
+  // 三角形を張らず、水域の輪郭でセル矩形を切った陸側パッチ(part4.js
+  // computeLandPatchPolygon)をfarBoundaryPatchMesh側へ積む。
+  // 【重要・絶対に壊さないこと】完全陸(0隅)セルの三角形の張り方(a,b,d と b,c,d)は、
+  // farSurfaceY(このファイル69行目付近)の補間式(u+v<=1でha/hb/hdの面、それ以外で
+  // hc/hb/hdの面)と厳密に一致させること。ここがズレると、プレイヤーの足元・建物・道路の
+  // 高さが全部狂う(本プロジェクトの数少ない健全な不変条件——「描画されるメッシュ表面」=
+  // farSurfaceYが返す値、が厳密に成り立つこと——を壊さない)。THREE.PlaneGeometryの標準分割
   // (a=(jx,jz), b=(jx,jz+1), c=(jx+1,jz+1), d=(jx+1,jz)、面は[a,b,d]と[b,c,d])と同一。
   const idxArr = [];
+  const patchPos = [], patchCol = [];
   for (let jz = 0; jz < FAR_SEGS; jz++) {
     for (let jx = 0; jx < FAR_SEGS; jx++) {
       const a = jx + FAR_SEGS1 * jz;
@@ -126,12 +165,24 @@ function updateFarMesh(force) {
       const wb = _isWaterNode(i0 + jx, j0 + jz + 1);
       const wc = _isWaterNode(i0 + jx + 1, j0 + jz + 1);
       const wd = _isWaterNode(i0 + jx + 1, j0 + jz);
-      if (wa && wb && wc && wd) continue; // 4隅すべて水面内側 → このセルは穴を開ける
-      idxArr.push(a, b, d, b, c, d);
+      const waterCount = (wa ? 1 : 0) + (wb ? 1 : 0) + (wc ? 1 : 0) + (wd ? 1 : 0);
+      if (waterCount === 4) continue; // 完全に水面内側 → 穴のまま(旧方式)
+      if (waterCount === 0) { idxArr.push(a, b, d, b, c, d); continue; } // 完全に陸 → 通常の2三角形
+      // 境界セル: 水域の輪郭で切った陸側パッチだけを描く(computeLandPatchPolygonはpart4.js、
+      // 絶対ワールド座標のセル矩形を渡す)。
+      const x0 = (i0 + jx) * FAR_STEP, x1 = (i0 + jx + 1) * FAR_STEP;
+      const z0 = (j0 + jz) * FAR_STEP, z1 = (j0 + jz + 1) * FAR_STEP;
+      const patch = computeLandPatchPolygon(x0, x1, z0, z1);
+      _pushLandPatchTriangles(patch, patchPos, patchCol);
     }
   }
   farGeo.setIndex(idxArr);
   farGeo.computeVertexNormals();
+  farBoundaryPatchGeo.setAttribute('position', new THREE.Float32BufferAttribute(patchPos, 3));
+  farBoundaryPatchGeo.setAttribute('color', new THREE.Float32BufferAttribute(patchCol, 3));
+  farBoundaryPatchGeo.setIndex(null); // 非indexed三角形ソープ(扇形分割済みなので不要)
+  farBoundaryPatchGeo.computeVertexNormals();
+  farBoundaryPatchGeo.computeBoundingSphere();
   _waterMaskDirty = false;
 }
 
