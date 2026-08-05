@@ -266,7 +266,13 @@ function scanPendingAreaWaterPolys() {
   if (pendingAreaWaterPolys.length === 0) return;
   const keep = [];
   for (const e of pendingAreaWaterPolys) {
-    if (areaPolyBudgetOK('water')) {
+    // 【2026-08-04・IMPL_PROMPT_20260804_RIVER_MISSING.md 修正A】予算が空いても、地形データが
+    // まだ届いていなければコミットしない(以前はここが素通りで、地形未到着のまま
+    // waterProfile=nullで作られ、getGroundY+0.15フォールバックが地形に埋もれて見えなく
+    // なっていた)。
+    if (!_terrainCoversPoly(e.minX, e.maxX, e.minZ, e.maxZ)) {
+      keep.push(e); // 地形がまだ無ければ次回スキャンへ持ち越す
+    } else if (areaPolyBudgetOK('water')) {
       _commitWaterPoly(e.pts, e.holes, e.minX, e.maxX, e.minZ, e.maxZ);
     } else {
       keep.push(e); // 予算がまだ無ければ次回スキャンへ持ち越す
@@ -601,8 +607,26 @@ function _computeWaterProfileFromNodes(nodeInfo) {
 // 格子)由来の高すぎる値で固定されうる(M2の症状そのもの)。診断ログ専用の軽量判定で、
 // 実際の高さ計算(farNodeY)には使わない。
 function _isNearCoverage(x, z) {
+  // 【2026-08-04・IMPL_PROMPT_20260804_RIVER_MISSING.md 1-1】nearElevが無い(=地形が
+  // 1バイトも届いていない、マップジャンプ直後等)場合は、nearCX/nearCZの初期値0に釣られて
+  // 「覆っている」と誤判定していた。データそのものの有無を先に見る。
+  if (!nearElev) return false;
   if (typeof nearCX === 'undefined' || typeof NEAR_W === 'undefined') return null;
   return Math.abs(x - nearCX) <= NEAR_W / 2 && Math.abs(z - nearCZ) <= NEAR_D / 2;
+}
+// 【2026-08-04・IMPL_PROMPT_20260804_RIVER_MISSING.md 修正A】水面ポリゴンをコミットする前に、
+// 代表点(中心+4隅)のどれか1つでも地形データ(NEAR/WIDEどちらか、farNodeYOrNullがnullでない)が
+// 実際に届いているかを確認する。1つも届いていなければ、_waterYAtのnullフォールバックで
+// 一時的に(不完全なまま)表示することすらせず、pendingAreaWaterPolysへ回して後で拾い直す
+// ——「不完全なデータで作ってから後で直す」経路そのものを無くす。
+function _terrainCoversPoly(minX, maxX, minZ, maxZ) {
+  const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
+  const samples = [[cx, cz], [minX, minZ], [maxX, minZ], [maxX, maxZ], [minX, maxZ]];
+  for (const [x, z] of samples) {
+    const i = Math.floor(x / FAR_STEP), j = Math.floor(z / FAR_STEP);
+    if (farNodeYOrNull(i, j) !== null) return true;
+  }
+  return false;
 }
 function _computeWaterProfile(entry) {
   entry.waterNodeInfo = _collectWaterNodes(entry);
@@ -662,6 +686,14 @@ function waterSurfaceYAt(x, z) {
   }
   return best;
 }
+// 【2026-08-04・IMPL_PROMPT_20260804_RIVER_MISSING.md 修正B-2】以前は+entry.yOff(0.15=実測
+// 7.5cm)だったが、地形(FAR_STEP=200m格子の区分線形)と水面(100m細分の三角形)は同じ
+// getGroundYから高さを取っても辺の位置がズレるため、7.5cm程度の余裕では水面が地形メッシュに
+// 埋もれて見えなくなっていた(NYで実際に発生・確認)。修正Aでこの分岐自体はほぼ通らなくなる
+// はずだが(地形未到着の間はそもそもコミットしない)、保険として残す以上は「見えない」より
+// 「少し浮いて見える」方が実害が小さい。確定プロファイルの余裕(WATER_MARGIN=0.3)より
+// 大きい値にしておく。
+const WATER_UNAVAILABLE_FALLBACK_MARGIN = 1.0; // ゲーム単位(実測0.5m相当、ELEV_SCALE=2.0)
 function _waterYAt(entry, x, z) {
   const p = entry.waterProfile;
   // 【2026-08-03・修正A-3】プロファイル未確定(全ビン欠測、地形データ待ち)の間は、メッシュを
@@ -669,7 +701,7 @@ function _waterYAt(entry, x, z) {
   // NEAR地形の到達ごとに再計算するので、データが揃い次第自動的に正しいプロファイルへ置き換わる)。
   // waterSurfaceYAt側は`!e.waterProfile`で弾いているため、この一時値が橋のクリアランス判定に
   // 誤って使われることは無い。
-  if (!p) return getGroundY(x, z) + entry.yOff;
+  if (!p) return getGroundY(x, z) + WATER_UNAVAILABLE_FALLBACK_MARGIN;
   const bf = (x * p.ux + z * p.uz - p.sMin) / WATER_BIN;
   const n = p.M.length;
   let b0 = Math.floor(bf);
@@ -715,23 +747,29 @@ function subdivideTriangles(verts2D, idx, maxEdge) {
   return outIdx;
 }
 function rebuildAreaPolyMesh(entry) {
-  if (!entry.mesh) return; // 遠方でGPU解放済み(unloadFarAreaPolys参照)。再接近時に自然と再構築される
-  const pos = entry.mesh.geometry.attributes.position;
-  if (entry.kind === 'flat') {
+  // 【2026-08-04・IMPL_PROMPT_20260804_RIVER_MISSING.md 修正B-1】プロファイルの再計算は
+  // メッシュの有無に関係なく先に行う。以前は次の行(!entry.mesh時の即return)がこのブロック
+  // より前にあったため、遠方でGPU解放中(unloadFarAreaPolys)にNEAR地形が届くと再計算ごと
+  // 素通りし、entry.waterProfileがnullのまま恒久固定される穴があった
+  // (「地形到着後にrebuildAreaPolyMeshが再計算する」という以前の想定は、メッシュが
+  // 生きている場合しか成立しなかった)。
+  if (entry.kind === 'flat' && entry.waterNodeInfo) {
     // 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER.md M2対応】NEAR地形が新しく届くたびに
     // プロファイルを安価に(キャッシュ済みノードのfarNodeY再読込だけで)再計算する。
     // 生成時にWIDE(粗い格子)で凍結された高すぎる水位が、NEAR到達後に正しい値へ更新される。
-    if (entry.waterNodeInfo) {
-      const before = entry.waterProfile;
-      entry.waterProfile = _computeWaterProfileFromNodes(entry.waterNodeInfo);
-      // 水位が実質的に変わった(=橋の高さ計算がその時点の値で凍結されている可能性がある)場合、
-      // この水面にかかる道路(橋を含む)を作り直させる。_commitWaterPoly初回コミット時の
-      // rebuildRoadsInBoundsと同じ理屈だが、こちらは「後から水位そのものが動いた」場合を拾う。
-      if (_waterProfileChanged(before, entry.waterProfile, 0.2) && typeof rebuildRoadsInBounds === 'function') {
-        const m = 60;
-        rebuildRoadsInBounds(entry.minX - m, entry.maxX + m, entry.minZ - m, entry.maxZ + m);
-      }
+    const before = entry.waterProfile;
+    entry.waterProfile = _computeWaterProfileFromNodes(entry.waterNodeInfo);
+    // 水位が実質的に変わった(=橋の高さ計算がその時点の値で凍結されている可能性がある)場合、
+    // この水面にかかる道路(橋を含む)を作り直させる。_commitWaterPoly初回コミット時の
+    // rebuildRoadsInBoundsと同じ理屈だが、こちらは「後から水位そのものが動いた」場合を拾う。
+    if (_waterProfileChanged(before, entry.waterProfile, 0.2) && typeof rebuildRoadsInBounds === 'function') {
+      const m = 60;
+      rebuildRoadsInBounds(entry.minX - m, entry.maxX + m, entry.minZ - m, entry.maxZ + m);
     }
+  }
+  if (!entry.mesh) return; // 遠方でGPU解放済み(unloadFarAreaPolys参照)。頂点の書き換えだけをここで打ち切る
+  const pos = entry.mesh.geometry.attributes.position;
+  if (entry.kind === 'flat') {
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i), z = pos.getZ(i);
       pos.setY(i, _waterYAt(entry, x, z)); // yOffは_waterYAt内で加算済み
@@ -1600,7 +1638,11 @@ function processWaterRelation(el) {
       .filter(hp => hp.length >= 4 &&
               hp[0].x >= minX && hp[0].x <= maxX && hp[0].z >= minZ && hp[0].z <= maxZ);
     // (2026-07-16: 水面1m下降補正を試したが見た目が崩れたためリバート。+0.15が正)
-    if (areaPolyBudgetOK('water')) {
+    // 【2026-08-04・IMPL_PROMPT_20260804_RIVER_MISSING.md 修正A】地形がまだ届いていない
+    // (マップジャンプ直後の一斉タイル到着等)場合は、予算があっても即コミットせず再試行キューへ。
+    if (!_terrainCoversPoly(minX, maxX, minZ, maxZ)) {
+      queueWaterPolyRetry(pts, holes, minX, maxX, minZ, maxZ);
+    } else if (areaPolyBudgetOK('water')) {
       _commitWaterPoly(pts, holes, minX, maxX, minZ, maxZ);
     } else {
       queueWaterPolyRetry(pts, holes, minX, maxX, minZ, maxZ);
@@ -1656,7 +1698,10 @@ function handleAreaFeature(el) {
     if (span < 8000) {
       const tp = thinPts(pts, span > 3000 ? 30 : span > 400 ? 10 : 0);
       // 【2026-08-03・修正B】予算切れなら即座に諦めず再試行キューへ(上のpendingAreaWaterPolys参照)。
-      if (areaPolyBudgetOK('water')) {
+      // 【2026-08-04・IMPL_PROMPT_20260804_RIVER_MISSING.md 修正A】地形未到着でも同様に再試行キューへ。
+      if (!_terrainCoversPoly(minX, maxX, minZ, maxZ)) {
+        queueWaterPolyRetry(tp, null, minX, maxX, minZ, maxZ);
+      } else if (areaPolyBudgetOK('water')) {
         _commitWaterPoly(tp, null, minX, maxX, minZ, maxZ);
       } else {
         queueWaterPolyRetry(tp, null, minX, maxX, minZ, maxZ);
