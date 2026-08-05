@@ -628,6 +628,48 @@ function _terrainCoversPoly(minX, maxX, minZ, maxZ) {
   }
   return false;
 }
+// ======= 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】水面の下の地形メッシュに穴を開ける =======
+// この10回、水面が「浮く」「沈む」を往復してきた根本原因は、地形(farMesh、FAR_STEP=200mの
+// 三角形)と水面(subdivideTrianglesで最長辺100mに細分した三角形)という、分割の異なる
+// 2枚の面を、わずかなマージン(WATER_MARGIN=0.3ゲーム単位)だけで重ねようとしていたこと
+// だったと実測(バッテリーパーク沖、水位≒地形標高≒3m)で確定した。200mセル内の起伏が
+// 1〜3mあれば、マージンは必ずどこかで負ける——集約方法(最大値/percentile/inner優先等)を
+// どう調整しても、2枚の面が別々の三角形分割を持つ限り原理的に解決しない。
+// 解決策: 水面ポリゴンの内側(200m格子ノードの4隅すべてが水面内側にあるセル)は、
+// そもそも地形の三角形を張らない(updateFarMesh、part5.js側でインデックスバッファを
+// 組み直す)。「4隅すべて」という条件により、穴は必ず水面ポリゴンの内側に収まる
+// (=隙間から下が見えることはない)。岸のセルは地形が残り、多少水面と食い合っても
+// 「岸」に見えるだけで正しい——突き抜け/埋没が起きていたのは川の真ん中(4隅とも水中)
+// だったので、それが構造的に起こりようがなくなる。
+//
+// waterNodeMaskは「そのノード(i,j)が何らかの水面ポリゴンの内側にあるか」を数える
+// 参照カウント(単純なbooleanだと、重なる2つの水面ポリゴンの片方だけが破棄された時に
+// もう片方がまだ覆っているノードまで誤って「陸」に戻してしまう)。
+const waterNodeMask = new Map(); // "i,j" -> 参照カウント(1以上ならそのノードは水面内側)
+let _waterMaskDirty = false; // updateFarMesh(part5.js)がこれを見てインデックスを再構築する
+function _markWaterNodes(entry, on) {
+  const i0 = Math.floor(entry.minX / FAR_STEP) - 1, i1 = Math.ceil(entry.maxX / FAR_STEP) + 1;
+  const j0 = Math.floor(entry.minZ / FAR_STEP) - 1, j1 = Math.ceil(entry.maxZ / FAR_STEP) + 1;
+  for (let j = j0; j <= j1; j++) {
+    for (let i = i0; i <= i1; i++) {
+      const x = i * FAR_STEP, z = j * FAR_STEP;
+      if (!pointInPolygon(x, z, entry.pts)) continue;
+      // 中州(hole)は陸地なので、そこだけ地形を消さない(中州の地形は残す)
+      if (entry.holes && entry.holes.some(hp => hp.length >= 4 && pointInPolygon(x, z, hp))) continue;
+      const key = i + ',' + j;
+      if (on) {
+        waterNodeMask.set(key, (waterNodeMask.get(key) || 0) + 1);
+      } else {
+        const c = (waterNodeMask.get(key) || 0) - 1;
+        if (c <= 0) waterNodeMask.delete(key); else waterNodeMask.set(key, c);
+      }
+    }
+  }
+  _waterMaskDirty = true;
+}
+function _isWaterNode(i, j) {
+  return waterNodeMask.has(i + ',' + j);
+}
 function _computeWaterProfile(entry) {
   entry.waterNodeInfo = _collectWaterNodes(entry);
   const profile = _computeWaterProfileFromNodes(entry.waterNodeInfo);
@@ -685,6 +727,16 @@ function waterSurfaceYAt(x, z) {
     if (best === null || y > best) best = y;
   }
   return best;
+}
+// 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】地形メッシュの水面部分に穴を開けた
+// (updateFarMesh、part5.js)ため、farSurfaceY/getGroundYだけを見ると「穴の底(=本来
+// 存在しない、描画されていない面)」の高さを返してしまう。プレイヤーの足場判定
+// (floorHeightAt、part7.js)はこちらを使い、水面ポリゴンがあればその水位、無ければ
+// 従来通りの地形の高さを返す(=水面の上を歩ける/泳げる扱いになる)。
+function surfaceY(x, z) {
+  const g = getGroundY(x, z);
+  const w = waterSurfaceYAt(x, z);
+  return w === null ? g : Math.max(g, w);
 }
 // 【2026-08-04・IMPL_PROMPT_20260804_RIVER_MISSING.md 修正B-2】以前は+entry.yOff(0.15=実測
 // 7.5cm)だったが、地形(FAR_STEP=200m格子の区分線形)と水面(100m細分の三角形)は同じ
@@ -890,6 +942,10 @@ function buildAreaPoly(pts, mat, yOff, holes) {
   if (!_instantiateAreaPolyMesh(entry)) { areaPolyRefund(entry.areaKind); return; }
   areaPolyMeshes.push(entry);
   polyGridAdd(areaPolyGrid, entry);
+  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】この水面の下の地形セルに穴を開ける
+  // (このentryが破棄される時は_markWaterNodes(entry,false)と対で呼ぶこと。
+  // dropAreaRecordsInTile/evictFarAreaPolys参照)。
+  _markWaterNodes(entry, true);
 }
 
 // ======= 【2026-08-04】外洋(海)の水面 =======
@@ -944,6 +1000,8 @@ function buildFixedFlatAreaPoly(pts, mat, yOff, fixedY, holes) {
   const avoidPoly = { pts, minX, maxX, minZ, maxZ };
   avoidPolygons.push(avoidPoly);
   polyGridAdd(avoidGrid, avoidPoly);
+  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】海の下の地形セルにも同様に穴を開ける。
+  _markWaterNodes(entry, true);
   return true;
 }
 // 直線(ax,az)-(bx,bz)を基準に、点(px,pz)が「海側」(進行方向(a→b)の右手側、OSMのcoastline
@@ -1230,6 +1288,10 @@ function dropAreaRecordsInTile(tx, tz, tileM) {
     if (inTile(e)) {
       if (e.mesh) { scene.remove(e.mesh); e.mesh.geometry.dispose(); e.mesh = null; } // matは共有なのでdisposeしない
       areaPolyRefund(e.areaKind); // 予算を返す(再取得でまた確保される)
+      // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】水面ポリゴンのentryが実際に
+      // 破棄される箇所。開けた地形の穴を埋め戻す(参照カウント式なので、重なる別の水面
+      // ポリゴンがまだそのノードを覆っていれば穴は残る)。
+      if (e.kind === 'flat') _markWaterNodes(e, false);
       dropped++; continue;
     }
     areaPolyMeshes[w++] = e;
@@ -1360,6 +1422,8 @@ function evictFarAreaPolys(force) {
     // ここに来る時点でunloadFarAreaPolysが既にメッシュを解放しているはずだが、念のため
     if (e.mesh) { scene.remove(e.mesh); e.mesh.geometry.dispose(); e.mesh = null; }
     areaPolyRefund(e.areaKind); // 予算を返す(再取得でまた確保される)
+    // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】dropAreaRecordsInTileと同じ理由。
+    if (e.kind === 'flat') _markWaterNodes(e, false);
     _areaPolyEvicted++;
   }
   if (w === areaPolyMeshes.length) return;

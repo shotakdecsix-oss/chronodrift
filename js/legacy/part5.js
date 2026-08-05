@@ -82,7 +82,12 @@ let farLastX = Infinity, farLastZ = Infinity;
 function updateFarMesh(force) {
   const cx = Math.round(player.position.x / FAR_STEP) * FAR_STEP;
   const cz = Math.round(player.position.z / FAR_STEP) * FAR_STEP;
-  if (!force && cx === farLastX && cz === farLastZ) return;
+  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】水面ポリゴンの追加/破棄
+  // (part4.js _markWaterNodes)は、プレイヤーが動いていない間にも起こりうる
+  // (タイル到着・タイル再取得等)。_waterMaskDirtyが立っていれば、位置が変わっていなくても
+  // インデックス(=穴)を再構築する必要がある。
+  const moved = force || cx !== farLastX || cz !== farLastZ;
+  if (!moved && !_waterMaskDirty) return;
   farLastX = cx; farLastZ = cz;
   farMesh.position.set(cx, FAR_Y, cz);
   const i0 = Math.round((cx - FAR_SIZE / 2) / FAR_STEP);
@@ -100,7 +105,34 @@ function updateFarMesh(force) {
   }
   pos.needsUpdate = true;
   col.needsUpdate = true;
+  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】水面ポリゴンの内側(200mセルの
+  // 4隅ノードすべてがwaterNodeMaskに含まれる)は三角形を張らない=地形に穴を開ける。
+  // 「浮く/沈む」を10回往復した根本原因(200m地形と100m水面という分割の異なる2枚の面を
+  // わずかなマージンだけで重ねようとしていた)を、そもそも重ねないことで構造的に解消する。
+  // 【重要・絶対に壊さないこと】ここの三角形の張り方(a,b,d と b,c,d)は、farSurfaceY
+  // (このファイル69行目付近)の補間式(u+v<=1でha/hb/hdの面、それ以外でhc/hb/hdの面)と
+  // 厳密に一致させること。ここがズレると、プレイヤーの足元・建物・道路の高さが全部狂う
+  // (本プロジェクトの数少ない健全な不変条件——「描画されるメッシュ表面」=farSurfaceYが
+  // 返す値、が厳密に成り立つこと——を壊さない)。THREE.PlaneGeometryの標準分割
+  // (a=(jx,jz), b=(jx,jz+1), c=(jx+1,jz+1), d=(jx+1,jz)、面は[a,b,d]と[b,c,d])と同一。
+  const idxArr = [];
+  for (let jz = 0; jz < FAR_SEGS; jz++) {
+    for (let jx = 0; jx < FAR_SEGS; jx++) {
+      const a = jx + FAR_SEGS1 * jz;
+      const b = jx + FAR_SEGS1 * (jz + 1);
+      const c = (jx + 1) + FAR_SEGS1 * (jz + 1);
+      const d = (jx + 1) + FAR_SEGS1 * jz;
+      const wa = _isWaterNode(i0 + jx, j0 + jz);
+      const wb = _isWaterNode(i0 + jx, j0 + jz + 1);
+      const wc = _isWaterNode(i0 + jx + 1, j0 + jz + 1);
+      const wd = _isWaterNode(i0 + jx + 1, j0 + jz);
+      if (wa && wb && wc && wd) continue; // 4隅すべて水面内側 → このセルは穴を開ける
+      idxArr.push(a, b, d, b, c, d);
+    }
+  }
+  farGeo.setIndex(idxArr);
   farGeo.computeVertexNormals();
+  _waterMaskDirty = false;
 }
 
 let elevBase = 0; // このリージョンの高度基準(実標高m)。establishRegionBase(part6.js)が地域ごとに確定する。

@@ -1282,8 +1282,13 @@ function wouldCollide(nx, nz, yBase) {
 }
 
 // その地点で立てる床の高さ(地形 or 足元以下にある建物の屋根の高い方)
+// 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】水面ポリゴンの内側は地形メッシュに
+// 穴を開けた(updateFarMesh、part5.js)ため、getGroundY(=farSurfaceY)だけを見ると
+// 「穴の底(存在しない面)」の高さを返してしまい、プレイヤーがそこへ沈んでいく。
+// surfaceY(x,z)(part4.js)は水面ポリゴンがあればその水位、無ければ従来通りの地形の
+// 高さを返すので、これに差し替えて水面の上を歩ける/泳げる扱いにする。
 function floorHeightAt(x, z, fromY) {
-  let fy = getGroundY(x, z) + 0.35;
+  let fy = surfaceY(x, z) + 0.35;
   const arr = collGrid.get(Math.floor(x / COLL_CELL) + ',' + Math.floor(z / COLL_CELL));
   if (arr) for (const b of arr) {
     if (collBoxHitsXZ(b, x, z, 0)) { // 回転建物も見た目どおりの屋根範囲で立てる
