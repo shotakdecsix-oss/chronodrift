@@ -435,8 +435,9 @@ const areaPolyGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハ�
 //
 // 新方式: 水位は水域の"輪郭"(OSM実測)から外向きに20〜50m出した「岸(陸)」のサンプル点
 // だけで決める。水域内部の標高は一切問い合わせない。地形メッシュ側は別途、水域ポリゴンの
-// 内側で穴を開け境界セルだけ輪郭に沿って切る(このファイル下方のcomputeLandPatchPolygon、
-// part5.js updateFarMesh)ため、「水面が地形を突き抜けないように高く盛る」という
+// 内側で穴を開け境界セルだけ輪郭に沿って切る(part5.js updateFarMesh、
+// isWaterPointForMaskを使ったサブセル・ラスタ化。IMPL_PROMPT_20260805_LAND_PATCH.md)ため、
+// 「水面が地形を突き抜けないように高く盛る」という
 // 幾何学的な防御(旧WATER_MARGIN・max方向の集約)がそもそも不要になる
 // ([[project_isehara_game_map_fidelity_first_principle]]追記23・24)。
 const WATER_BIN = 200; // 流下方向プロファイルのビン幅(m)。地形格子とは独立の値(旧: FAR_STEPを流用していたが依存を切った)
@@ -642,9 +643,11 @@ function _markWaterNodes(entry, on) {
   for (let j = j0; j <= j1; j++) {
     for (let i = i0; i <= i1; i++) {
       const x = i * FAR_STEP, z = j * FAR_STEP;
-      if (!pointInPolygon(x, z, entry.pts)) continue;
-      // 中州(hole)は陸地なので、そこだけ地形を消さない(中州の地形は残す)
-      if (entry.holes && entry.holes.some(hp => hp.length >= 4 && pointInPolygon(x, z, hp))) continue;
+      // 【2026-08-05・IMPL_PROMPT_20260805_LAND_PATCH.md 2-1】「点が水域内側か」の判定は
+      // _isPointInWaterEntry(このファイル上方、輪郭+穴=中州の判定)に一本化する。
+      // ここに専用の判定を別途書くと、境界パッチ側(isWaterPointForMask)と食い違い、
+      // 内部穴とパッチの境目に隙間や重なりが出る事故になる(このプロジェクトで繰り返した罠)。
+      if (!_isPointInWaterEntry(entry, x, z)) continue;
       const key = i + ',' + j;
       if (on) {
         waterNodeMask.set(key, (waterNodeMask.get(key) || 0) + 1);
@@ -658,6 +661,18 @@ function _markWaterNodes(entry, on) {
 }
 function _isWaterNode(i, j) {
   return waterNodeMask.has(i + ',' + j);
+}
+// 【2026-08-05・IMPL_PROMPT_20260805_LAND_PATCH.md 2-1】境界セルのサブセル・ラスタ化
+// (part5.js _pushLandPatchRaster)が使う、任意の点(x,z)が「地形マスク対象の水域」内側かの
+// 判定。_markWaterNodesが対象にしているのと完全に同じ集合(kind==='flat'かつ
+// maskedTerrain===true。coastline Phase2の近似ポリゴン(maskTerrain=false)は対象外)を使う。
+function isWaterPointForMask(x, z) {
+  for (const e of queryPolyGrid(areaPolyGrid, x, x, z, z)) {
+    if (e.kind !== 'flat' || !e.maskedTerrain) continue;
+    if (x < e.minX || x > e.maxX || z < e.minZ || z > e.maxZ) continue;
+    if (_isPointInWaterEntry(e, x, z)) return true;
+  }
+  return false;
 }
 // 【DESIGN 2章】tidal=既存のsea領域(entry.waterKind==='sea')と近接するか。判定は
 // 既にあるareaPolyGridの照会(空間ハッシュ)だけで足りる、という設計方針どおりの簡易版。
@@ -765,13 +780,16 @@ const WATER_UNAVAILABLE_FALLBACK_MARGIN = 1.0; // ゲーム単位(実測0.5m相�
 // 万一(rebuildAreaPolyMesh再計算時、前回値を維持できないほど早い呼び出し等)nullのまま
 // ここへ来ても表示を消さないための保険としてのみ残す。waterLevelAt側は`!e.waterProfile`で
 // 弾いているため、この一時値が橋のクリアランス判定に誤って使われることは無い。
-// 【2026-08-05・IMPL_PROMPT_20260805_WATER_HOTFIX.md 修正B】暫定クランプ。
-// 水位をmin基準に変えたこと(DESIGN 3章)自体は正しいが、実機報告で「川が大きな四角の
-// 集まりに見える」症状が出た——岸寄りのセルで水面(min基準、低め)が周囲の地形の下に
-// 隠れ、200mセルの穴の輪郭だけが見えてしまう。地形の適合カット(4章、part5.js
-// computeLandPatchPolygon/farBoundaryPatchMesh)は本コミットに含めて実装済みだが、
-// 実機でこの症状が再発する可能性に備え、`window.WATER_CONFORMING_CUT`で切り替えられる
-// 安全網として残す(既定undefined=クランプ有効)。適合カットが実機で機能していることを
+// 【2026-08-05・IMPL_PROMPT_20260805_WATER_HOTFIX.md 修正B→LAND_PATCH.mdで方式差し替え】
+// 暫定クランプ。水位をmin基準に変えたこと(DESIGN 3章)自体は正しいが、地形の適合カットが
+// 効いていない間は、岸寄りのセルで水面(min基準、低め)が周囲の地形の下に隠れてしまう。
+// 適合カットは当初「セル矩形を水域輪郭の半平面列で逐次クリップ」する方式で実装したが、
+// 非凸な川・海岸線ではSutherland-Hodgmanの前提(クリップ側が凸)が崩れ、実機で
+// 「黒いエリア」「陸が水面扱いになる」という重大な破綻を起こした
+// (IMPL_PROMPT_20260805_LAND_PATCH.md「原因は確定している」参照)。isWaterPointForMaskに
+// よるサブセル・ラスタ化(pointInPolygonのみ、非凸・自己交差に頑健)に置き換え済み。
+// このクランプは`window.WATER_CONFORMING_CUT`で切り替えられる安全網として残す
+// (既定undefined=クランプ有効)。ラスタ化版の適合カットが実機で機能していることを
 // 確認できたら`window.WATER_CONFORMING_CUT = true`にしてこのブロックごと削除すること。
 // 残すと「水面が浮く」という以前の失敗モードが復活し、min化した意味が消える。
 const LEGACY_WATER_MARGIN = 0.45; // 旧WATER_MARGIN(0.3)+yOff(0.15)相当のゲーム単位
@@ -1102,60 +1120,6 @@ function _clipPolyToTile(poly, x0, x1, z0, z1) {
   poly = _clipPolyBySeaSide(poly, x1, z1, x0, z1);
   if (poly.length < 3) return poly;
   poly = _clipPolyBySeaSide(poly, x0, z1, x0, z0);
-  return poly;
-}
-
-// ======= 【2026-08-04・DESIGN_20260804_WATER.md 4章】地形の適合カット(境界セル) =======
-// 200mセル単位の穴あけ(IMPL_PROMPT_20260804_TERRAIN_HOLE.md)は、4隅すべてが水面内側の
-// セルだけを対象にしていたため、岸線は最大200m(対角283m)ずれたまま——「地図データに忠実に」
-// という大原則に照らして不合格(DESIGN 4章)。境界セル(1〜3隅だけが水面内側)は、水域の
-// 輪郭(OSM実測)でセル矩形を切り、陸側だけを別メッシュ(part5.js側)として描く。
-//
-// entryの辺(ax,az)-(bx,bz)を境にpolyを陸側だけへ切り詰める。既存の_clipPolyBySeaSide
-// (Sutherland-Hodgman、_crossSide>=0側を残す)をそのまま流用する——辺の外向き法線+ε側が
-// 水かどうかで、辺の向き(a→b または b→a)を選んで渡すだけでよい(海岸線クリップと同じ考え方)。
-function _clipPolyByEntryEdgeLandSide(poly, entry, ax, az, bx, bz) {
-  if (poly.length < 3) return poly;
-  const dx = bx - ax, dz = bz - az, len = Math.hypot(dx, dz);
-  if (len < 0.01) return poly;
-  const nx = -dz / len, nz = dx / len;
-  const mx = (ax + bx) / 2, mz = (az + bz) / 2;
-  const eps = 0.5;
-  const positiveIsWater = _isPointInWaterEntry(entry, mx + nx * eps, mz + nz * eps);
-  // _clipPolyBySeaSide(poly,a,b)はcrossSide(a→b,p)>=0側を残す。+n方向がcrossSide>0に対応する
-  // (_crossSideの導出、このファイル上方の海岸線セクション参照)。陸側を残したいので、
-  // +nが水なら辺を逆向きに渡す。
-  return positiveIsWater ? _clipPolyBySeaSide(poly, bx, bz, ax, az) : _clipPolyBySeaSide(poly, ax, az, bx, bz);
-}
-// セル矩形(x0,z0)-(x1,z1)の「陸側」だけの凸多角形を返す(完全に水没していれば長さ<3の配列)。
-// このセルにbboxがかかる水域entry(areaPolyGrid、entry.kind==='flat'=水域のみ)の全リング
-// (外周+中州の穴)のうち、実際にこのセル近辺を通る辺だけを候補にして順番に
-// Sutherland-Hodgmanで切り詰める(この操作は「凸多角形を半平面の列で切る」ことの繰り返しで、
-// 辺をどんな順序で・何本適用しても結果は必ず凸になる。三角形化は呼び出し元で頂点0からの
-// 扇形分割でよい)。
-// 【重要】高さは呼び出し元(part5.js)がfarSurfaceYで取ること(c-3。「描画される面=farSurfaceY」
-// という本プロジェクト唯一の健全な不変条件を保つため、ここではx,z平面座標だけを返す)。
-const LAND_PATCH_EDGE_MARGIN = 5; // セルの外側もこの距離までは辺の候補にする(境界ぎりぎりの辺の取りこぼし防止)
-function computeLandPatchPolygon(x0, x1, z0, z1) {
-  let poly = [{ x: x0, z: z0 }, { x: x1, z: z0 }, { x: x1, z: z1 }, { x: x0, z: z1 }];
-  const m = LAND_PATCH_EDGE_MARGIN;
-  const candidates = queryPolyGrid(areaPolyGrid, x0 - m, x1 + m, z0 - m, z1 + m);
-  for (const entry of candidates) {
-    if (entry.kind !== 'flat') continue; // 水域entryのみ(公園等はkind='terrain')
-    const rings = entry.holes && entry.holes.length ? [entry.pts, ...entry.holes] : [entry.pts];
-    for (const ring of rings) {
-      if (!ring || ring.length < 2) continue;
-      const n = ring.length;
-      for (let i = 0; i < n; i++) {
-        const a = ring[i], b = ring[(i + 1) % n];
-        const segMinX = Math.min(a.x, b.x), segMaxX = Math.max(a.x, b.x);
-        const segMinZ = Math.min(a.z, b.z), segMaxZ = Math.max(a.z, b.z);
-        if (segMaxX < x0 - m || segMinX > x1 + m || segMaxZ < z0 - m || segMinZ > z1 + m) continue;
-        poly = _clipPolyByEntryEdgeLandSide(poly, entry, a.x, a.z, b.x, b.z);
-        if (poly.length < 3) return poly; // このセルに陸側は残っていない
-      }
-    }
-  }
   return poly;
 }
 

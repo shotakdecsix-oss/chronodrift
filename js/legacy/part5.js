@@ -43,14 +43,17 @@ farMesh.frustumCulled = false; // 頂点変位+移動するためカリングさ
 farMesh.renderOrder = 0;
 scene.add(farMesh);
 
-// 【2026-08-04・DESIGN_20260804_WATER.md 4章】水域境界セルの陸側パッチ。
+// 【2026-08-04・DESIGN_20260804_WATER.md 4章→2026-08-05・IMPL_PROMPT_20260805_LAND_PATCH.md】
+// 水域境界セルの陸側パッチ(サブセル・ラスタ化方式)。
 // updateFarMeshの穴あけ(4隅すべて水面内側のセルだけ)は岸線が最大200mずれる(「大原則に
-// 照らして不合格」)。境界セル(1〜3隅が水面内側)は通常の2三角形を張らず、水域の輪郭で
-// セル矩形を切った陸側の凸多角形(part4.js computeLandPatchPolygon)を別メッシュとして描く。
-// farMeshと違い回転・追従オフセットを持たない絶対ワールド座標のメッシュにする
-// (computeLandPatchPolygon/areaPolyGridの座標系がそのまま絶対座標のため、そちらに合わせる
-// 方が変換ミスの余地が無い)。三角形の巻き順を厳密にfarGeo側と一致させる保証が無いため、
-// (裏返って見えなくなる事故を避けるため)専用にDoubleSideの複製マテリアルを使う。
+// 照らして不合格」)。境界セル(1〜3隅が水面内側)を埋める最初の実装(セル矩形を水域輪郭の
+// 半平面列でSutherland-Hodgman逐次クリップ)は、非凸な川・海岸線に対してこの手法の前提
+// (クリップ側=多角形が凸であること)が崩れ、実機で「黒いエリア」「陸が水面扱いになる」
+// 重大な破綻を起こした(海岸線リボンのv3→v4で一度潰した誤りの再発、大原則27・28)。
+// 代わりに、境界セルを25m格子(SUB=8×8)に細分し、各サブセルの中心が水域の外か
+// (isWaterPointForMask、part4.js。pointInPolygonのみ)を見て陸なら描く方式にする。
+// 非凸・自己交差・多重リング・中州のいずれにも壊れない(判定が常にpointInPolygon 1回)。
+// farMeshと違い回転・追従オフセットを持たない絶対ワールド座標のメッシュにする。
 const terrainPatchMat = new THREE.MeshLambertMaterial({
   vertexColors: true,
   polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 4,
@@ -61,17 +64,27 @@ const farBoundaryPatchMesh = new THREE.Mesh(farBoundaryPatchGeo, terrainPatchMat
 farBoundaryPatchMesh.frustumCulled = false;
 farBoundaryPatchMesh.renderOrder = 0;
 scene.add(farBoundaryPatchMesh);
-// 凸多角形(computeLandPatchPolygonの戻り値)をvertsPos/vertsColへ扇形三角形分割で追記する。
-// Sutherland-Hodgmanクリップの出力は必ず凸なので、頂点0からの扇形分割で正しく三角形化できる
-// (part4.js computeLandPatchPolygonのコメント参照)。
-function _pushLandPatchTriangles(poly, vertsPos, vertsCol) {
-  if (poly.length < 3) return;
-  for (let i = 1; i < poly.length - 1; i++) {
-    for (const p of [poly[0], poly[i], poly[i + 1]]) {
-      const h = farSurfaceY(p.x, p.z); // 【重要】必ずfarSurfaceYで取る(c-3、描画面との不変条件)
-      vertsPos.push(p.x, h, p.z);
-      const c = terrainColorRGB(h - FAR_Y); // terrainColorRGBは「素の高さ」基準(FAR_Y分だけ差し引いて戻す)
-      vertsCol.push(c[0], c[1], c[2]);
+const LAND_PATCH_SUB = 8; // 200m/8=25mサブセル(岸線の誤差は200m→12.5m=サブセル半分に縮む)
+// 1個の25m四方サブセルをa,b,d/b,c,d(親セルと同じ巻き順)の2三角形として追記する。
+function _pushQuad(x0, z0, x1, z1, vertsPos, vertsCol) {
+  const P = [[x0, z0], [x0, z1], [x1, z0], [x0, z1], [x1, z1], [x1, z0]];
+  for (const [x, z] of P) {
+    const h = farSurfaceY(x, z); // 【重要】必ずfarSurfaceYで取る(c-3、描画面との不変条件)
+    vertsPos.push(x, h, z);
+    const c = terrainColorRGB(h - FAR_Y); // terrainColorRGBは「素の高さ」基準(FAR_Y分だけ差し引いて戻す)
+    vertsCol.push(c[0], c[1], c[2]);
+  }
+}
+// 境界セル(絶対格子インデックスni,nj)をSUB×SUBのサブセルに割り、中心が陸のサブセルだけ
+// _pushQuadで描く。セル境界のサブ頂点はfarSurfaceY(2ノード間の線形補間)から高さを取るため、
+// 隣接する完全陸セル(farGeoが描く辺)と厳密に一致し、T-junction(筋状の隙間)は出ない。
+function _pushLandPatchRaster(ni, nj, vertsPos, vertsCol) {
+  const cx0 = ni * FAR_STEP, cz0 = nj * FAR_STEP, s = FAR_STEP / LAND_PATCH_SUB;
+  for (let sj = 0; sj < LAND_PATCH_SUB; sj++) {
+    for (let si = 0; si < LAND_PATCH_SUB; si++) {
+      const x0 = cx0 + si * s, z0 = cz0 + sj * s, x1 = x0 + s, z1 = z0 + s;
+      if (isWaterPointForMask(x0 + s / 2, z0 + s / 2)) continue; // 中心が水 → 張らない
+      _pushQuad(x0, z0, x1, z1, vertsPos, vertsCol);
     }
   }
 }
@@ -138,15 +151,16 @@ function updateFarMesh(force) {
   }
   pos.needsUpdate = true;
   col.needsUpdate = true;
-  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md→DESIGN_20260804_WATER.md 4章で発展】
-  // 水面ポリゴンの内側(200mセルの4隅ノードすべてがwaterNodeMaskに含まれる)は三角形を
-  // 張らない=地形に穴を開ける。「浮く/沈む」を10回往復した根本原因(200m地形と100m水面と
-  // いう分割の異なる2枚の面を、わずかなマージンだけで重ねようとしていた)を、そもそも
+  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md→2026-08-05・LAND_PATCH.md】水面
+  // ポリゴンの内側(200mセルの4隅ノードすべてがwaterNodeMaskに含まれる)は三角形を張らない
+  // =地形に穴を開ける。「浮く/沈む」を10回往復した根本原因(200m地形と100m水面という
+  // 分割の異なる2枚の面を、わずかなマージンだけで重ねようとしていた)を、そもそも
   // 重ねないことで構造的に解消する。
-  // 境界セル(1〜3隅だけが水面内側)は、旧実装では素通りで通常の2三角形を張っていたため
-  // 岸線が最大200mずれていた(DESIGN 4章「大原則に照らして不合格」)。ここでは通常の
-  // 三角形を張らず、水域の輪郭でセル矩形を切った陸側パッチ(part4.js
-  // computeLandPatchPolygon)をfarBoundaryPatchMesh側へ積む。
+  // 境界セル(1〜3隅だけが水面内側)は、水域輪郭でセル矩形を切る適合カットを最初
+  // Sutherland-Hodgman半平面クリップで実装したが、非凸な川・海岸線でこの手法の前提
+  // (クリップ側が凸)が崩れ実機で重大な破綻を起こしたため、25mサブセル・ラスタ化
+  // (_pushLandPatchRaster、pointInPolygonのみで非凸に頑健)に置き換えた
+  // (IMPL_PROMPT_20260805_LAND_PATCH.md)。
   // 【重要・絶対に壊さないこと】完全陸(0隅)セルの三角形の張り方(a,b,d と b,c,d)は、
   // farSurfaceY(このファイル69行目付近)の補間式(u+v<=1でha/hb/hdの面、それ以外で
   // hc/hb/hdの面)と厳密に一致させること。ここがズレると、プレイヤーの足元・建物・道路の
@@ -166,21 +180,17 @@ function updateFarMesh(force) {
       const wc = _isWaterNode(i0 + jx + 1, j0 + jz + 1);
       const wd = _isWaterNode(i0 + jx + 1, j0 + jz);
       const waterCount = (wa ? 1 : 0) + (wb ? 1 : 0) + (wc ? 1 : 0) + (wd ? 1 : 0);
-      if (waterCount === 4) continue; // 完全に水面内側 → 穴のまま(旧方式)
+      if (waterCount === 4) continue; // 完全に水面内側 → 穴のまま
       if (waterCount === 0) { idxArr.push(a, b, d, b, c, d); continue; } // 完全に陸 → 通常の2三角形
-      // 境界セル: 水域の輪郭で切った陸側パッチだけを描く(computeLandPatchPolygonはpart4.js、
-      // 絶対ワールド座標のセル矩形を渡す)。
-      const x0 = (i0 + jx) * FAR_STEP, x1 = (i0 + jx + 1) * FAR_STEP;
-      const z0 = (j0 + jz) * FAR_STEP, z1 = (j0 + jz + 1) * FAR_STEP;
-      const patch = computeLandPatchPolygon(x0, x1, z0, z1);
-      _pushLandPatchTriangles(patch, patchPos, patchCol);
+      // 境界セル → farGeoには張らず、25mサブセル・ラスタでfarBoundaryPatchMesh側へ積む
+      _pushLandPatchRaster(i0 + jx, j0 + jz, patchPos, patchCol);
     }
   }
   farGeo.setIndex(idxArr);
   farGeo.computeVertexNormals();
   farBoundaryPatchGeo.setAttribute('position', new THREE.Float32BufferAttribute(patchPos, 3));
   farBoundaryPatchGeo.setAttribute('color', new THREE.Float32BufferAttribute(patchCol, 3));
-  farBoundaryPatchGeo.setIndex(null); // 非indexed三角形ソープ(扇形分割済みなので不要)
+  farBoundaryPatchGeo.setIndex(null); // 非indexed三角形ソープ
   farBoundaryPatchGeo.computeVertexNormals();
   farBoundaryPatchGeo.computeBoundingSphere();
   _waterMaskDirty = false;
