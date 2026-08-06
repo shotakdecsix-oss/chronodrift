@@ -765,6 +765,16 @@ const WATER_UNAVAILABLE_FALLBACK_MARGIN = 1.0; // ゲーム単位(実測0.5m相�
 // 万一(rebuildAreaPolyMesh再計算時、前回値を維持できないほど早い呼び出し等)nullのまま
 // ここへ来ても表示を消さないための保険としてのみ残す。waterLevelAt側は`!e.waterProfile`で
 // 弾いているため、この一時値が橋のクリアランス判定に誤って使われることは無い。
+// 【2026-08-05・IMPL_PROMPT_20260805_WATER_HOTFIX.md 修正B】暫定クランプ。
+// 水位をmin基準に変えたこと(DESIGN 3章)自体は正しいが、実機報告で「川が大きな四角の
+// 集まりに見える」症状が出た——岸寄りのセルで水面(min基準、低め)が周囲の地形の下に
+// 隠れ、200mセルの穴の輪郭だけが見えてしまう。地形の適合カット(4章、part5.js
+// computeLandPatchPolygon/farBoundaryPatchMesh)は本コミットに含めて実装済みだが、
+// 実機でこの症状が再発する可能性に備え、`window.WATER_CONFORMING_CUT`で切り替えられる
+// 安全網として残す(既定undefined=クランプ有効)。適合カットが実機で機能していることを
+// 確認できたら`window.WATER_CONFORMING_CUT = true`にしてこのブロックごと削除すること。
+// 残すと「水面が浮く」という以前の失敗モードが復活し、min化した意味が消える。
+const LEGACY_WATER_MARGIN = 0.45; // 旧WATER_MARGIN(0.3)+yOff(0.15)相当のゲーム単位
 function _waterYAt(entry, x, z) {
   const p = entry.waterProfile;
   if (!p) return getGroundY(x, z) + WATER_UNAVAILABLE_FALLBACK_MARGIN;
@@ -775,7 +785,11 @@ function _waterYAt(entry, x, z) {
   if (b0 > n - 2) b0 = Math.max(0, n - 2);
   const t = n <= 1 ? 0 : Math.min(1, Math.max(0, bf - b0));
   const m0 = p.M[b0], m1 = p.M[Math.min(n - 1, b0 + 1)];
-  return m0 + (m1 - m0) * t + entry.yOff;
+  const y = m0 + (m1 - m0) * t + entry.yOff;
+  if (typeof window !== 'undefined' && !window.WATER_CONFORMING_CUT) {
+    return Math.max(y, getGroundY(x, z) + LEGACY_WATER_MARGIN);
+  }
+  return y;
 }
 // 【2026-08-03】辺(弦)が地形を切って「地面が混ざり込む」のを防ぐため、最長辺がMAX_EDGE以下に
 // なるまで三角形を1→4の中点分割で再帰的に細分する。中点は辺キー("小さい方の頂点index_大きい方")
@@ -978,7 +992,9 @@ function buildAreaPoly(pts, mat, yOff, holes, waterKind) {
   polyGridAdd(areaPolyGrid, entry);
   // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】この水面の下の地形セルに穴を開ける
   // (このentryが破棄される時は_markWaterNodes(entry,false)と対で呼ぶこと。
-  // dropAreaRecordsInTile/evictFarAreaPolys参照)。
+  // dropAreaRecordsInTile/evictFarAreaPolys参照)。buildAreaPolyはOSM実測輪郭
+  // (natural=water/riverbank)のみを扱うため、buildFixedFlatAreaPolyと違い常にマスクする。
+  entry.maskedTerrain = true;
   _markWaterNodes(entry, true);
   return true;
 }
@@ -1011,7 +1027,15 @@ const WATER_VISUAL_MARGIN = 0.15;
 // 重い処理)を一切呼ばず、常に同じ高さを返す1ビンの固定プロファイルを直接埋め込む。
 // waterBankInfoをあえて設定しないため、rebuildAreaPolyMesh側の再計算分岐も素通りし、
 // 高さは未来永劫この値のまま(=地形データの後着で変わりうる川とは異なり、海は変わる理由が無い)。
-function buildFixedFlatAreaPoly(pts, mat, yOff, fixedY, holes) {
+// maskTerrain: 地形に穴を開ける(=適合カットの入力にする)かどうか。
+// 【2026-08-05・IMPL_PROMPT_20260805_WATER_HOTFIX.md 修正A】coastline Phase2の
+// タイル全塗り(wholeTile、5点多数決の近似矩形)は実測輪郭ではないため、これをそのまま
+// 地形マスクの入力にすると、多数決が誤って「海側」と判定した陸地(ガバナーズ島等の
+// 小島・埠頭)の地形ごと穴が開いてしまう(「陸であるべき場所が水面扱い」の真因)。
+// 既定はfalse(マスクしない=近似ポリゴンを足したとき自動で安全側に倒す)。
+// 呼び出し側(processCoastlineFill)が、実測輪郭に基づく塗り(Phase1 ribbon)にだけ
+// trueを渡す。buildAreaPoly(natural=water/riverbank=OSM実測輪郭)側は従来どおり常にマスクする。
+function buildFixedFlatAreaPoly(pts, mat, yOff, fixedY, holes, maskTerrain) {
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
   for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
   const entry = { mesh: null, kind: 'flat', areaKind: areaPolyTakePendingKind(), pts, holes, mat, yOff, minX, maxX, minZ, maxZ };
@@ -1030,8 +1054,11 @@ function buildFixedFlatAreaPoly(pts, mat, yOff, fixedY, holes) {
   const avoidPoly = { pts, minX, maxX, minZ, maxZ };
   avoidPolygons.push(avoidPoly);
   polyGridAdd(avoidGrid, avoidPoly);
-  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】海の下の地形セルにも同様に穴を開ける。
-  _markWaterNodes(entry, true);
+  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md→2026-08-05修正A】海の下の地形セルは
+  // maskTerrainがtrueの時だけ穴を開ける。破棄時に対で外すため必ずentry.maskedTerrainへ記録する
+  // (dropAreaRecordsInTile/evictFarAreaPolysの_markWaterNodes(e,false)呼び出し側を参照)。
+  entry.maskedTerrain = !!maskTerrain;
+  if (entry.maskedTerrain) _markWaterNodes(entry, true);
   return true;
 }
 // 直線(ax,az)-(bx,bz)を基準に、点(px,pz)が「海側」(進行方向(a→b)の右手側、OSMのcoastline
@@ -1255,7 +1282,8 @@ function processCoastlineFill(elements, tileList) {
         const poly = _clipPolyToTile(ribbon, x0, x1, z0, z1);
         if (poly.length < 3) { emptyCount++; continue; }
         if (areaPolyBudgetOK('sea')) {
-          buildFixedFlatAreaPoly(poly, waterAreaMat, WATER_VISUAL_MARGIN, seaY, holes);
+          // 【2026-08-05・修正A-2】Phase1 ribbonは実測coastlineに基づく塗り→地形をマスクしてよい
+          buildFixedFlatAreaPoly(poly, waterAreaMat, WATER_VISUAL_MARGIN, seaY, holes, true);
           builtCount++;
         } else {
           budgetFailCount++;
@@ -1318,7 +1346,12 @@ function processCoastlineFill(elements, tileList) {
       if (seaVotes >= 3) {
         const wholeTile = [{ x: x0, z: z0 }, { x: x1, z: z0 }, { x: x1, z: z1 }, { x: x0, z: z1 }];
         if (areaPolyBudgetOK('sea')) {
-          buildFixedFlatAreaPoly(wholeTile, waterAreaMat, WATER_VISUAL_MARGIN, seaY, holes);
+          // 【2026-08-05・修正A-2】5点多数決のタイル全塗りは近似(実測輪郭ではない)。
+          // Phase1が既にribbonでこのタイルの海側を実測輪郭どおりマスク済み(ribbonCount>0)なら
+          // Phase2は描画のみに留め、地形はマスクしない(近似で陸=ガバナーズ島等を消さない)。
+          // ribbonCount===0(coastlineがこのタイルを1本も通っていない=本当に開けた海)の時だけ
+          // マスクしてよい。
+          buildFixedFlatAreaPoly(wholeTile, waterAreaMat, WATER_VISUAL_MARGIN, seaY, holes, ribbonCount === 0);
           builtCount++;
         } else {
           budgetFailCount++;
@@ -1373,10 +1406,12 @@ function dropAreaRecordsInTile(tx, tz, tileM) {
     if (inTile(e)) {
       if (e.mesh) { scene.remove(e.mesh); e.mesh.geometry.dispose(); e.mesh = null; } // matは共有なのでdisposeしない
       areaPolyRefund(e.areaKind); // 予算を返す(再取得でまた確保される)
-      // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】水面ポリゴンのentryが実際に
-      // 破棄される箇所。開けた地形の穴を埋め戻す(参照カウント式なので、重なる別の水面
-      // ポリゴンがまだそのノードを覆っていれば穴は残る)。
-      if (e.kind === 'flat') _markWaterNodes(e, false);
+      // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md→2026-08-05修正A】水面ポリゴンの
+      // entryが実際に破棄される箇所。開けた地形の穴を埋め戻す(参照カウント式なので、重なる
+      // 別の水面ポリゴンがまだそのノードを覆っていれば穴は残る)。maskedTerrainがtrueの
+      // entry(=実際に穴を開けた側)だけ対で外す。falseのentry(Phase2近似等)はそもそも
+      // 開けていないので何もしない(参照カウントを不用意に減らさない)。
+      if (e.maskedTerrain) _markWaterNodes(e, false);
       dropped++; continue;
     }
     areaPolyMeshes[w++] = e;
@@ -1507,8 +1542,9 @@ function evictFarAreaPolys(force) {
     // ここに来る時点でunloadFarAreaPolysが既にメッシュを解放しているはずだが、念のため
     if (e.mesh) { scene.remove(e.mesh); e.mesh.geometry.dispose(); e.mesh = null; }
     areaPolyRefund(e.areaKind); // 予算を返す(再取得でまた確保される)
-    // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】dropAreaRecordsInTileと同じ理由。
-    if (e.kind === 'flat') _markWaterNodes(e, false);
+    // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md→2026-08-05修正A】dropAreaRecordsInTile
+    // と同じ理由。maskedTerrainがtrueのentryだけ対で外す。
+    if (e.maskedTerrain) _markWaterNodes(e, false);
     _areaPolyEvicted++;
   }
   if (w === areaPolyMeshes.length) return;
