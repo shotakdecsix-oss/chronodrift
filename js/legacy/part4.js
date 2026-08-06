@@ -813,6 +813,16 @@ const WATER_UNAVAILABLE_FALLBACK_MARGIN = 1.0; // ゲーム単位(実測0.5m相�
 // (既定undefined=クランプ有効)。ラスタ化版の適合カットが実機で機能していることを
 // 確認できたら`window.WATER_CONFORMING_CUT = true`にしてこのブロックごと削除すること。
 // 残すと「水面が浮く」という以前の失敗モードが復活し、min化した意味が消える。
+// 【2026-08-05・IMPL_PROMPT_20260805_NY_LAND_AS_WATER.md・大原則31】上記は「川(bank-min)が
+// 地形に隠れる」ことへの繋ぎのつもりだったが、種別を絞らずに全水域へ効かせていたため、
+// 海(buildFixedFlatAreaPoly、実標高0m固定が正しい)にも地形追従のクランプがかかっていた。
+// coastline Phase2はタイル矩形(1600m四方)を丸ごと海として描く(地形マスクの有無=
+// ribbonCount===0ゲートは「描画」ではなく「地形マスク」だけを止めているに過ぎない・大原則32)。
+// クランプ無しなら海面(0m固定)は陸(landFloorM以上)の下に隠れるだけで実害が無かったが、
+// クランプが入ると海面が「地形+0.45」まで持ち上がり、タイル全域で地形に貼り付く毛布になって
+// 陸を覆ってしまう(「NYだけ陸が水面になる」の真因。natural=coastlineが密でPhase2タイルが
+// 多いNYでだけ顕在化し、Phase2がほとんど発生しない相模川内陸側では出ない、という実機報告の
+// 差がそのまま裏付け)。固定Y(海)のエントリはクランプの対象外にする。
 const LEGACY_WATER_MARGIN = 0.45; // 旧WATER_MARGIN(0.3)+yOff(0.15)相当のゲーム単位
 function _waterYAt(entry, x, z) {
   const p = entry.waterProfile;
@@ -825,7 +835,10 @@ function _waterYAt(entry, x, z) {
   const t = n <= 1 ? 0 : Math.min(1, Math.max(0, bf - b0));
   const m0 = p.M[b0], m1 = p.M[Math.min(n - 1, b0 + 1)];
   const y = m0 + (m1 - m0) * t + entry.yOff;
-  if (typeof window !== 'undefined' && !window.WATER_CONFORMING_CUT) {
+  // levelSource==='sea-fixed'(buildFixedFlatAreaPolyが常に設定)を主判定にしつつ、
+  // waterKind==='sea'も併せて見る(呼び出し経路によってはlevelSourceが未設定のことがあるため)。
+  const isFixedSea = entry.levelSource === 'sea-fixed' || entry.waterKind === 'sea';
+  if (!isFixedSea && typeof window !== 'undefined' && !window.WATER_CONFORMING_CUT) {
     return Math.max(y, getGroundY(x, z) + LEGACY_WATER_MARGIN);
   }
   return y;
