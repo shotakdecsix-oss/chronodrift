@@ -1321,8 +1321,20 @@ function processCoastlineFill(elements, tileList) {
         const poly = _clipPolyToTile(ribbon, x0, x1, z0, z1);
         if (poly.length < 3) { emptyCount++; continue; }
         if (areaPolyBudgetOK('sea')) {
-          // 【2026-08-05・修正A-2】Phase1 ribbonは実測coastlineに基づく塗り→地形をマスクしてよい
-          buildFixedFlatAreaPoly(poly, waterAreaMat, WATER_VISUAL_MARGIN, seaY, holes, true);
+          // 【2026-08-05・修正A-2は誤りだった→IMPL_PROMPT_20260805_COASTLINE_NO_MASK.md・
+          // 大原則35・36で訂正】「Phase1 ribbonは実測coastlineに基づく塗りだからマスクして
+          // よい」としていたが誤り。ribbonはcoastlineのノード列(実測)そのものではなく、
+          // そこから「海側へCOASTLINE_SEA_FARだけオフセット+タイルクリップ」して構築した
+          // 形状——実測は輪郭の位置だけで、閉じたリング(島)かどうかの判定はトポロジーに
+          // 依存する(NYではマンハッタンの海岸線がタイル単位の多数のwayに分かれて届くため
+          // 閉じたリングとして検出できず、各wayが独立にribbon化される)。この結果、向きを
+          // 外したwayが島の内側(マンハッタンの金融街等)を丸ごと海として塗り、それを地形
+          // マスクの入力にしてしまうと「陸が水面になる」(実測座標でNY実機確認済み)。
+          // 実測輪郭そのもの(natural=water/riverbank、buildAreaPoly)だけで必要な穴は
+          // 全て開くため、coastline由来(Phase1/Phase2とも)は地形マスクの対象から外す。
+          // 海は実標高0m固定のまま描かれ続けるので、陸(landFloorMで底上げ)が自然に海面を
+          // 突き破って見える(マスク導入前の挙動に戻るだけ、実害なし)。
+          buildFixedFlatAreaPoly(poly, waterAreaMat, WATER_VISUAL_MARGIN, seaY, holes, false);
           builtCount++;
         } else {
           budgetFailCount++;
@@ -1397,12 +1409,16 @@ function processCoastlineFill(elements, tileList) {
       if (seaVotes >= samples.length) {
         const wholeTile = [{ x: x0, z: z0 }, { x: x1, z: z0 }, { x: x1, z: z1 }, { x: x0, z: z1 }];
         if (areaPolyBudgetOK('sea')) {
-          // 【2026-08-05・修正A-2】5点多数決のタイル全塗りは近似(実測輪郭ではない)。
-          // Phase1が既にribbonでこのタイルの海側を実測輪郭どおりマスク済み(ribbonCount>0)なら
-          // Phase2は描画のみに留め、地形はマスクしない(近似で陸=ガバナーズ島等を消さない)。
-          // ribbonCount===0(coastlineがこのタイルを1本も通っていない=本当に開けた海)の時だけ
-          // マスクしてよい。
-          buildFixedFlatAreaPoly(wholeTile, waterAreaMat, WATER_VISUAL_MARGIN, seaY, holes, ribbonCount === 0);
+          // 【2026-08-05・修正A-2は誤りだった→IMPL_PROMPT_20260805_COASTLINE_NO_MASK.md・
+          // 大原則35で訂正】5点多数決のタイル全塗りは近似(実測輪郭ではない)——これ自体は
+          // 修正A-2の認識どおりで正しかったが、「ribbonCount===0(Phase1が1件もマスクして
+          // いない)ならPhase2がマスクしてよい」という条件が誤りだった。Phase1のribbon自体が
+          // 実測輪郭ではなく構築物(coastlineの海側へCOASTLINE_SEA_FARオフセット+タイル
+          // クリップ)であり、NYのように海岸線リングがタイル単位のwayに分かれて届く場所では
+          // 島(マンハッタン)の内側を誤って海と塗ることがある。coastline由来はPhase1/Phase2
+          // とも常に地形マスクの対象から外す(natural=water/riverbankの実測輪郭だけで
+          // 必要な穴は全て開くため、マスクを外しても穴が足りなくなることはない)。
+          buildFixedFlatAreaPoly(wholeTile, waterAreaMat, WATER_VISUAL_MARGIN, seaY, holes, false);
           builtCount++;
         } else {
           budgetFailCount++;
