@@ -659,8 +659,29 @@ function _markWaterNodes(entry, on) {
   }
   _waterMaskDirty = true;
 }
+// 【2026-08-05・IMPL_PROMPT_20260805_WATER_FIX3.md 修正3】切り分け用キルスイッチ。
+// コンソールで`window.TERRAIN_HOLES = false; updateFarMesh(true);`と叩けば、地形の穴あけ
+// (=水面ポリゴンによる地形マスク)そのものを無効化できる。既定はtrue相当(何もしなければ
+// 従来どおり)。黒い帯が消えるかどうかで「穴あけ側が原因か、別の原因か」を1回の実験で
+// 切り分けられるようにする(以前はこのスイッチ自体が無く、コンソールで叩いても効かなかった)。
 function _isWaterNode(i, j) {
+  if (window.TERRAIN_HOLES === false) return false;
   return waterNodeMask.has(i + ',' + j);
+}
+// 【2026-08-05・IMPL_PROMPT_20260805_WATER_FIX3.md 修正2】「地形マスクを開けてよいか」
+// (entry.maskedTerrain=能力。実形状ポリゴンならtrue、coastline Phase2の近似ポリゴンはfalse)と
+// 「今実際に開けているか」(entry.masked=状態)を分けて、_markWaterNodesの呼び出しを冪等化する。
+// 【真因】unloadFarAreaPolys(遠方でGPUメッシュだけ解放する経路)がこれまで_markWaterNodesを
+// 呼んでおらず、AREA_POLY_UNLOAD_DIST(道路と同程度)〜ROAD_RECORD_KEEP_DIST(約6000m)の帯で
+// 「穴は開いたまま、水面メッシュは既に無い」=地形にfarMeshの三角形もfarBoundaryPatchの三角形も
+// 一切張られない黒い帯になっていた(farMeshは±6000mあるため上空視点だと画面の大半を占める)。
+// 呼び出しを`_markWaterNodes`直書きからこの関数経由に統一し、状態が既に一致していれば
+// 何もしない(参照カウントの二重加算・二重減算を防ぐ)。
+function setWaterMask(entry, on) {
+  if (!entry.maskedTerrain) return;
+  if (!!entry.masked === !!on) return;
+  _markWaterNodes(entry, on);
+  entry.masked = !!on;
 }
 // 【2026-08-05・IMPL_PROMPT_20260805_LAND_PATCH.md 2-1】境界セルのサブセル・ラスタ化
 // (part5.js _pushLandPatchRaster)が使う、任意の点(x,z)が「地形マスク対象の水域」内側かの
@@ -979,6 +1000,12 @@ function _instantiateAreaPolyMesh(entry) {
   mesh.renderOrder = 1;
   scene.add(mesh);
   entry.mesh = mesh;
+  // 【2026-08-05・IMPL_PROMPT_20260805_WATER_FIX3.md 修正2】地形マスクの適用箇所をここ1箇所に
+  // 集約する(以前はbuildAreaPoly/buildFixedFlatAreaPolyの末尾がそれぞれ直接_markWaterNodesを
+  // 呼んでおり、unloadFarAreaPolysの再構築経路だけ呼び忘れていた。生成経路を2つに分けると
+  // 「片方だけ直す」事故が起きるため、_instantiateAreaPolyMeshの成功直後1箇所にする)。
+  // entry.maskedTerrain(能力)は呼び出し元がこの関数を呼ぶ前に設定しておくこと。
+  setWaterMask(entry, true);
   return true;
 }
 
@@ -1005,15 +1032,16 @@ function buildAreaPoly(pts, mat, yOff, holes, waterKind) {
     queueWaterPolyRetry(pts, holes, minX, maxX, minZ, maxZ, waterKind);
     return false;
   }
+  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md→2026-08-05修正2】この水面の下の地形
+  // セルに穴を開けてよいか(能力)のフラグ。実際に開ける/閉じるのは_instantiateAreaPolyMesh内の
+  // setWaterMask(entry.masked=状態)に一本化したので、ここでは能力を立てるだけでよい
+  // (_markWaterNodesを直接呼ばない。dropAreaRecordsInTile/evictFarAreaPolys/
+  // unloadFarAreaPolysのsetWaterMask呼び出し参照)。buildAreaPolyはOSM実測輪郭
+  // (natural=water/riverbank)のみを扱うため、buildFixedFlatAreaPolyと違い常にマスク対象にする。
+  entry.maskedTerrain = true;
   if (!_instantiateAreaPolyMesh(entry)) { areaPolyRefund(entry.areaKind); return false; }
   areaPolyMeshes.push(entry);
   polyGridAdd(areaPolyGrid, entry);
-  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】この水面の下の地形セルに穴を開ける
-  // (このentryが破棄される時は_markWaterNodes(entry,false)と対で呼ぶこと。
-  // dropAreaRecordsInTile/evictFarAreaPolys参照)。buildAreaPolyはOSM実測輪郭
-  // (natural=water/riverbank)のみを扱うため、buildFixedFlatAreaPolyと違い常にマスクする。
-  entry.maskedTerrain = true;
-  _markWaterNodes(entry, true);
   return true;
 }
 
@@ -1061,6 +1089,11 @@ function buildFixedFlatAreaPoly(pts, mat, yOff, fixedY, holes, maskTerrain) {
   entry.tidal = true;
   entry.levelSource = 'sea-fixed'; // 【DESIGN 3-1】実測0m固定。岸サンプルは使わない
   entry.waterProfile = { ux: 1, uz: 0, sMin: 0, M: [fixedY] };
+  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md→2026-08-05修正A→修正2】海の下の地形
+  // セルはmaskTerrainがtrueの時だけ穴を開けてよい(能力)。実際に開ける/閉じる処理自体は
+  // _instantiateAreaPolyMesh内のsetWaterMaskに一本化した(dropAreaRecordsInTile/
+  // evictFarAreaPolys/unloadFarAreaPolysのsetWaterMask呼び出し参照)。
+  entry.maskedTerrain = !!maskTerrain;
   if (!_instantiateAreaPolyMesh(entry)) { areaPolyRefund(entry.areaKind); return false; }
   areaPolyMeshes.push(entry);
   polyGridAdd(areaPolyGrid, entry);
@@ -1072,11 +1105,6 @@ function buildFixedFlatAreaPoly(pts, mat, yOff, fixedY, holes, maskTerrain) {
   const avoidPoly = { pts, minX, maxX, minZ, maxZ };
   avoidPolygons.push(avoidPoly);
   polyGridAdd(avoidGrid, avoidPoly);
-  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md→2026-08-05修正A】海の下の地形セルは
-  // maskTerrainがtrueの時だけ穴を開ける。破棄時に対で外すため必ずentry.maskedTerrainへ記録する
-  // (dropAreaRecordsInTile/evictFarAreaPolysの_markWaterNodes(e,false)呼び出し側を参照)。
-  entry.maskedTerrain = !!maskTerrain;
-  if (entry.maskedTerrain) _markWaterNodes(entry, true);
   return true;
 }
 // 直線(ax,az)-(bx,bz)を基準に、点(px,pz)が「海側」(進行方向(a→b)の右手側、OSMのcoastline
@@ -1370,12 +1398,11 @@ function dropAreaRecordsInTile(tx, tz, tileM) {
     if (inTile(e)) {
       if (e.mesh) { scene.remove(e.mesh); e.mesh.geometry.dispose(); e.mesh = null; } // matは共有なのでdisposeしない
       areaPolyRefund(e.areaKind); // 予算を返す(再取得でまた確保される)
-      // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md→2026-08-05修正A】水面ポリゴンの
+      // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md→2026-08-05修正A→修正2】水面ポリゴンの
       // entryが実際に破棄される箇所。開けた地形の穴を埋め戻す(参照カウント式なので、重なる
-      // 別の水面ポリゴンがまだそのノードを覆っていれば穴は残る)。maskedTerrainがtrueの
-      // entry(=実際に穴を開けた側)だけ対で外す。falseのentry(Phase2近似等)はそもそも
-      // 開けていないので何もしない(参照カウントを不用意に減らさない)。
-      if (e.maskedTerrain) _markWaterNodes(e, false);
+      // 別の水面ポリゴンがまだそのノードを覆っていれば穴は残る)。setWaterMaskが能力
+      // (maskedTerrain)と現在の状態(masked)の両方を見て冪等に外す。
+      setWaterMask(e, false);
       dropped++; continue;
     }
     areaPolyMeshes[w++] = e;
@@ -1466,6 +1493,12 @@ function unloadFarAreaPolys(force) {
     scene.remove(entry.mesh);
     entry.mesh.geometry.dispose(); // マテリアルは共有(lawnMat等)なので破棄しない
     entry.mesh = null;
+    // 【2026-08-05・IMPL_PROMPT_20260805_WATER_FIX3.md 修正2】GPUメッシュを解放するだけで
+    // 地形マスクは外していなかったため、AREA_POLY_UNLOAD_DIST(ここ)〜ROAD_RECORD_KEEP_DIST
+    // (evictFarAreaPolys)の帯で「穴は開いたまま水面メッシュは無い」黒い帯になっていた。
+    // メッシュ解放と対で必ず外す(再接近時はこの関数内の_instantiateAreaPolyMesh経由で
+    // setWaterMask(true)が再度かかる)。
+    setWaterMask(entry, false);
   }
 }
 
@@ -1506,9 +1539,9 @@ function evictFarAreaPolys(force) {
     // ここに来る時点でunloadFarAreaPolysが既にメッシュを解放しているはずだが、念のため
     if (e.mesh) { scene.remove(e.mesh); e.mesh.geometry.dispose(); e.mesh = null; }
     areaPolyRefund(e.areaKind); // 予算を返す(再取得でまた確保される)
-    // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md→2026-08-05修正A】dropAreaRecordsInTile
-    // と同じ理由。maskedTerrainがtrueのentryだけ対で外す。
-    if (e.maskedTerrain) _markWaterNodes(e, false);
+    // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md→2026-08-05修正A→修正2】
+    // dropAreaRecordsInTileと同じ理由。setWaterMaskで冪等に外す。
+    setWaterMask(e, false);
     _areaPolyEvicted++;
   }
   if (w === areaPolyMeshes.length) return;

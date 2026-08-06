@@ -43,7 +43,8 @@ farMesh.frustumCulled = false; // 頂点変位+移動するためカリングさ
 farMesh.renderOrder = 0;
 scene.add(farMesh);
 
-// 【2026-08-04・DESIGN_20260804_WATER.md 4章→2026-08-05・IMPL_PROMPT_20260805_LAND_PATCH.md】
+// 【2026-08-04・DESIGN_20260804_WATER.md 4章→2026-08-05・IMPL_PROMPT_20260805_LAND_PATCH.md
+// →2026-08-05・IMPL_PROMPT_20260805_WATER_FIX3.md 修正1】
 // 水域境界セルの陸側パッチ(サブセル・ラスタ化方式)。
 // updateFarMeshの穴あけ(4隅すべて水面内側のセルだけ)は岸線が最大200mずれる(「大原則に
 // 照らして不合格」)。境界セル(1〜3隅が水面内側)を埋める最初の実装(セル矩形を水域輪郭の
@@ -54,13 +55,14 @@ scene.add(farMesh);
 // (isWaterPointForMask、part4.js。pointInPolygonのみ)を見て陸なら描く方式にする。
 // 非凸・自己交差・多重リング・中州のいずれにも壊れない(判定が常にpointInPolygon 1回)。
 // farMeshと違い回転・追従オフセットを持たない絶対ワールド座標のメッシュにする。
-const terrainPatchMat = new THREE.MeshLambertMaterial({
-  vertexColors: true,
-  polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 4,
-  side: THREE.DoubleSide,
-});
+// 専用マテリアル(terrainPatchMat、DoubleSide)は「三角形の巻き順がfarGeo側と一致する保証が
+// 無いので裏返っても見えるように」という保険のつもりだったが、_pushQuadの巻き順は実際には
+// 常に+Y向き(外積で確認済み)で不要だったうえ、MeshLambertMaterialは頂点シェーダで
+// ライティングするためDoubleSideでも裏返った法線までは救えない(gl_FrontFacingが無い)。
+// 効かない保険を残すと原因究明を遅らせるだけなので撤去し、farMeshと同じterrainMatを使う
+// (大原則30)。
 const farBoundaryPatchGeo = new THREE.BufferGeometry();
-const farBoundaryPatchMesh = new THREE.Mesh(farBoundaryPatchGeo, terrainPatchMat);
+const farBoundaryPatchMesh = new THREE.Mesh(farBoundaryPatchGeo, terrainMat);
 farBoundaryPatchMesh.frustumCulled = false;
 farBoundaryPatchMesh.renderOrder = 0;
 scene.add(farBoundaryPatchMesh);
@@ -191,6 +193,14 @@ function updateFarMesh(force) {
   farBoundaryPatchGeo.setAttribute('position', new THREE.Float32BufferAttribute(patchPos, 3));
   farBoundaryPatchGeo.setAttribute('color', new THREE.Float32BufferAttribute(patchCol, 3));
   farBoundaryPatchGeo.setIndex(null); // 非indexed三角形ソープ
+  // 【2026-08-05・IMPL_PROMPT_20260805_WATER_FIX3.md 修正1・大原則29】computeVertexNormals()は
+  // 既にnormal属性があればそれを再利用する(無ければposition.countに合わせて新規作成)。
+  // 境界セル数(=patchPosの頂点数)はプレイヤー移動や水域読み込みで毎回変わるため、前回より
+  // 頂点数が増えた瞬間、古いnormal配列の範囲外への書き込みが黙って捨てられ、はみ出した頂点の
+  // 法線が(0,0,0)のまま残る。法線ゼロ+MeshLambertMaterial=光が当たらず真っ黒になる
+  // (実機で見えた「陸パッチが黒い」の真因。MeshBasicMaterialに差し替えると赤く見えたのは
+  // ライティングを無視するため、が根拠)。position/colorと同時に必ず作り直す。
+  farBoundaryPatchGeo.deleteAttribute('normal');
   farBoundaryPatchGeo.computeVertexNormals();
   farBoundaryPatchGeo.computeBoundingSphere();
   _waterMaskDirty = false;
