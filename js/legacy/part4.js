@@ -521,6 +521,15 @@ function _binPercentileMin(heights) {
 // 岸サンプル(bankInfo)+水域種別(waterKind)+tidal(海に接続しているか)から水位を決める。
 // seaはbuildFixedFlatAreaPoly側で固定値を直接組み立てるためここを通らない。戻り値は
 // _waterYAtが参照する{ ux, uz, sMin, M }形式に統一する(lake/riverを種別で分岐させない)。
+// 【2026-08-05・IMPL_PROMPT_20260805_TIDAL_LEVEL.md 3-1・大原則33】感潮域(海と繋がっている
+// 水域)の水面は物理的な定義そのもので、どこでも海面と等しい。岸サンプル(都市部では岸壁・
+// 埠頭で数m〜20m上のことがある)から決めてはいけない。以前は河口ビン1本だけを対象にした
+// 「下限」クランプ(if (M0[mouthBin] < floor) ...)だったため、(a) 上限が無く岸サンプルが
+// 高ければ水位はいくらでも上がる、(b) kind=lake(bins=1)はそもそもこの分岐まで来ない、
+// という2つの理由で機能していなかった(実機ログで"kind=lake tidal=true"の水位が6.2〜51.6と
+// 大きくばらついていたのが証拠)。「下限クランプ」と「確定値」を混同しないこと——物理的に
+// 一意に決まる量はクランプではなく代入で確定させる。
+const RIVER_MOUTH_ABOVE_SEA_MARGIN = 0.2; // ゲーム単位。z-fighting回避の最小マージン
 function _computeWaterLevelFromBankInfo(bankInfo, waterKind, tidal) {
   const { samplePts, ux, uz, sMin, sMax } = bankInfo;
   const samples = []; // { s, h }
@@ -532,6 +541,10 @@ function _computeWaterLevelFromBankInfo(bankInfo, waterKind, tidal) {
   if (samples.length === 0) return null; // 呼び出し元(buildAreaPoly)が回収キューへ積み直す
 
   if (waterKind === 'lake') {
+    // 【2026-08-05・TIDAL_LEVEL.md 3-1】tidalなら岸サンプルは見ず、海面に確定させる
+    // (入江・運河状の池が海に繋がっている場合、縁=流出口という「閉じた水域」の前提
+    // 自体が成り立たないため、river側と同じ確定値で扱う)。
+    if (tidal) return { ux: 1, uz: 0, sMin: 0, M: [seaLevelY() + RIVER_MOUTH_ABOVE_SEA_MARGIN] };
     // 【DESIGN 3-2】閉じた水域の水面は縁の最も低い点(=流出口)の高さに等しい
     let level = _binPercentileMin(samples.map(s => s.h));
     level = Math.max(level, seaLevelY()); // 海面より低い内陸湖は無い(閉塞湖は対象外)
@@ -563,13 +576,15 @@ function _computeWaterLevelFromBankInfo(bankInfo, waterKind, tidal) {
   for (let b = 0; b < q; b++) headAvg += M0[b];
   for (let b = nBins - q + 1; b <= nBins; b++) tailAvg += M0[b];
   headAvg /= q; tailAvg /= q;
-  const mouthBin = headAvg >= tailAvg ? nBins : 0;
-  // 【DESIGN 3-3手順3】tidal(海に接続している)場合だけ、河口ビンを海面以上にクランプする。
-  // このロード範囲内に海が無い内陸完結の川にまで固定海面を強制しない(旧実装は無条件だった)。
-  const RIVER_MOUTH_ABOVE_SEA_MARGIN = 0.2; // ゲーム単位。z-fighting回避の最小マージン
+  // 【DESIGN 3-3手順3→2026-08-05・TIDAL_LEVEL.md 3-1・大原則33】tidal(海に接続している)
+  // 場合、水面は定義上どこでも海面と等しい。「河口ビンだけを下から持ち上げる」下限クランプ
+  // では上限が無く岸サンプルが高いと上振れしたままだったため、全ビンを確定値で埋める
+  // (以降のラチェット伝播・平滑化は全ビン同値なのでno-opになるだけで、消さなくてよい)。
+  // このロード範囲内に海が無い内陸完結の川にまで固定海面を強制しない(tidal=falseなら
+  // 従来どおり岸サンプル基準のまま)。
   if (tidal) {
-    const mouthFloorY = seaLevelY() + RIVER_MOUTH_ABOVE_SEA_MARGIN; // 【Phase4】seaYOffset()廃止、真の0m基準
-    if (M0[mouthBin] < mouthFloorY) M0[mouthBin] = mouthFloorY;
+    const seaY = seaLevelY() + RIVER_MOUTH_ABOVE_SEA_MARGIN; // 【Phase4】seaYOffset()廃止、真の0m基準
+    for (let b = 0; b <= nBins; b++) M0[b] = seaY;
   }
   // 【2026-08-03由来・ラチェット】隣接ビンから引き継げる上げ幅をMAX_RISE_PER_BIN(200mあたり)
   // までに制限する。1点だけの異常値がいきなり全域に効くことを防ぎつつ、実際の川の緩やかな
@@ -695,13 +710,32 @@ function isWaterPointForMask(x, z) {
   }
   return false;
 }
-// 【DESIGN 2章】tidal=既存のsea領域(entry.waterKind==='sea')と近接するか。判定は
-// 既にあるareaPolyGridの照会(空間ハッシュ)だけで足りる、という設計方針どおりの簡易版。
+// 【DESIGN 2章→2026-08-05・IMPL_PROMPT_20260805_TIDAL_LEVEL.md 3-2・大原則34】
+// tidal=既存のsea領域(entry.waterKind==='sea')と実際に重なる/接するか。
+// 当初はbbox近接(300m以内なら無条件tidal=true)だけの簡易版だったが、3-1(tidalなら
+// 水面全体を海面の確定値にする)を入れたことで、この判定の誤検出がそのまま「水域が地面に
+// 埋もれて消える」に直結するようになった——海岸から300m以内というだけの内陸の池
+// (標高が岸より高い)まで海面まで引き下げてしまう。tidalの取りこぼしは水位が岸基準
+// (bank-min)に戻るだけで実害が小さいが、誤検出は実害が大きいため、判定は厳しい側
+// (=実際に重なっている)に倒す。候補探索だけはbboxの近接(margin)で粗く絞ってよいが、
+// 最終判定は「自ポリゴンの輪郭点がsea領域の内側にある」または「sea領域の輪郭点が
+// 自ポリゴンの内側にある」という実際の接触/重なりで行う。
 const TIDAL_SEA_PROXIMITY_M = 300;
-function _isTidalNear(minX, maxX, minZ, maxZ) {
+function _isTidalNear(entry) {
+  const { minX, maxX, minZ, maxZ, pts } = entry;
   const m = TIDAL_SEA_PROXIMITY_M;
   for (const e of queryPolyGrid(areaPolyGrid, minX - m, maxX + m, minZ - m, maxZ + m)) {
-    if (e.waterKind === 'sea') return true;
+    if (e.waterKind !== 'sea') continue;
+    // bboxが実際に重なっていない(=margin分だけ離れている)候補は輪郭点走査に進まない
+    // (bboxが重ならなければ、どちらの輪郭点も相手のポリゴン内側には入り得ないため、
+    // 結果を変えずに済む純粋な高速化)。
+    if (e.maxX < minX || e.minX > maxX || e.maxZ < minZ || e.minZ > maxZ) continue;
+    let touch = false;
+    for (const p of pts) { if (_isPointInWaterEntry(e, p.x, p.z)) { touch = true; break; } }
+    if (!touch) {
+      for (const p of e.pts) { if (pointInPolygon(p.x, p.z, pts)) { touch = true; break; } }
+    }
+    if (touch) return true;
   }
   return false;
 }
@@ -712,7 +746,7 @@ function _computeWaterProfile(entry) {
   // 繰り返し踏んできた罠と同じ形)。毎回(初回・NEAR地形更新のたびの再計算とも)引き直す
   // 安いbboxクエリなので、キャッシュせず都度評価する。
   entry.tidal = entry.waterKind === 'sea' ? true :
-    (entry.waterKind ? _isTidalNear(entry.minX, entry.maxX, entry.minZ, entry.maxZ) : false);
+    (entry.waterKind ? _isTidalNear(entry) : false);
   entry.waterBankInfo = _collectBankSampleInfo(entry);
   const profile = _computeWaterLevelFromBankInfo(entry.waterBankInfo, entry.waterKind, entry.tidal);
   entry.levelSource = profile ? 'bank-min' : 'pending';
@@ -891,7 +925,7 @@ function rebuildAreaPolyMesh(entry) {
     // 水位が、NEAR到達後に正しい値へ更新される。tidalも同時に引き直す(_computeWaterProfile
     // と同じ理由。sea領域がこの水域より後に読み込まれた場合の取りこぼしを防ぐ)。
     if (entry.waterKind && entry.waterKind !== 'sea') {
-      entry.tidal = _isTidalNear(entry.minX, entry.maxX, entry.minZ, entry.maxZ);
+      entry.tidal = _isTidalNear(entry);
     }
     const before = entry.waterProfile;
     const recomputed = _computeWaterLevelFromBankInfo(entry.waterBankInfo, entry.waterKind, entry.tidal);
