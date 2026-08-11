@@ -1126,6 +1126,18 @@ function seaLevelY() {
 // 高くなって海面を隠す」問題(2026-08-04に一度発生・修正)の前提そのものが無くなった。
 // river/lakeの水面ポリゴンと同じ、視認用の微小マージンだけを共通定数として残す。
 const WATER_VISUAL_MARGIN = 0.15;
+// 【2026-08-05・IMPL_PROMPT_20260805_SEA_Y_OFFSET.md・大原則37】上のPhase4の撤去理由(適合
+// カットが水域の輪郭ちょうどに穴を開けるので陸地の底上げは海面より低いはず)は、
+// IMPL_PROMPT_20260805_COASTLINE_NO_MASK.mdでcoastline由来のポリゴンを地形マスクから
+// 意図的に外したことで前提ごと消えた。地形側(loadWideTerrain/loadNearTerrain、part6.js)は
+// 標高サンプルがnullでない限り必ずMath.max(m, landFloorM)で海抜+0.5m以上に底上げする
+// (江東区0m地帯対策の既存ロジック)。マスクが外れた今、海上でも標高プロバイダが0を返した点は
+// 0.5mまで持ち上げられ、実標高0m固定の海面より高くなって地形に隠れる(実機実測:
+// 足元Y22.85/海面Y22.15、landFloorMからの計算と完全一致)。プロバイダの応答が点ごとに
+// 違うため「海がまだらに陸として現れる」形で症状が出る。前提が変わったので、前提の上で
+// 撤去したものを見直して復活させる。地形の底上げ上限(landFloorM*ELEV_SCALE)を必ず
+// 上回るよう、river/lakeのWATER_MARGIN撤去時と同じ考え方でマージン0.3を足す。
+function seaYOffset() { return LAND_FLOOR_MARGIN_M * ELEV_SCALE + 0.3; } // = 0.5*2 + 0.3 = 1.3
 // buildAreaPolyと同じ'flat'種別のentryを作るが、_computeWaterProfile(岸サンプル収集を伴う
 // 重い処理)を一切呼ばず、常に同じ高さを返す1ビンの固定プロファイルを直接埋め込む。
 // waterBankInfoをあえて設定しないため、rebuildAreaPolyMesh側の再計算分岐も素通りし、
@@ -1343,8 +1355,12 @@ function processCoastlineFill(elements, tileList) {
           // 実測輪郭そのもの(natural=water/riverbank、buildAreaPoly)だけで必要な穴は
           // 全て開くため、coastline由来(Phase1/Phase2とも)は地形マスクの対象から外す。
           // 海は実標高0m固定のまま描かれ続けるので、陸(landFloorMで底上げ)が自然に海面を
-          // 突き破って見える(マスク導入前の挙動に戻るだけ、実害なし)。
-          buildFixedFlatAreaPoly(poly, waterAreaMat, WATER_VISUAL_MARGIN, seaY, holes, false);
+          // 突き破って見える……はずだったが、実機実測で「海のはずが陸に見える」が新たに
+          // 発生(IMPL_PROMPT_20260805_SEA_Y_OFFSET.md・大原則37)。地形側は標高が
+          // 取得できた海上の点もlandFloorM(+0.5m)まで底上げするため、この底上げがWATER_VISUAL_MARGIN
+          // (0.15)より大きく、海面が地形の下に隠れてまだらに陸として現れていた。
+          // yOffをWATER_VISUAL_MARGINからseaYOffset()(地形の底上げ上限を必ず上回る値)に戻す。
+          buildFixedFlatAreaPoly(poly, waterAreaMat, seaYOffset(), seaY, holes, false);
           builtCount++;
         } else {
           budgetFailCount++;
@@ -1428,7 +1444,9 @@ function processCoastlineFill(elements, tileList) {
           // 島(マンハッタン)の内側を誤って海と塗ることがある。coastline由来はPhase1/Phase2
           // とも常に地形マスクの対象から外す(natural=water/riverbankの実測輪郭だけで
           // 必要な穴は全て開くため、マスクを外しても穴が足りなくなることはない)。
-          buildFixedFlatAreaPoly(wholeTile, waterAreaMat, WATER_VISUAL_MARGIN, seaY, holes, false);
+          // yOffはWATER_VISUAL_MARGINからseaYOffset()へ(SEA_Y_OFFSET.md・大原則37参照、
+          // Phase1 ribbon側のコメントに詳細)。
+          buildFixedFlatAreaPoly(wholeTile, waterAreaMat, seaYOffset(), seaY, holes, false);
           builtCount++;
         } else {
           budgetFailCount++;
