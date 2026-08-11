@@ -566,10 +566,6 @@ function updateMemDiag() {
     // 【2026-07-28・3巡目】geo/tex/roadRec/dormantを抑えても落ちるため、まだ計器の無い
     // 「永久に増えうる配列・Set」を一通り出す。どれか1つだけが単調増加していればそれが次の的。
     pendB: pendingBuildings.length, pendRoad: pendingRoadMeshes.length,
-    // 【2026-08-04・IMPL_PROMPT_20260804_RIVER_MISSING.md 修正C】pendingAreaWaterPolys
-    // (水面ポリゴンの再試行キュー。予算切れ/地形未到着で保留された件数)が滞留し続けて
-    // いないかを常時見えるようにする。「保留を作ったら回収経路も同じコミットで」の教訓。
-    pendWater: (typeof pendingAreaWaterPolys !== 'undefined' ? pendingAreaWaterPolys.length : -1),
     coll: collisionBoxes.length, mmB: minimapBuildings.length,
     ways: (typeof seenOSMWays !== 'undefined' ? seenOSMWays.size : -1),
     stn: (typeof stationLabels !== 'undefined' ? stationLabels.length : -1),

@@ -43,54 +43,6 @@ farMesh.frustumCulled = false; // 頂点変位+移動するためカリングさ
 farMesh.renderOrder = 0;
 scene.add(farMesh);
 
-// 【2026-08-04・DESIGN_20260804_WATER.md 4章→2026-08-05・IMPL_PROMPT_20260805_LAND_PATCH.md
-// →2026-08-05・IMPL_PROMPT_20260805_WATER_FIX3.md 修正1】
-// 水域境界セルの陸側パッチ(サブセル・ラスタ化方式)。
-// updateFarMeshの穴あけ(4隅すべて水面内側のセルだけ)は岸線が最大200mずれる(「大原則に
-// 照らして不合格」)。境界セル(1〜3隅が水面内側)を埋める最初の実装(セル矩形を水域輪郭の
-// 半平面列でSutherland-Hodgman逐次クリップ)は、非凸な川・海岸線に対してこの手法の前提
-// (クリップ側=多角形が凸であること)が崩れ、実機で「黒いエリア」「陸が水面扱いになる」
-// 重大な破綻を起こした(海岸線リボンのv3→v4で一度潰した誤りの再発、大原則27・28)。
-// 代わりに、境界セルを25m格子(SUB=8×8)に細分し、各サブセルの中心が水域の外か
-// (isWaterPointForMask、part4.js。pointInPolygonのみ)を見て陸なら描く方式にする。
-// 非凸・自己交差・多重リング・中州のいずれにも壊れない(判定が常にpointInPolygon 1回)。
-// farMeshと違い回転・追従オフセットを持たない絶対ワールド座標のメッシュにする。
-// 専用マテリアル(terrainPatchMat、DoubleSide)は「三角形の巻き順がfarGeo側と一致する保証が
-// 無いので裏返っても見えるように」という保険のつもりだったが、_pushQuadの巻き順は実際には
-// 常に+Y向き(外積で確認済み)で不要だったうえ、MeshLambertMaterialは頂点シェーダで
-// ライティングするためDoubleSideでも裏返った法線までは救えない(gl_FrontFacingが無い)。
-// 効かない保険を残すと原因究明を遅らせるだけなので撤去し、farMeshと同じterrainMatを使う
-// (大原則30)。
-const farBoundaryPatchGeo = new THREE.BufferGeometry();
-const farBoundaryPatchMesh = new THREE.Mesh(farBoundaryPatchGeo, terrainMat);
-farBoundaryPatchMesh.frustumCulled = false;
-farBoundaryPatchMesh.renderOrder = 0;
-scene.add(farBoundaryPatchMesh);
-const LAND_PATCH_SUB = 8; // 200m/8=25mサブセル(岸線の誤差は200m→12.5m=サブセル半分に縮む)
-// 1個の25m四方サブセルをa,b,d/b,c,d(親セルと同じ巻き順)の2三角形として追記する。
-function _pushQuad(x0, z0, x1, z1, vertsPos, vertsCol) {
-  const P = [[x0, z0], [x0, z1], [x1, z0], [x0, z1], [x1, z1], [x1, z0]];
-  for (const [x, z] of P) {
-    const h = farSurfaceY(x, z); // 【重要】必ずfarSurfaceYで取る(c-3、描画面との不変条件)
-    vertsPos.push(x, h, z);
-    const c = terrainColorRGB(h - FAR_Y); // terrainColorRGBは「素の高さ」基準(FAR_Y分だけ差し引いて戻す)
-    vertsCol.push(c[0], c[1], c[2]);
-  }
-}
-// 境界セル(絶対格子インデックスni,nj)をSUB×SUBのサブセルに割り、中心が陸のサブセルだけ
-// _pushQuadで描く。セル境界のサブ頂点はfarSurfaceY(2ノード間の線形補間)から高さを取るため、
-// 隣接する完全陸セル(farGeoが描く辺)と厳密に一致し、T-junction(筋状の隙間)は出ない。
-function _pushLandPatchRaster(ni, nj, vertsPos, vertsCol) {
-  const cx0 = ni * FAR_STEP, cz0 = nj * FAR_STEP, s = FAR_STEP / LAND_PATCH_SUB;
-  for (let sj = 0; sj < LAND_PATCH_SUB; sj++) {
-    for (let si = 0; si < LAND_PATCH_SUB; si++) {
-      const x0 = cx0 + si * s, z0 = cz0 + sj * s, x1 = x0 + s, z1 = z0 + s;
-      if (isWaterPointForMask(x0 + s / 2, z0 + s / 2)) continue; // 中心が水 → 張らない
-      _pushQuad(x0, z0, x1, z1, vertsPos, vertsCol);
-    }
-  }
-}
-
 // --- 地形メッシュの高さは farNodeY / farSurfaceY に一本化する ---
 // 頂点は世界座標に固定された FAR_STEP(200m) 格子上にあり(中心スナップも FAR_STEP 単位)、
 // 「描画されるメッシュ表面」= farSurfaceY が返す値、が厳密に成り立つ。
@@ -130,12 +82,7 @@ let farLastX = Infinity, farLastZ = Infinity;
 function updateFarMesh(force) {
   const cx = Math.round(player.position.x / FAR_STEP) * FAR_STEP;
   const cz = Math.round(player.position.z / FAR_STEP) * FAR_STEP;
-  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md】水面ポリゴンの追加/破棄
-  // (part4.js _markWaterNodes)は、プレイヤーが動いていない間にも起こりうる
-  // (タイル到着・タイル再取得等)。_waterMaskDirtyが立っていれば、位置が変わっていなくても
-  // インデックス(=穴)を再構築する必要がある。
-  const moved = force || cx !== farLastX || cz !== farLastZ;
-  if (!moved && !_waterMaskDirty) return;
+  if (!force && cx === farLastX && cz === farLastZ) return;
   farLastX = cx; farLastZ = cz;
   farMesh.position.set(cx, FAR_Y, cz);
   const i0 = Math.round((cx - FAR_SIZE / 2) / FAR_STEP);
@@ -153,57 +100,7 @@ function updateFarMesh(force) {
   }
   pos.needsUpdate = true;
   col.needsUpdate = true;
-  // 【2026-08-04・IMPL_PROMPT_20260804_TERRAIN_HOLE.md→2026-08-05・LAND_PATCH.md】水面
-  // ポリゴンの内側(200mセルの4隅ノードすべてがwaterNodeMaskに含まれる)は三角形を張らない
-  // =地形に穴を開ける。「浮く/沈む」を10回往復した根本原因(200m地形と100m水面という
-  // 分割の異なる2枚の面を、わずかなマージンだけで重ねようとしていた)を、そもそも
-  // 重ねないことで構造的に解消する。
-  // 境界セル(1〜3隅だけが水面内側)は、水域輪郭でセル矩形を切る適合カットを最初
-  // Sutherland-Hodgman半平面クリップで実装したが、非凸な川・海岸線でこの手法の前提
-  // (クリップ側が凸)が崩れ実機で重大な破綻を起こしたため、25mサブセル・ラスタ化
-  // (_pushLandPatchRaster、pointInPolygonのみで非凸に頑健)に置き換えた
-  // (IMPL_PROMPT_20260805_LAND_PATCH.md)。
-  // 【重要・絶対に壊さないこと】完全陸(0隅)セルの三角形の張り方(a,b,d と b,c,d)は、
-  // farSurfaceY(このファイル69行目付近)の補間式(u+v<=1でha/hb/hdの面、それ以外で
-  // hc/hb/hdの面)と厳密に一致させること。ここがズレると、プレイヤーの足元・建物・道路の
-  // 高さが全部狂う(本プロジェクトの数少ない健全な不変条件——「描画されるメッシュ表面」=
-  // farSurfaceYが返す値、が厳密に成り立つこと——を壊さない)。THREE.PlaneGeometryの標準分割
-  // (a=(jx,jz), b=(jx,jz+1), c=(jx+1,jz+1), d=(jx+1,jz)、面は[a,b,d]と[b,c,d])と同一。
-  const idxArr = [];
-  const patchPos = [], patchCol = [];
-  for (let jz = 0; jz < FAR_SEGS; jz++) {
-    for (let jx = 0; jx < FAR_SEGS; jx++) {
-      const a = jx + FAR_SEGS1 * jz;
-      const b = jx + FAR_SEGS1 * (jz + 1);
-      const c = (jx + 1) + FAR_SEGS1 * (jz + 1);
-      const d = (jx + 1) + FAR_SEGS1 * jz;
-      const wa = _isWaterNode(i0 + jx, j0 + jz);
-      const wb = _isWaterNode(i0 + jx, j0 + jz + 1);
-      const wc = _isWaterNode(i0 + jx + 1, j0 + jz + 1);
-      const wd = _isWaterNode(i0 + jx + 1, j0 + jz);
-      const waterCount = (wa ? 1 : 0) + (wb ? 1 : 0) + (wc ? 1 : 0) + (wd ? 1 : 0);
-      if (waterCount === 4) continue; // 完全に水面内側 → 穴のまま
-      if (waterCount === 0) { idxArr.push(a, b, d, b, c, d); continue; } // 完全に陸 → 通常の2三角形
-      // 境界セル → farGeoには張らず、25mサブセル・ラスタでfarBoundaryPatchMesh側へ積む
-      _pushLandPatchRaster(i0 + jx, j0 + jz, patchPos, patchCol);
-    }
-  }
-  farGeo.setIndex(idxArr);
   farGeo.computeVertexNormals();
-  farBoundaryPatchGeo.setAttribute('position', new THREE.Float32BufferAttribute(patchPos, 3));
-  farBoundaryPatchGeo.setAttribute('color', new THREE.Float32BufferAttribute(patchCol, 3));
-  farBoundaryPatchGeo.setIndex(null); // 非indexed三角形ソープ
-  // 【2026-08-05・IMPL_PROMPT_20260805_WATER_FIX3.md 修正1・大原則29】computeVertexNormals()は
-  // 既にnormal属性があればそれを再利用する(無ければposition.countに合わせて新規作成)。
-  // 境界セル数(=patchPosの頂点数)はプレイヤー移動や水域読み込みで毎回変わるため、前回より
-  // 頂点数が増えた瞬間、古いnormal配列の範囲外への書き込みが黙って捨てられ、はみ出した頂点の
-  // 法線が(0,0,0)のまま残る。法線ゼロ+MeshLambertMaterial=光が当たらず真っ黒になる
-  // (実機で見えた「陸パッチが黒い」の真因。MeshBasicMaterialに差し替えると赤く見えたのは
-  // ライティングを無視するため、が根拠)。position/colorと同時に必ず作り直す。
-  farBoundaryPatchGeo.deleteAttribute('normal');
-  farBoundaryPatchGeo.computeVertexNormals();
-  farBoundaryPatchGeo.computeBoundingSphere();
-  _waterMaskDirty = false;
 }
 
 let elevBase = 0; // このリージョンの高度基準(実標高m)。establishRegionBase(part6.js)が地域ごとに確定する。
