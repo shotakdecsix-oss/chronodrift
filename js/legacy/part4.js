@@ -284,7 +284,17 @@ function scanPendingAreaWaterPolys() {
 }
 const lawnMat  = new THREE.MeshLambertMaterial({ color: MODE_CONF.lawn, side: THREE.DoubleSide });
 // リボン(ROAD_MAT.water)と同じMeshBasicにして、重なっても境目が見えないようにする
-const waterAreaMat = new THREE.MeshBasicMaterial({ color: MODE_CONF.water, side: THREE.DoubleSide });
+// 【2026-08-12・WATER_LEVEL_FROM_OUTLINE.md 4】水位を輪郭ノード基準の正しい高さに置くと、
+// 小さい水面(実測中央値27m)は200m格子の地形からすると点に等しく、地形とほぼ同一平面に
+// なってz-fightingする。これを高さ(安全余裕の積み増し=旧WATER_MARGIN)で解決しようとした
+// のが「10回以上の浮く/沈む往復」の構造的な原因だったため、描画側(深度バイアス)で解決する。
+// polygonOffsetFactor/Unitsを負にすると、深度上だけ手前(カメラ側)へ押し出され、地形と
+// 同一平面でも常に水面が勝つ(見た目の頂点位置は変えない)。これがあるので水位に安全余裕を
+// 積む必要が無くなった。
+const waterAreaMat = new THREE.MeshBasicMaterial({
+  color: MODE_CONF.water, side: THREE.DoubleSide,
+  polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4,
+});
 const minimapWaterPolys = []; // ミニマップに描く実形状水面 {pts,minX,maxX,minZ,maxZ}
 const minimapWaterGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
 // 田畑: あぜ縞のcanvasテクスチャ(uv=世界座標なので repeat で約9m周期の縞になる)
@@ -452,126 +462,99 @@ function _nearPolygonBoundary(px, pz, pts, margin) {
 // という別の穴が残っていた(大原則14「キャッシュした派生値には無効化のトリガーを対で
 // 設計する」)。
 //
-// 対策: ポリゴン内外判定(pointInPolygon、輪郭が数百点ある大河川では重い)は地形が変わっても
-// 結果が変わらないため、「採用したノード(i,j,bin)」のリストだけ初回にentry.waterNodeInfoへ
-// キャッシュし、以後の再計算(NEAR地形更新のたびに呼ばれるrebuildAreaPolyMesh)は
-// キャッシュ済みノードのfarNodeY(i,j)を読み直すだけ(_computeWaterProfileFromNodes)にする。
-// これでポリゴン内外判定という重い部分を毎回やらずに、地形の更新だけ安く反映できる。
+// 【2026-08-12・IMPL_PROMPT_20260812_WATER_LEVEL_FROM_OUTLINE.md】格子点収集を丸ごと廃止し、
+// 輪郭ノード(=OSMの実測点、entry.ptsそのもの)の収集に置き換える。実機実測(NY・270ポリゴン)で
+// 確定した根拠: (1) 輪郭ノードは必ずDEMが答える(全欠測=0件)。内部の200m格子点を見ていたから
+// 欠測が起きていた。(2) 旧方式は「水位が高すぎる」のではなく「バラバラ」だった(新旧差の
+// 最小-24.33〜最大+22.01。20m以内にある水面同士が10m以上ずれていた)。(3) 270枚中262枚
+// (97%)が長辺1000m以下——1ポリゴン=1水平面で足りる。長い川(8枚)だけ主軸方向の分割が要る。
+// 水位は「輪郭ノードで地形高さを引き、その下位パーセンタイルを取る」だけで決まる
+// (水面は流出口=縁の最も低い点の高さで決まるという物理そのもの。ポリゴン内部のDEMは
+// 一切見ない)。
+const WATER_FLAT_MAX_SPAN = 1000; // 長辺がこれ以下なら1ビン(=ポリゴン全体で1つの水平面)
+const WATER_MAX_SAMPLES = 400; // 長い川の輪郭点を間引く上限(数百〜数千点になるwayの対策)
 function _collectWaterNodes(entry) {
-  const { pts, holes, minX, maxX, minZ, maxZ } = entry;
+  const { pts, minX, maxX, minZ, maxZ } = entry;
   const dx = maxX - minX, dz = maxZ - minZ;
-  const ux = dx >= dz ? 1 : 0, uz = dx >= dz ? 0 : 1; // bbox長辺方向を主軸とする簡易PCA代用
+  const ux = dx >= dz ? 1 : 0, uz = dx >= dz ? 0 : 1; // 長辺方向を主軸
+  const span = Math.max(dx, dz);
   let sMin = Infinity, sMax = -Infinity;
   for (const p of pts) {
     const s = p.x * ux + p.z * uz;
-    if (s < sMin) sMin = s; if (s > sMax) sMax = s;
+    if (s < sMin) sMin = s;
+    if (s > sMax) sMax = s;
   }
-  if (!(sMax > sMin)) { sMax = sMin + 1; } // 縮退(点が1点等)対策
-  const nBins = Math.max(1, Math.ceil((sMax - sMin) / WATER_BIN));
-  const i0 = Math.floor(minX / FAR_STEP) - 1, i1 = Math.ceil(maxX / FAR_STEP) + 1;
-  const j0 = Math.floor(minZ / FAR_STEP) - 1, j1 = Math.ceil(maxZ / FAR_STEP) + 1;
-  // 【2026-08-03・「まだ浮いている」再報告を受けての修正】外接矩形(bbox)全体のノードを
-  // サンプルしていたのが原因だった。曲がりくねった川ではbboxが川の外側の陸地(堤防・丘・
-  // 中州の外の高台等)を広く含んでしまい、そこの高い標高が該当ビンのM[b]に混入し、
-  // 単調伝播(4)で川の非常に長い区間全体がその1点に引きずられて持ち上がっていた
-  // ——グローバル1値方式(修正2)で経験した「一番高い場所に全体を合わせる」不具合が、
-  // 主軸1次元の中でも部分的に再現していた。ポリゴン内部(HOLE_MARGIN分の余裕を持たせた
-  // 内側判定)のノードだけを候補にすることで、実際の川筋に近い標高だけを拾うようにする。
-  const NODE_MARGIN = FAR_STEP * 0.5; // 境界ぎりぎりの実ノードも拾えるよう半格子分だけ外側にも許容
-  const inAnyHole = (x, z) => {
-    if (!holes) return false;
-    for (const hp of holes) { if (hp.length >= 4 && pointInPolygon(x, z, hp)) return true; }
-    return false;
-  };
-  const nodes = []; // フラット配列 [i0,j0,b0, i1,j1,b1, ...] (オブジェクト配列よりGC負荷が軽い)
-  for (let j = j0; j <= j1; j++) {
-    for (let i = i0; i <= i1; i++) {
-      const nx = i * FAR_STEP, nz = j * FAR_STEP;
-      if (!pointInPolygon(nx, nz, pts) && !_nearPolygonBoundary(nx, nz, pts, NODE_MARGIN)) continue;
-      if (inAnyHole(nx, nz)) continue; // 中州(島)の標高は「水面がここまで来る必要」の根拠にしない
-      const s = nx * ux + nz * uz;
-      let b = Math.floor((s - sMin) / WATER_BIN);
-      if (b < 0) b = 0; if (b > nBins) b = nBins;
-      nodes.push(i, j, b);
+  if (!(sMax > sMin)) sMax = sMin + 1; // 縮退(点が1点等)対策
+  // 短いポリゴンは分割しない(1水平面)。長いポリゴンだけ主軸方向にビン分割する。
+  const nBins = (span <= WATER_FLAT_MAX_SPAN) ? 0 : Math.max(1, Math.ceil((sMax - sMin) / WATER_BIN));
+  const stride = Math.max(1, Math.floor(pts.length / WATER_MAX_SAMPLES));
+  const nodes = []; // フラット配列 [x0,z0,b0, x1,z1,b1, ...]
+  // 【削除済み】以前ここにあったNODE_MARGINの外側許容・pointInPolygonによる内部判定・
+  // inAnyHole(中州除外)・_nearPolygonBoundaryの呼び出しは、輪郭ノードが定義上すべて境界上
+  // (=ポリゴン内外判定もホール除外も不要)になったため丸ごと不要になった。
+  for (let i = 0; i < pts.length; i += stride) {
+    const p = pts[i];
+    let b = 0;
+    if (nBins > 0) {
+      b = Math.floor((p.x * ux + p.z * uz - sMin) / WATER_BIN);
+      if (b < 0) b = 0; else if (b > nBins) b = nBins;
     }
+    nodes.push(p.x, p.z, b);
   }
   return { ux, uz, sMin, nBins, nodes };
 }
-// 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER_v2.md 修正B】ビン内の集約を単純な最大値
-// ではなく、ノード数が十分あれば高位パーセンタイル(90%点)にする。最大値は定義上「1点の
-// 外れ値」に対して脆弱(堤防・橋脚・中州の縁など、実際の川筋とは無関係な1ノードがそのまま
-// ビンの代表値になってしまう)。ノードが1〜2個しかない狭いビンでは percentile を取る意味が
-// 薄いので、従来通り最大値にフォールバックする。
-function _binPercentileMax(heights) {
-  if (heights.length <= 2) {
+// 【2026-08-12・大原則(WATER_LEVEL_FROM_OUTLINE.md)】水面は流出口(縁の最低点)の高さで
+// 決まる——最大側を採る(旧_binPercentileMax)のは物理的に逆だった。ただし厳密な最小値は
+// 低い側の外れ値1点で沈む(1点だけ異常に低いノードにポリゴン全体が引きずられる)ので、
+// 下位10%点で丸める。
+function _binLowPercentile(heights) {
+  if (heights.length <= 3) {
     let m = heights[0];
-    for (let k = 1; k < heights.length; k++) if (heights[k] > m) m = heights[k];
+    for (let k = 1; k < heights.length; k++) if (heights[k] < m) m = heights[k];
     return m;
   }
   const sorted = heights.slice().sort((a, b) => a - b);
-  const idx = Math.min(sorted.length - 1, Math.ceil(0.9 * sorted.length) - 1);
-  return sorted[idx];
+  return sorted[Math.max(0, Math.ceil(0.10 * sorted.length) - 1)];
 }
+// 【2026-08-12・WATER_LEVEL_FROM_OUTLINE.md】旧実装(近傍ビンからのコピー→ラチェット伝播→
+// 上向き平滑化→WATER_MARGIN加算)は、すべて「上げる」方向にしか働かない演算の積み重ねだった
+// ——1点の外れ値(堤防・橋脚等)を全域に配る増幅器になり、これが10回以上の「浮く」不具合の
+// 構造的な原因だった(大原則33「下限クランプと確定値を混同しない」と同種の罠)。今回、
+// 輪郭ノードは全欠測が起きない(実測で確認済み)ため、この種の埋め合わせロジック自体が
+// 不要になった。欠測ビンの補間だけ上下対称(線形補間)にしてバイアスを無くす。
 function _computeWaterProfileFromNodes(nodeInfo) {
   const { ux, uz, sMin, nBins, nodes } = nodeInfo;
   const buckets = new Array(nBins + 1);
   for (let b = 0; b <= nBins; b++) buckets[b] = [];
   for (let k = 0; k < nodes.length; k += 3) {
-    const i = nodes[k], j = nodes[k + 1], b = nodes[k + 2];
-    // 【2026-08-03・修正A-2】欠測(GSIタイル404等でterrainYOrNullがnullを返す)ノードは候補から
-    // 外す。以前はfarNodeYの`|| 0`で欠測が「標高0m」に化けて紛れ込み、実測でこれが橋の水没の
-    // 主因(欠測地点の水位が地面より3m以上高い0.3で確定していた)と判明した。
-    const h = farNodeYOrNull(i, j);
-    if (h === null) continue;
-    buckets[b].push(h);
+    const h = terrainYOrNull(nodes[k], nodes[k + 1]); // 欠測は0に潰さず捨てる
+    if (h === null || h === undefined) continue;
+    buckets[nodes[k + 2]].push(h);
   }
   let anyData = false;
   const M = new Array(nBins + 1).fill(null);
   for (let b = 0; b <= nBins; b++) {
     if (buckets[b].length === 0) continue;
     anyData = true;
-    M[b] = _binPercentileMax(buckets[b]);
+    M[b] = _binLowPercentile(buckets[b]);
   }
-  // 【2026-08-03・修正A-3】この水面ポリゴンの全ビンが欠測(=周辺のGSIタイルが軒並み404、
-  // NEARもWIDEも届いていない)なら、プロファイルを確定させない。不完全なデータで水位を
-  // でっち上げず、地形データが実際に届くまで保留する(大原則1・16と同じ考え方)。
-  if (!anyData) return null;
-  // ノードはあったが特定のビンだけ欠測(細い川の格子の隙間・GSIタイル境界等、局所的な穴)は
-  // 同じ川の中の近傍ビンから埋める。全滅(GSI全域404)とは別の、正常なケース。
+  // 【修正A-3を維持】この水面ポリゴンの全ビンが欠測なら、プロファイルを確定させない。
+  // 不完全なデータで水位をでっち上げず、地形データが実際に届くまで保留する
+  // (呼び出し元_computeWaterProfileが保留キューへ積み直す既存の仕組みは変更していない)。
+  if (!anyData) return null; // 保留。地形到着後に再計算される(既存の仕組みを残す)
+  // 欠測ビンは両隣の確定ビンから線形補間する。片側しか無ければその値をコピーする
+  // (旧実装の「近傍からコピー→ラチェット→平滑化」は全て上げる方向にしか働かず、1点の
+  // 外れ値を全域へ配る増幅器になっていた。線形補間は上下対称なのでバイアスが無い)。
   for (let b = 0; b <= nBins; b++) {
     if (M[b] !== null) continue;
-    for (let d = 1; d <= nBins; d++) {
-      if (b - d >= 0 && M[b - d] !== null) { M[b] = M[b - d]; break; }
-      if (b + d <= nBins && M[b + d] !== null) { M[b] = M[b + d]; break; }
-    }
+    let lo = -1, hi = -1;
+    for (let k = b - 1; k >= 0; k--) if (M[k] !== null) { lo = k; break; }
+    for (let k = b + 1; k <= nBins; k++) if (M[k] !== null) { hi = k; break; }
+    if (lo >= 0 && hi >= 0) M[b] = M[lo] + (M[hi] - M[lo]) * ((b - lo) / (hi - lo));
+    else if (lo >= 0) M[b] = M[lo];
+    else if (hi >= 0) M[b] = M[hi];
   }
-  // 4) 高い側を上流とみなし、累積最大で単調非増加にする。
-  // 【2026-08-03・修正B】以前は無制限の累積最大だったため、1点だけ高いノード(堤防・橋脚・
-  // 中州の縁等)が川の片側全域にそのまま配られる「増幅器」になっていた。隣接ビンから
-  // 引き継げる上げ幅をMAX_RISE_PER_BIN(200mあたり)までに制限する「ラチェット」方式にする。
-  // 遠くの異常値がいきなり全域に効くことはなくなるが、実際の川の緩やかな縦断勾配
-  // (複数ビンにまたがる正当な高低差)はビンを跨ぐごとに少しずつ積み上がるので表現できる。
-  const M0 = M.slice(); // 各ビン自身の(伝播前の)基準値。ラチェットの上限計算に使う
-  const MAX_RISE_PER_BIN = 0.5; // ゲーム単位/200m(実勾配0.125%相当を超える持ち上がりは異常とみなす)
-  const q = Math.max(1, Math.floor((nBins + 1) / 4));
-  let headAvg = 0, tailAvg = 0;
-  for (let b = 0; b < q; b++) headAvg += M0[b];
-  for (let b = nBins - q + 1; b <= nBins; b++) tailAvg += M0[b];
-  headAvg /= q; tailAvg /= q;
-  if (headAvg >= tailAvg) { // b=0側が上流(高い) → 下流側(b大)から上流側(b小)へ辿って伝播
-    for (let b = nBins - 1; b >= 0; b--) M[b] = Math.max(M0[b], Math.min(M[b + 1], M0[b] + MAX_RISE_PER_BIN));
-  } else { // b=nBins側が上流 → 上流側(b小)から下流側(b大)へ辿って伝播
-    for (let b = 1; b <= nBins; b++) M[b] = Math.max(M0[b], Math.min(M[b - 1], M0[b] + MAX_RISE_PER_BIN));
-  }
-  // 5) 前後3ビンの平均で上向きにのみ均す(単調性は崩さない。Math.maxなので必ずM[b]以上を維持)
-  const M2 = M.slice();
-  for (let b = 0; b <= nBins; b++) {
-    let sum = 0, cnt = 0;
-    for (let d = -3; d <= 3; d++) { const bb = b + d; if (bb >= 0 && bb <= nBins) { sum += M[bb]; cnt++; } }
-    M2[b] = Math.max(M[b], sum / cnt);
-  }
-  const WATER_MARGIN = 0.3; // 4隅ノード最大+この余裕を必ず超えるようにする(地形は区分線形なので辺も含めて安全)
-  return { ux, uz, sMin, M: M2.map(h => h + WATER_MARGIN) };
+  return { ux, uz, sMin, M };
 }
 // entry生成時の初回呼び出し専用。ノード収集(重い)を1回だけ行い、結果をentry.waterNodeInfoに
 // キャッシュできるよう呼び出し元(buildAreaPoly)に返す。以後の再計算は
