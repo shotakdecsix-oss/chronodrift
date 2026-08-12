@@ -246,7 +246,10 @@ function areaPolyBudgetOK(kind) {
 // とユーザー報告・確認済み(2026-08-03)。
 const pendingAreaWaterPolys = []; // { pts, holes, minX, maxX, minZ, maxZ }
 function _commitWaterPoly(pts, holes, minX, maxX, minZ, maxZ) {
-  buildAreaPoly(pts, waterAreaMat, 0.15, holes);
+  // 【2026-08-12・RIVER_DRAPES_ON_TERRAIN.md】水面は地形の真上に貼り付くので、遠距離では
+  // 深度バッファ精度で地形と混ざる。旧yOff=0.15では足りないため0.5へ引き上げた
+  // (地形との競合はこの高さでなくwaterAreaMatの深度バイアス側でも二重に解決する)。
+  buildAreaPoly(pts, waterAreaMat, 0.5, holes);
   const entry = { pts, minX, maxX, minZ, maxZ };
   minimapWaterPolys.push(entry);
   polyGridAdd(minimapWaterGrid, entry);
@@ -284,16 +287,15 @@ function scanPendingAreaWaterPolys() {
 }
 const lawnMat  = new THREE.MeshLambertMaterial({ color: MODE_CONF.lawn, side: THREE.DoubleSide });
 // リボン(ROAD_MAT.water)と同じMeshBasicにして、重なっても境目が見えないようにする
-// 【2026-08-12・WATER_LEVEL_FROM_OUTLINE.md 4】水位を輪郭ノード基準の正しい高さに置くと、
-// 小さい水面(実測中央値27m)は200m格子の地形からすると点に等しく、地形とほぼ同一平面に
-// なってz-fightingする。これを高さ(安全余裕の積み増し=旧WATER_MARGIN)で解決しようとした
-// のが「10回以上の浮く/沈む往復」の構造的な原因だったため、描画側(深度バイアス)で解決する。
-// polygonOffsetFactor/Unitsを負にすると、深度上だけ手前(カメラ側)へ押し出され、地形と
-// 同一平面でも常に水面が勝つ(見た目の頂点位置は変えない)。これがあるので水位に安全余裕を
-// 積む必要が無くなった。
+// 【2026-08-12・RIVER_DRAPES_ON_TERRAIN.md 6】水面は地形の真上に貼り付くので地形とほぼ同一
+// 平面になる。これを高さ(安全余裕の積み増し)で解決しようとしたのが「10回以上の浮く/沈む
+// 往復」の構造的な原因だったため、描画側(深度バイアス)で解決する。polygonOffsetFactor/Units
+// を負にすると、深度上だけ手前(カメラ側)へ押し出され、地形と同一平面でも常に水面が勝つ
+// (見た目の頂点位置は変えない)。水面が常に地形の真上(=地形と同じ高さ帯)になったことで
+// 遠距離では深度バッファの精度不足がさらに強く効くため、旧-2/-4から強めた。
 const waterAreaMat = new THREE.MeshBasicMaterial({
   color: MODE_CONF.water, side: THREE.DoubleSide,
-  polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4,
+  polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8,
 });
 const minimapWaterPolys = []; // ミニマップに描く実形状水面 {pts,minX,maxX,minZ,maxZ}
 const minimapWaterGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
@@ -418,179 +420,21 @@ function pitchMatFor(sport) {
 // 範囲にかかるものだけ高さを再スナップする(浮き/埋まり対策。道路と同じ考え方)。
 const areaPolyMeshes = [];
 const areaPolyGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
-// 【2026-08-03・Fable5相談(claude-fable5-water-surface-consult-prompt.md)の最終設計】
-// 修正1〜3(輪郭下位25%平均→内部格子max→半径20mの局所min)は全て失敗した。相談の結論:
-// 「水中に地形ノイズがある」という前提自体が誤り——地形メッシュはFAR_STEP=200m格子上の
-// 区分線形関数(part5.js farSurfaceY)なので、半径20mの平滑化は同じ三角形の内側しか
-// サンプルできず何も均せない(桁違いに小さすぎた)。また「頂点の高さ」だけ直しても、
-// 間引き後の輪郭点(間隔数十〜数百m)を結ぶ大きな三角形の"辺"が地形を切ってしまう問題
-// (0次元・2次元では解決不能)。正解は水面を「流下方向の1次元プロファイル」としてモデル化
-// すること:横断方向は完全に平ら、縦断方向にだけ地形の局所最大に応じて緩やかに変化する。
-// _computeWaterProfile(1回だけ計算しentry.waterProfileにキャッシュ)+_waterYAt(参照するだけ)
-// の2段構成にし、_instantiateAreaPolyMesh(新規構築)・rebuildAreaPolyMesh(NEAR地形更新時)の
-// 両方が必ず_waterYAtを通ること(片方だけ直すとNEAR更新のたびに上書きし戻る事故を
-// 2026-08-03に一度起こしている)。
-//
-// 1) 主軸(簡易版: bboxの長辺方向。相模川はほぼ南北なので実用上十分)
-// 2) 主軸座標sをBIN=200m(地形格子と同じ解像度)でビン分割
-// 3) 各ビンに掛かる地形格子ノード(farNodeY、200m格子の"真の自由度")のterrain値の最大M_bを取る
-// 4) 生の両端の平均を比べて「高い側」を上流とみなし、上流→下流へ累積最大を伝播
-//    (単調非増加を保証。タグに流向情報が無いため地形の高低差から推定する)
-// 5) 前後3ビンの平均で上向きにのみ均す(下げない。下げると突き抜けが復活するため)
-// 【注意】part4.jsはpart5.js(FAR_STEP定義元)より先にscriptタグで読み込まれるため、
-// トップレベルで`const WATER_BIN = FAR_STEP`のように即時評価すると読み込み時にReferenceErrorになる。
-// 関数本体の中で参照する分にはランタイム(全script読み込み後)なので安全。値は200でFAR_STEPと
-// 同じ(part5.js: FAR_SIZE/FAR_SEGS = 12000/60 = 200)。
-const WATER_BIN = 200; // 地形格子と同じ解像度(意味のある平滑化半径は元データの解像度以上、という教訓)
+// 【2026-08-12・IMPL_PROMPT_20260812_RIVER_DRAPES_ON_TERRAIN.md】水位の推定機構
+// (_collectWaterNodes/_binLowPercentile/_computeWaterProfileFromNodes/_computeWaterProfile/
+// _waterProfileChanged/_isNearCoverage、および定数WATER_BIN/WATER_FLAT_MAX_SPAN/
+// WATER_MAX_SAMPLES)を全廃した。DEMは陸の製品で水域上の値は測定されていないため、そこから
+// 水位を推定する限り推定を間違えれば水面は上へ逃げるか下へ沈む(実機実測で両方発生・
+// 確定済み)。水面はその場所の地形の真上に置く(_waterYAt参照)ことで、この2つの災害モード
+// は定義上起きなくなる。死んだコードを残すと次の誤読を生むため、全部消す
+// (削除した識別子への参照が無いことはgrepで確認済み)。
 // 細い川では地形ノード(200m間隔)が1本もポリゴン内側に入らないビンがありうるため、
 // 輪郭からmargin以内の外側ノードも候補に含める(pointInPolygonがfalseの場合の救済)。
+// 【waterSurfaceYAtの境界マージン判定で使用、現役】
 function _nearPolygonBoundary(px, pz, pts, margin) {
   const m2 = margin * margin;
   for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
     if (distSqPointToSeg(px, pz, pts[i].x, pts[i].z, pts[j].x, pts[j].z) <= m2) return true;
-  }
-  return false;
-}
-// 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER.md M2対応】以前は_computeWaterProfileが
-// entry生成時に1回だけ呼ばれ、entry.waterProfileに永久固定されていた。水面ポリゴンは
-// プレイヤーからまだ3km近く離れた「先読み」の段階で届くことが多く、その時点ではNEAR
-// (540m格子)がまだそこを覆っておらず、farNodeYはWIDE(約1km格子。川の谷を潰してしまう
-// 粗い格子)を返す。そのため水位が実際よりかなり高い値で凍結され、プレイヤーが近づいて
-// NEAR地形が正しく届いても、水面側だけ古い(高すぎる)値に取り残されていた
-// ——「_instantiateAreaPolyMesh/rebuildAreaPolyMeshの両方が_waterYAtを通ること」で
-// 二重実装は防いだはずが、「_waterYAtが参照するプロファイル自体を更新する経路が無い」
-// という別の穴が残っていた(大原則14「キャッシュした派生値には無効化のトリガーを対で
-// 設計する」)。
-//
-// 【2026-08-12・IMPL_PROMPT_20260812_WATER_LEVEL_FROM_OUTLINE.md】格子点収集を丸ごと廃止し、
-// 輪郭ノード(=OSMの実測点、entry.ptsそのもの)の収集に置き換える。実機実測(NY・270ポリゴン)で
-// 確定した根拠: (1) 輪郭ノードは必ずDEMが答える(全欠測=0件)。内部の200m格子点を見ていたから
-// 欠測が起きていた。(2) 旧方式は「水位が高すぎる」のではなく「バラバラ」だった(新旧差の
-// 最小-24.33〜最大+22.01。20m以内にある水面同士が10m以上ずれていた)。(3) 270枚中262枚
-// (97%)が長辺1000m以下——1ポリゴン=1水平面で足りる。長い川(8枚)だけ主軸方向の分割が要る。
-// 水位は「輪郭ノードで地形高さを引き、その下位パーセンタイルを取る」だけで決まる
-// (水面は流出口=縁の最も低い点の高さで決まるという物理そのもの。ポリゴン内部のDEMは
-// 一切見ない)。
-const WATER_FLAT_MAX_SPAN = 1000; // 長辺がこれ以下なら1ビン(=ポリゴン全体で1つの水平面)
-const WATER_MAX_SAMPLES = 400; // 長い川の輪郭点を間引く上限(数百〜数千点になるwayの対策)
-function _collectWaterNodes(entry) {
-  const { pts, minX, maxX, minZ, maxZ } = entry;
-  const dx = maxX - minX, dz = maxZ - minZ;
-  const ux = dx >= dz ? 1 : 0, uz = dx >= dz ? 0 : 1; // 長辺方向を主軸
-  const span = Math.max(dx, dz);
-  let sMin = Infinity, sMax = -Infinity;
-  for (const p of pts) {
-    const s = p.x * ux + p.z * uz;
-    if (s < sMin) sMin = s;
-    if (s > sMax) sMax = s;
-  }
-  if (!(sMax > sMin)) sMax = sMin + 1; // 縮退(点が1点等)対策
-  // 短いポリゴンは分割しない(1水平面)。長いポリゴンだけ主軸方向にビン分割する。
-  const nBins = (span <= WATER_FLAT_MAX_SPAN) ? 0 : Math.max(1, Math.ceil((sMax - sMin) / WATER_BIN));
-  const stride = Math.max(1, Math.floor(pts.length / WATER_MAX_SAMPLES));
-  const nodes = []; // フラット配列 [x0,z0,b0, x1,z1,b1, ...]
-  // 【削除済み】以前ここにあったNODE_MARGINの外側許容・pointInPolygonによる内部判定・
-  // inAnyHole(中州除外)・_nearPolygonBoundaryの呼び出しは、輪郭ノードが定義上すべて境界上
-  // (=ポリゴン内外判定もホール除外も不要)になったため丸ごと不要になった。
-  for (let i = 0; i < pts.length; i += stride) {
-    const p = pts[i];
-    let b = 0;
-    if (nBins > 0) {
-      b = Math.floor((p.x * ux + p.z * uz - sMin) / WATER_BIN);
-      if (b < 0) b = 0; else if (b > nBins) b = nBins;
-    }
-    nodes.push(p.x, p.z, b);
-  }
-  return { ux, uz, sMin, nBins, nodes };
-}
-// 【2026-08-12・大原則(WATER_LEVEL_FROM_OUTLINE.md)】水面は流出口(縁の最低点)の高さで
-// 決まる——最大側を採る(旧_binPercentileMax)のは物理的に逆だった。ただし厳密な最小値は
-// 低い側の外れ値1点で沈む(1点だけ異常に低いノードにポリゴン全体が引きずられる)ので、
-// 下位10%点で丸める。
-function _binLowPercentile(heights) {
-  if (heights.length <= 3) {
-    let m = heights[0];
-    for (let k = 1; k < heights.length; k++) if (heights[k] < m) m = heights[k];
-    return m;
-  }
-  const sorted = heights.slice().sort((a, b) => a - b);
-  return sorted[Math.max(0, Math.ceil(0.10 * sorted.length) - 1)];
-}
-// 【2026-08-12・WATER_LEVEL_FROM_OUTLINE.md】旧実装(近傍ビンからのコピー→ラチェット伝播→
-// 上向き平滑化→WATER_MARGIN加算)は、すべて「上げる」方向にしか働かない演算の積み重ねだった
-// ——1点の外れ値(堤防・橋脚等)を全域に配る増幅器になり、これが10回以上の「浮く」不具合の
-// 構造的な原因だった(大原則33「下限クランプと確定値を混同しない」と同種の罠)。今回、
-// 輪郭ノードは全欠測が起きない(実測で確認済み)ため、この種の埋め合わせロジック自体が
-// 不要になった。欠測ビンの補間だけ上下対称(線形補間)にしてバイアスを無くす。
-function _computeWaterProfileFromNodes(nodeInfo) {
-  const { ux, uz, sMin, nBins, nodes } = nodeInfo;
-  const buckets = new Array(nBins + 1);
-  for (let b = 0; b <= nBins; b++) buckets[b] = [];
-  for (let k = 0; k < nodes.length; k += 3) {
-    const h = terrainYOrNull(nodes[k], nodes[k + 1]); // 欠測は0に潰さず捨てる
-    if (h === null || h === undefined) continue;
-    buckets[nodes[k + 2]].push(h);
-  }
-  let anyData = false;
-  const M = new Array(nBins + 1).fill(null);
-  for (let b = 0; b <= nBins; b++) {
-    if (buckets[b].length === 0) continue;
-    anyData = true;
-    M[b] = _binLowPercentile(buckets[b]);
-  }
-  // 【修正A-3を維持】この水面ポリゴンの全ビンが欠測なら、プロファイルを確定させない。
-  // 不完全なデータで水位をでっち上げず、地形データが実際に届くまで保留する
-  // (呼び出し元_computeWaterProfileが保留キューへ積み直す既存の仕組みは変更していない)。
-  if (!anyData) return null; // 保留。地形到着後に再計算される(既存の仕組みを残す)
-  // 欠測ビンは両隣の確定ビンから線形補間する。片側しか無ければその値をコピーする
-  // (旧実装の「近傍からコピー→ラチェット→平滑化」は全て上げる方向にしか働かず、1点の
-  // 外れ値を全域へ配る増幅器になっていた。線形補間は上下対称なのでバイアスが無い)。
-  for (let b = 0; b <= nBins; b++) {
-    if (M[b] !== null) continue;
-    let lo = -1, hi = -1;
-    for (let k = b - 1; k >= 0; k--) if (M[k] !== null) { lo = k; break; }
-    for (let k = b + 1; k <= nBins; k++) if (M[k] !== null) { hi = k; break; }
-    if (lo >= 0 && hi >= 0) M[b] = M[lo] + (M[hi] - M[lo]) * ((b - lo) / (hi - lo));
-    else if (lo >= 0) M[b] = M[lo];
-    else if (hi >= 0) M[b] = M[hi];
-  }
-  return { ux, uz, sMin, M };
-}
-// entry生成時の初回呼び出し専用。ノード収集(重い)を1回だけ行い、結果をentry.waterNodeInfoに
-// キャッシュできるよう呼び出し元(buildAreaPoly)に返す。以後の再計算は
-// _computeWaterProfileFromNodes(entry.waterNodeInfo)を直接呼ぶこと。
-// 【診断計器・IMPL_PROMPT_20260803_BRIDGE_WATER.md 5章】このentryのbbox中心がNEAR(高解像度
-// 地形グリッド)に覆われているか。覆われていないのにプロファイルを計算すると、WIDE(粗い
-// 格子)由来の高すぎる値で固定されうる(M2の症状そのもの)。診断ログ専用の軽量判定で、
-// 実際の高さ計算(farNodeY)には使わない。
-function _isNearCoverage(x, z) {
-  if (typeof nearCX === 'undefined' || typeof NEAR_W === 'undefined') return null;
-  return Math.abs(x - nearCX) <= NEAR_W / 2 && Math.abs(z - nearCZ) <= NEAR_D / 2;
-}
-function _computeWaterProfile(entry) {
-  entry.waterNodeInfo = _collectWaterNodes(entry);
-  const profile = _computeWaterProfileFromNodes(entry.waterNodeInfo);
-  const cx = (entry.minX + entry.maxX) / 2, cz = (entry.minZ + entry.maxZ) / 2;
-  const near = _isNearCoverage(cx, cz);
-  if (profile) {
-    console.log('[water] profile bins=' + profile.M.length +
-      ' min=' + Math.min(...profile.M).toFixed(1) + ' max=' + Math.max(...profile.M).toFixed(1) +
-      ' near=' + (near === null ? '?' : (near ? 'yes' : 'NO')));
-  } else {
-    // 【修正A-3】全ビン欠測。地形データ(GSIタイル)が届き次第rebuildAreaPolyMeshが
-    // 再計算するので、その時点でこのログが消えて通常のログに置き換わるはずが正しい状態。
-    console.log('[water] profile UNAVAILABLE (全ビン欠測、地形データ待ち) near=' + (near === null ? '?' : (near ? 'yes' : 'NO')));
-  }
-  return profile;
-}
-// 【診断計器】水面プロファイルの再計算結果が(NEAR地形の到達等で)実質的に変わったかどうか。
-// 変わっていれば、その範囲の道路(=橋)を作り直させる必要がある(下のrebuildAreaPolyMesh参照)。
-// null⇔非nullの遷移(データが揃った/失われた)も「変わった」として扱う。
-function _waterProfileChanged(a, b, thresholdM) {
-  if (!a || !b) return a !== b;
-  if (!a.M || !b.M || a.M.length !== b.M.length) return true;
-  for (let i = 0; i < a.M.length; i++) {
-    if (Math.abs(a.M[i] - b.M[i]) > thresholdM) return true;
   }
   return false;
 }
@@ -613,7 +457,9 @@ function waterSurfaceYAt(x, z) {
   let best = null;
   const m = WATER_QUERY_MARGIN;
   for (const e of queryPolyGrid(areaPolyGrid, x - m, x + m, z - m, z + m)) {
-    if (e.kind !== 'flat' || !e.waterProfile) continue;
+    // 【2026-08-12・RIVER_DRAPES_ON_TERRAIN.md】waterProfileはもう存在しない(削除済み)。
+    // ここを直し忘れると橋が全部水面を見失う。
+    if (e.kind !== 'flat') continue;
     if (x < e.minX - m || x > e.maxX + m || z < e.minZ - m || z > e.maxZ + m) continue;
     if (!pointInPolygon(x, z, e.pts) && !_nearPolygonBoundary(x, z, e.pts, m)) continue;
     let inHole = false;
@@ -625,22 +471,15 @@ function waterSurfaceYAt(x, z) {
   }
   return best;
 }
+// 【2026-08-12・IMPL_PROMPT_20260812_RIVER_DRAPES_ON_TERRAIN.md】水位の推定をやめた。
+// DEMは陸の製品で水域上の値は測定されていないため、そこから水位を導く限り上に逃げるか
+// 下に沈む(実機実測でp10導入前後どちらも発生・確定済み)。海だけ平均海面で水平に固定し、
+// それ以外(川・池)は地形の真上に置く。getGroundY(=farSurfaceY)は「描画される地形メッシュ
+// 表面と厳密に一致する高さ」という本プロジェクト唯一の健全な不変条件なので、水面は地形の
+// 平行オフセット面になり、「水面が上空に浮く」「地形の下に隠れる」のどちらも定義上起きない。
 function _waterYAt(entry, x, z) {
-  const p = entry.waterProfile;
-  // 【2026-08-03・修正A-3】プロファイル未確定(全ビン欠測、地形データ待ち)の間は、メッシュを
-  // 完全に消すわけにもいかないため一時的にgetGroundY基準で表示しておく(rebuildAreaPolyMeshが
-  // NEAR地形の到達ごとに再計算するので、データが揃い次第自動的に正しいプロファイルへ置き換わる)。
-  // waterSurfaceYAt側は`!e.waterProfile`で弾いているため、この一時値が橋のクリアランス判定に
-  // 誤って使われることは無い。
-  if (!p) return getGroundY(x, z) + entry.yOff;
-  const bf = (x * p.ux + z * p.uz - p.sMin) / WATER_BIN;
-  const n = p.M.length;
-  let b0 = Math.floor(bf);
-  if (b0 < 0) b0 = 0;
-  if (b0 > n - 2) b0 = Math.max(0, n - 2);
-  const t = n <= 1 ? 0 : Math.min(1, Math.max(0, bf - b0));
-  const m0 = p.M[b0], m1 = p.M[Math.min(n - 1, b0 + 1)];
-  return m0 + (m1 - m0) * t + entry.yOff;
+  if (entry.fixedY != null) return entry.fixedY + entry.yOff; // 海
+  return getGroundY(x, z) + entry.yOff;                        // 川・池
 }
 // 【2026-08-03】辺(弦)が地形を切って「地面が混ざり込む」のを防ぐため、最長辺がMAX_EDGE以下に
 // なるまで三角形を1→4の中点分割で再帰的に細分する。中点は辺キー("小さい方の頂点index_大きい方")
@@ -681,20 +520,12 @@ function rebuildAreaPolyMesh(entry) {
   if (!entry.mesh) return; // 遠方でGPU解放済み(unloadFarAreaPolys参照)。再接近時に自然と再構築される
   const pos = entry.mesh.geometry.attributes.position;
   if (entry.kind === 'flat') {
-    // 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER.md M2対応】NEAR地形が新しく届くたびに
-    // プロファイルを安価に(キャッシュ済みノードのfarNodeY再読込だけで)再計算する。
-    // 生成時にWIDE(粗い格子)で凍結された高すぎる水位が、NEAR到達後に正しい値へ更新される。
-    if (entry.waterNodeInfo) {
-      const before = entry.waterProfile;
-      entry.waterProfile = _computeWaterProfileFromNodes(entry.waterNodeInfo);
-      // 水位が実質的に変わった(=橋の高さ計算がその時点の値で凍結されている可能性がある)場合、
-      // この水面にかかる道路(橋を含む)を作り直させる。_commitWaterPoly初回コミット時の
-      // rebuildRoadsInBoundsと同じ理屈だが、こちらは「後から水位そのものが動いた」場合を拾う。
-      if (_waterProfileChanged(before, entry.waterProfile, 0.2) && typeof rebuildRoadsInBounds === 'function') {
-        const m = 60;
-        rebuildRoadsInBounds(entry.minX - m, entry.maxX + m, entry.minZ - m, entry.maxZ + m);
-      }
-    }
+    // 【2026-08-12・RIVER_DRAPES_ON_TERRAIN.md】水位はもう推定しない(=地形の真上に置くだけ)
+    // ので、NEAR地形の到達ごとにプロファイルを再計算する経路自体が丸ごと不要になった。
+    // 地形が後から届いたときの追従は、loadNearTerrain/loadWideTerrainがrebuildAreaPolysInBounds
+    // を呼ぶ既存経路でそのまま効く(下のpos.setY自体がgetGroundY経由でその時点の最新の
+    // 地形高さを読むため)。海は高さが変わらないので何もしない。
+    if (entry.fixedY != null) return;
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i), z = pos.getZ(i);
       pos.setY(i, _waterYAt(entry, x, z)); // yOffは_waterYAt内で加算済み
@@ -730,9 +561,10 @@ function _instantiateAreaPolyMesh(entry) {
     // 【2026-08-03 Fable5相談・4回目修正】格子分割(3回目修正)は輪郭を軸並行の四角形で
     // 近似してしまい「川の形が四角」という新たな不具合を生んだため撤回。ShapeGeometry
     // (OSM輪郭pts/holesをそのまま使う=ネイティブhole対応込み)に戻し、代わりに
-    // 「辺(弦)が地形を切る」問題をsubdivideTriangles(このファイル上部)による
-    // 最長辺100m以下への再分割で解決する。高さは_waterYAt(entry.waterProfileを参照するだけ、
-    // buildAreaPolyでentry生成時に1回だけ計算済み)を使う。
+    // 「辺(弦)が地形を切る」問題をsubdivideTriangles(このファイル上部)による再分割で
+    // 解決する。【2026-08-12・RIVER_DRAPES_ON_TERRAIN.md】水面は今や地形の真上(_waterYAt=
+    // getGroundY+yOff)を辿るため、最長辺100mのままだと弦が地形の三角形をまたいで沈む
+    // ケースが増える。50mへ細分化を強めた。
     const { pts, holes, yOff } = entry;
     const shape = new THREE.Shape(pts.map(p => new THREE.Vector2(p.x, p.z)));
     if (holes) {
@@ -748,7 +580,7 @@ function _instantiateAreaPolyMesh(entry) {
     for (let i = 0; i < srcPos.count; i++) { verts2D.push(srcPos.getX(i), srcPos.getY(i)); uvs2D.push(srcUv.getX(i), srcUv.getY(i)); }
     let idx = shapeGeo.index ? Array.from(shapeGeo.index.array) : null;
     if (!idx || idx.length === 0) return false; // 退化ポリゴン(自己交差/点不足等)は諦める
-    idx = subdivideTriangles(verts2D, idx, 100);
+    idx = subdivideTriangles(verts2D, idx, 50);
     // subdivideTrianglesがverts2Dに中点を追加している可能性があるのでuvsも同じ規則で追い付かせる
     for (let i = uvs2D.length / 2; i < verts2D.length / 2; i++) { uvs2D.push(verts2D[i * 2], verts2D[i * 2 + 1]); }
     const nVerts = verts2D.length / 2;
@@ -808,10 +640,10 @@ function buildAreaPoly(pts, mat, yOff, holes) {
   // 再構築できるようにするため(道路のrebuildRoadMesh/unloadFarRoadsと同じ考え方。
   // CODE_REVIEW_20260717 P8: 以前はここで一度作ったら二度と解放されなかった)。
   const entry = { mesh: null, kind: 'flat', areaKind: areaPolyTakePendingKind(), pts, holes, mat, yOff, minX, maxX, minZ, maxZ };
-  // 【2026-08-03】高さは1回だけ計算してentryにキャッシュする(_instantiateAreaPolyMesh/
-  // rebuildAreaPolyMeshの両方が_waterYAt経由でこれを参照するだけにし、二重実装による
-  // 「片方だけ直した」事故を構造的に防ぐ)。
-  entry.waterProfile = _computeWaterProfile(entry);
+  // 【2026-08-12・RIVER_DRAPES_ON_TERRAIN.md】高さのキャッシュ(entry.waterProfile)は不要に
+  // なった。_waterYAtは毎回getGroundY(x,z)を直接読むだけなので、_instantiateAreaPolyMesh/
+  // rebuildAreaPolyMeshの両方が_waterYAt経由でこれを参照するだけ、という二重実装防止の
+  // 構造はそのまま活きている(参照先が「キャッシュ」から「地形メッシュそのもの」に変わっただけ)。
   if (!_instantiateAreaPolyMesh(entry)) { areaPolyRefund(entry.areaKind); return; }
   areaPolyMeshes.push(entry);
   polyGridAdd(areaPolyGrid, entry);
@@ -849,15 +681,14 @@ function seaLevelY() {
 function seaYOffset() {
   return LAND_FLOOR_MARGIN_M * ELEV_SCALE + 0.3;
 }
-// buildAreaPolyと同じ'flat'種別のentryを作るが、_computeWaterProfile(地形ノードを集めて
-// 集計する重い処理)を一切呼ばず、常に同じ高さを返す1ビンの固定プロファイルを直接埋め込む。
-// waterNodeInfoをあえて設定しないため、rebuildAreaPolyMesh側の再計算分岐も素通りし、
-// 高さは未来永劫この値のまま(=地形データの後着で変わりうる川とは異なり、海は変わる理由が無い)。
+// buildAreaPolyと同じ'flat'種別のentryを作るが、高さはgetGroundYを辿らずentry.fixedYに
+// 固定する(_waterYAt参照)。海は地形の後着で変わる理由が無く、常に平均海面と同じ高さで
+// 水平であるべき、という川・池(地形に沿う)との唯一の違いがここに現れる。
 function buildFixedFlatAreaPoly(pts, mat, yOff, fixedY, holes) {
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
   for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
   const entry = { mesh: null, kind: 'flat', areaKind: areaPolyTakePendingKind(), pts, holes, mat, yOff, minX, maxX, minZ, maxZ };
-  entry.waterProfile = { ux: 1, uz: 0, sMin: 0, M: [fixedY] };
+  entry.fixedY = fixedY; // 【2026-08-12・RIVER_DRAPES_ON_TERRAIN.md】海だけは平均海面で水平に固定する
   if (!_instantiateAreaPolyMesh(entry)) { areaPolyRefund(entry.areaKind); return false; }
   areaPolyMeshes.push(entry);
   polyGridAdd(areaPolyGrid, entry);
