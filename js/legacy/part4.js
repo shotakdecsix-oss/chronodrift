@@ -194,6 +194,9 @@ function recenterOrigin(lat, lon) {
   // 中身が実行されるのはスクリプト全体のロード完了後なので問題ない)。
   if (typeof coastlineWayStore !== 'undefined') coastlineWayStore.clear();
   if (typeof coastlineIslandStore !== 'undefined') coastlineIslandStore.clear();
+  // 【2026-08-13・SEA_FROM_COASTLINE_CHAINS.md】つなげたchain/ring/segsも旧原点基準の座標
+  // なので、ストアと同時に無効化する(忘れると別都市のchainが新しい原点の海面判定に混ざる)。
+  if (typeof coastlineChains !== 'undefined') { coastlineChains = null; _coastlineChainsDirty = true; }
 }
 
 function latLonToXZ(lat, lon) {
@@ -702,128 +705,96 @@ function buildFixedFlatAreaPoly(pts, mat, yOff, fixedY, holes) {
   polyGridAdd(avoidGrid, avoidPoly);
   return true;
 }
-// 直線(ax,az)-(bx,bz)を基準に、点(px,pz)が「海側」(進行方向(a→b)の右手側、OSMのcoastline
-// 規約=陸が左・海が右)にあれば正の値を返す。x=東・z=南の座標系での導出はコード変更履歴参照。
-function _crossSide(ax, az, bx, bz, px, pz) {
-  return (bx - ax) * (pz - az) - (bz - az) * (px - ax);
-}
-function _lineIntersect(p1, p2, ax, az, bx, bz) {
-  const d1 = _crossSide(ax, az, bx, bz, p1.x, p1.z);
-  const d2 = _crossSide(ax, az, bx, bz, p2.x, p2.z);
-  const t = (d1 - d2) !== 0 ? d1 / (d1 - d2) : 0;
-  return { x: p1.x + (p2.x - p1.x) * t, z: p1.z + (p2.z - p1.z) * t };
-}
-// Sutherland-Hodgman: 多角形polyを、直線(ax,az)-(bx,bz)の海側(_crossSide>=0)だけに切り詰める。
-// polyの凸性は問わないが、clip側の直線が凸なクリップ窓(タイル矩形の1辺)である前提で使う
-// (下のclipPolyToTile参照。多角形polyそのものが非凸=実際の海岸線の湾曲でもここは正しく動く)。
-function _clipPolyBySeaSide(poly, ax, az, bx, bz) {
-  const out = [];
-  const n = poly.length;
-  for (let i = 0; i < n; i++) {
-    const cur = poly[i], prev = poly[(i - 1 + n) % n];
-    const curIn = _crossSide(ax, az, bx, bz, cur.x, cur.z) >= 0;
-    const prevIn = _crossSide(ax, az, bx, bz, prev.x, prev.z) >= 0;
-    if (curIn) {
-      if (!prevIn) out.push(_lineIntersect(prev, cur, ax, az, bx, bz));
-      out.push(cur);
-    } else if (prevIn) {
-      out.push(_lineIntersect(prev, cur, ax, az, bx, bz));
-    }
-  }
-  return out;
-}
-// タイル矩形(x0,z0)-(x1,z1)でpolyを切り詰める(4辺で_clipPolyBySeaSideを順に適用)。
-// タイル自体は凸なので、poly側が非凸(実際の海岸線ribbon)でも正しくクリップできる
-// (Sutherland-Hodgmanはクリップ窓が凸であることだけを要求し、被クリップ側の凸性は問わない)。
-function _clipPolyToTile(poly, x0, x1, z0, z1) {
-  poly = _clipPolyBySeaSide(poly, x0, z0, x1, z0);
-  if (poly.length < 3) return poly;
-  poly = _clipPolyBySeaSide(poly, x1, z0, x1, z1);
-  if (poly.length < 3) return poly;
-  poly = _clipPolyBySeaSide(poly, x1, z1, x0, z1);
-  if (poly.length < 3) return poly;
-  poly = _clipPolyBySeaSide(poly, x0, z1, x0, z0);
-  return poly;
-}
 // タイルに一度でも海面を試みたら(coastlineが無く何もしなかった場合も含め)二度と再試行しない
 // —— coastlineの位置は実データなので、同じタイルへ何度到着しても結果は変わらない。
 const seenCoastlineTiles = new Set();
-// 点列chain(順序通り、2点以上)から「海側に大きくはみ出したリボン」を作る:
-// [chain全点] + [終点を海側へFARだけオフセット] + [始点を海側へFARだけオフセット]。
-// これを地図に忠実な「最低限これだけは海」というポリゴンとみなし、後でタイル矩形(凸)で
-// クリップする。半平面の逐次交差(旧v3実装)は被クリップ側=タイルが凸である前提が必要だが、
-// 現実の海岸線は湾曲・入江で非凸なため、直線近似のクリップだと「地図に忠実じゃない」形に
-// なっていた(2026-08-04ユーザー報告→v4でribbon化)。
-const COASTLINE_SEA_FAR = 3000; // タイル(1600m四方、対角線≈2263m)を確実に覆う沖合オフセット
-function _buildCoastlineRibbon(pts) {
-  const p0 = pts[0], p1 = pts[1], pNm1 = pts[pts.length - 2], pN = pts[pts.length - 1];
-  const d0x = p1.x - p0.x, d0z = p1.z - p0.z, d0len = Math.hypot(d0x, d0z) || 1;
-  const dNx = pN.x - pNm1.x, dNz = pN.z - pNm1.z, dNlen = Math.hypot(dNx, dNz) || 1;
-  // 海側=進行方向の右手側=(-dz,dx)(_crossSideの導出と同じ規約)
-  const seaP0 = { x: p0.x + (-d0z / d0len) * COASTLINE_SEA_FAR, z: p0.z + (d0x / d0len) * COASTLINE_SEA_FAR };
-  const seaPN = { x: pN.x + (-dNz / dNlen) * COASTLINE_SEA_FAR, z: pN.z + (dNx / dNlen) * COASTLINE_SEA_FAR };
-  return pts.concat([seaPN, seaP0]);
-}
 // 【2026-08-12・IMPL_PROMPT_20260812_COASTLINE_CANDIDATE_SET.md】coastlineのwayをセッション
-// 全体で保持するストア。以前はprocessCoastlineFillの呼び出しごと(=1バッチのOverpass応答)に
-// 閉じたローカル配列(openWays/islands)だけを候補にしていたが、Overpassのway(bbox)クエリは
-// bboxと交差するwayしか返さないため、川・湾の内側に完全に収まるタイル(=渚が無い、Phase2が
-// 本来救うべきケースそのもの)の応答にはcoastlineが1本も含まれず、Phase1/Phase2どちらの
-// 判定にも到達できていなかった(実機ログで確定: budgetFail=0・empty=0なのに陸化候補12件、
-// いずれも「nearWays=0で早期return」)。届いたwayをここへ貯め、どのタイルの判定からも
-// 参照できるようにする。
+// 全体で保持するストア。Overpassのway(bbox)クエリはbboxと交差するwayしか返さないため、
+// 川・湾の内側に完全に収まるタイル(渚が無い)の応答にはcoastlineが1本も含まれないことがある。
+// 届いたwayをここへ貯め、どのタイルの判定からも参照できるようにする。
 // 【注意】recenterOrigin(座標系の原点付け替え)でこのストアの座標は全部無効になるため、
 // recenterOrigin側でclear()すること(忘れると別都市の海岸線が混ざる)。
 const coastlineWayStore = new Map();   // el.id -> {pts,minX,maxX,minZ,maxZ}
 const coastlineIslandStore = new Map(); // el.id -> 同上(閉じたリング=島)
-// 【2026-08-04・NYの川面(ハドソン川・イーストリバー等)が全く表示されない不具合の対策】
-// v4はway全体1本から1枚の巨大リボンを作り、それをタイルでクリップしていた。伊勢原の
-// 短い海岸線では問題なかったが、マンハッタンのように長く曲がりくねったwayでは、両端点
-// だけをFAR(3000m)オフセットして閉じる「リボンを閉じる辺」が、途中の湾曲したway自体と
-// 交差してしまい(=自己交差ポリゴン)、_instantiateAreaPolyMeshが退化ポリゴンとして
-// 黙って諦めていた(「全く表示されない」という症状と一致)。加えて川幅の狭い水路(East
-// River等)では対岸のwayのFARオフセットが対岸の陸地を越えて伸びるため、そもそも
-// FAR=3000mという大きさ自体がこの手の狭い水域と相性が悪い。
-// 対策: リボンをway全体ではなく「そのタイルに実際にかかる連続区間(chain)」単位で作る。
-// タイルは1600m四方なので、区間はその近辺だけの短い折れ線になり、自己交差のリスクが
-// 大きく下がる(短い区間なら湾曲していても両端FARオフセットの閉じ辺と交差しにくい)。
-function _wayLocalRibbonsForTile(pts, x0, x1, z0, z1) {
-  const n = pts.length;
+// 【2026-08-13・IMPL_PROMPT_20260813_SEA_FROM_COASTLINE_CHAINS.md】海面の作り方を全面置換。
+// 旧方式(Phase1: way単位の海側リボンをタイル矩形でSutherland-Hodgmanクリップ、Phase2: 5点
+// 多数決でタイル全塗り)は、実測(NY)でサンプル6697点中35.6%が「地形が海面より+3m以上高い」
+// =本物の陸だった。原因は2つ: (1) ribbonは「chainの両端点だけ」で海側を決めるため、四方を
+// 海岸線に囲まれた島では島の内側を覆ってしまう(自己交差しないことと正しい側を覆うことは
+// 別問題だった)。(2) Phase2の5点多数決はタイル中心付近の桟橋・入江等で誤判定し、陸の31%を
+// 巻き込んでいた。今までは固定海面Y(7.30)が偶然の陸フィルタとして働き、マンハッタン
+// (地形+90)の下に海面が埋もれていたため見えていなかったが、地形を水面下へ下げる修正
+// ([[project_isehara_game_water_design_rewrite]]のTERRAIN_YIELDS_TO_WATER.md)で
+// 「陸の水面化」として噴出した。
+//
+// 新方式: coastline wayを端点でつなげてchain化し(way73本→chain8本、閉じた2本が実面積と
+// 一致するガバナーズ島・リバティ島とDEBUG_PROBE_20260813_COASTLINE_RINGS_V2/V3.jsで検証済み)、
+// タイルをセル単位(COAST_CELL_M)に分割、各セル中心が最寄りのcoastline区間の海側かどうかで
+// 「海か・海でないか」を判定する。接線の平滑化・重み付き多数決・レイ交差の巻き数はいずれも
+// 実測で効果ゼロ〜不可と確定済みなので入れない([[IMPL_PROMPT_20260813_SEA_FROM_COASTLINE_CHAINS]]
+// 参照)。返すのは「陸か水か」ではなく「海か、海ではないか」——「海ではない」側には陸と
+// 河口・入江の水の両方が入るが、その水はnatural=waterの川ポリゴン([[RIVER_DRAPES_ON_TERRAIN]]
+// で地形にドレープする実装、相模川で実機合格済み)が別途担当するので、ここで拾おうとしない。
+let coastlineChains = null;      // [ [{x,z},...], ... ] way73本→chain8本(実測NY)
+let coastlineRings = null;       // 閉じたchain(島)だけ
+let coastlineSegs = null;        // {ax,az,bx,bz,minX,maxX,minZ,maxZ} のフラット配列
+let _coastlineChainsDirty = true;
+const COAST_JOIN_EPS = 1.0;      // 端点が一致とみなす距離(m)
+function rebuildCoastlineChains() {
+  const ways = [];
+  for (const w of coastlineWayStore.values()) if (w && w.pts && w.pts.length >= 2) ways.push(w.pts);
+  for (const w of coastlineIslandStore.values()) if (w && w.pts && w.pts.length >= 2) ways.push(w.pts);
+  const key = p => Math.round(p.x / COAST_JOIN_EPS) + '|' + Math.round(p.z / COAST_JOIN_EPS);
+  const ends = new Map();
+  ways.forEach((pts, i) => { for (const p of [pts[0], pts[pts.length - 1]]) {
+    const k = key(p); if (!ends.has(k)) ends.set(k, []); ends.get(k).push(i); } });
+  const used = new Array(ways.length).fill(false);
+  const takeNext = p => { for (const i of (ends.get(key(p)) || [])) if (!used[i]) return i; return -1; };
   const chains = [];
-  let i = 0;
-  while (i < n - 1) {
-    const a = pts[i], b = pts[i + 1];
-    const overlaps = Math.min(a.x, b.x) <= x1 && Math.max(a.x, b.x) >= x0 &&
-      Math.min(a.z, b.z) <= z1 && Math.max(a.z, b.z) >= z0;
-    if (!overlaps) { i++; continue; }
-    let j = i;
-    while (j < n - 1) {
-      const aa = pts[j], bb = pts[j + 1];
-      const ov = Math.min(aa.x, bb.x) <= x1 && Math.max(aa.x, bb.x) >= x0 &&
-        Math.min(aa.z, bb.z) <= z1 && Math.max(aa.z, bb.z) >= z0;
-      if (!ov) break;
-      j++;
-    }
-    if (j - i + 1 >= 2) chains.push(pts.slice(i, j + 1));
-    i = j + 1;
+  for (let s = 0; s < ways.length; s++) {
+    if (used[s]) continue;
+    used[s] = true;
+    let c = ways[s].slice();
+    for (;;) { const i = takeNext(c[c.length - 1]); if (i < 0) break; used[i] = true;
+      const w = ways[i];
+      c = c.concat(key(w[0]) === key(c[c.length - 1]) ? w.slice(1) : w.slice(0, -1).reverse()); }
+    for (;;) { const i = takeNext(c[0]); if (i < 0) break; used[i] = true;
+      const w = ways[i];
+      c = (key(w[w.length - 1]) === key(c[0]) ? w.slice(0, -1) : w.slice(1).reverse()).concat(c); }
+    chains.push(c);
   }
-  return chains.map(_buildCoastlineRibbon);
+  coastlineChains = chains;
+  coastlineRings = chains.filter(c =>
+    Math.hypot(c[0].x - c[c.length - 1].x, c[0].z - c[c.length - 1].z) <= COAST_JOIN_EPS * 2);
+  coastlineSegs = [];
+  for (const c of chains) for (let i = 0; i < c.length - 1; i++) {
+    const a = c[i], b = c[i + 1];
+    coastlineSegs.push({ ax: a.x, az: a.z, bx: b.x, bz: b.z,
+      minX: Math.min(a.x, b.x), maxX: Math.max(a.x, b.x),
+      minZ: Math.min(a.z, b.z), maxZ: Math.max(a.z, b.z) });
+  }
+  _coastlineChainsDirty = false;
+  console.log('[coastline] chains=' + chains.length + ' rings=' + coastlineRings.length +
+    ' segs=' + coastlineSegs.length);
 }
-// 点(px,pz)から線分(ax,az)-(bx,bz)までの最短距離。
-function _distPointToSegment(px, pz, ax, az, bx, bz) {
-  const dx = bx - ax, dz = bz - az;
-  const len2 = dx * dx + dz * dz;
-  let t = len2 > 0 ? ((px - ax) * dx + (pz - az) * dz) / len2 : 0;
-  if (t < 0) t = 0; else if (t > 1) t = 1;
-  const cx = ax + dx * t, cz = az + dz * t;
-  return Math.hypot(px - cx, pz - cz);
+// 1点(px,pz)が「海か」を判定する。海側ベクトル=進行方向の右手側=(-dz,dx)(OSMのcoastline
+// 規約=陸が左・海が右)。segsは「そのタイル近辺だけに絞ったリスト」を渡すこと(全件走査を
+// 避けるため、呼び出し元の_fillCoastlineTile参照)。
+function isSeaPoint(px, pz, segs) {
+  for (const r of coastlineRings) if (pointInPolygon(px, pz, r)) return false; // 島の内側は海ではない
+  let best = Infinity, dot = 0;
+  for (const s of segs) {
+    const dx = s.bx - s.ax, dz = s.bz - s.az, len2 = dx * dx + dz * dz;
+    let t = len2 > 0 ? ((px - s.ax) * dx + (pz - s.az) * dz) / len2 : 0;
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const cx = s.ax + dx * t, cz = s.az + dz * t;
+    const d = (px - cx) * (px - cx) + (pz - cz) * (pz - cz);
+    if (d < best) { best = d; dot = (px - cx) * (-dz) + (pz - cz) * dx; }
+  }
+  if (best === Infinity) return false;
+  return dot >= 0;
 }
-// data.elements(1バッチ分のOverpass応答)からnatural=coastlineのwayを集め、tileList
-// (このバッチが対象にしたタイル位置の配列 {tx,tz})に含まれる各タイルについて、
-// そのタイル近辺だけの海側リボン(_wayLocalRibbonsForTile)をタイル矩形でクリップした
-// 海面ポリゴンを生成する。batchKind==='building'は natural=coastline を含まないクエリ
-// なので何もしない(OSM_TILE_CLAUSES_BUILDING参照)。
-// 【2026-08-12・COASTLINE_CANDIDATE_SET.md】「見た」印は、実際にPhase1/Phase2の判定まで
+// 【2026-08-12・COASTLINE_CANDIDATE_SET.md】「見た」印は、実際に判定まで
 // たどり着けた時だけ打つ(=候補が0件で早期returnしただけのタイルは保留扱いにし、後で
 // coastlineWayStoreが育った時に再試行する)。保留タイルの回収経路と滞留計器を対で持つ
 // (大原則「保留を作るなら回収経路と滞留計器を同じコミットで入れる」)。
@@ -840,115 +811,76 @@ function scanPendingCoastlineTiles() {
   console.log('[coastline] pending=' + pendingCoastlineTiles.size +
     ' store=' + coastlineWayStore.size + ' seen=' + seenCoastlineTiles.size);
 }
-// タイル1枚ぶんの判定(Phase1のribbon・Phase2の5点投票・budget判定・ログ)。ロジックは
-// 従来のprocessCoastlineFillのタイルループ本体と同一で、候補の取得元だけをバッチ内の
-// ローカル配列からcoastlineWayStore/coastlineIslandStore(+同一バッチ内でel.idが無かった
-// フォールバック分)に変えている。processCoastlineFill(新規到着バッチ)と
+const COAST_CELL_M = 100;    // 判定セルの一辺。1600mタイル → 16×16
+const COAST_DECIDE_MAX = 3000; // この距離内に海岸線が1本も無いタイルは判定せず保留する
+// タイル1枚をセル単位で判定して塗る。processCoastlineFill(新規到着バッチ)と
 // scanPendingCoastlineTiles(保留の再試行)の両方から呼ばれる。
-function _fillCoastlineTile(tx, tz, seaY, extraWays, extraIslands) {
-  const key = tx + ',' + tz;
-  const x0 = tx * OSM_TILE_M, x1 = x0 + OSM_TILE_M, z0 = tz * OSM_TILE_M, z1 = z0 + OSM_TILE_M;
-  // 【2026-08-04・NYの川面(ハドソン川等)の途中から先が地面になる不具合の対策】
-  // 従来はway自身の点(=渚のすぐ際)がこのタイルにかからない限りnearWaysに入らなかった
-  // ため、海岸線タイルから1〜2枚(COASTLINE_SEA_FAR=3000m相当)先の広い水面(川幅が
-  // タイル1枚を超える大河川・港湾)は、coastline wayが直接通っていないという理由だけで
-  // 何も塗られず地形がそのまま見えていた。粗いフィルタをCOASTLINE_SEA_FARぶん広げ、
-  // 「wayの点そのものはこのタイルに無いが、海側にFARだけ張り出すribbonなら届きうる」
-  // wayも候補に含める。
-  const m = COASTLINE_SEA_FAR;
-  const allOpenWays = extraWays && extraWays.length ?
-    Array.from(coastlineWayStore.values()).concat(extraWays) : Array.from(coastlineWayStore.values());
-  const nearWays = allOpenWays.filter(w => w.minX <= x1 + m && w.maxX >= x0 - m && w.minZ <= z1 + m && w.maxZ >= z0 - m);
-  if (nearWays.length === 0) {
-    // 【2026-08-12】候補が無いのは「このタイルに本当に海岸線が無い」のか「まだ届いていない
-    // だけ」なのか、この時点では区別できない。両方を同じ保留として扱い、後で
-    // coastlineWayStoreが育つたびに再試行する(=いつまでも候補が無ければ保留のまま残り
-    // 続けるだけで、誤って「陸」と確定させることはない)。
-    pendingCoastlineTiles.set(key, { tx, tz });
+function _fillCoastlineTile(tx, tz, seaY) {
+  const x0 = tx * OSM_TILE_M, x1 = x0 + OSM_TILE_M;
+  const z0 = tz * OSM_TILE_M, z1 = z0 + OSM_TILE_M;
+  const m = COAST_DECIDE_MAX;
+  const segs = coastlineSegs.filter(s =>
+    s.minX <= x1 + m && s.maxX >= x0 - m && s.minZ <= z1 + m && s.maxZ >= z0 - m);
+  if (segs.length === 0) {
+    pendingCoastlineTiles.set(tx + ',' + tz, { tx, tz }); // 判定しない。海岸線が届いてから
     return;
   }
-  seenCoastlineTiles.add(key); // ここで初めて「判定できた」ことにする
-  pendingCoastlineTiles.delete(key);
-  const allIslands = extraIslands && extraIslands.length ?
-    Array.from(coastlineIslandStore.values()).concat(extraIslands) : Array.from(coastlineIslandStore.values());
-  const nearIslands = allIslands.filter(is => is.minX <= x1 && is.maxX >= x0 && is.minZ <= z1 && is.maxZ >= z0);
-  const holes = nearIslands.length ? nearIslands.map(is => is.pts) : null;
-  let builtCount = 0, emptyCount = 0, budgetFailCount = 0, ribbonCount = 0;
-  for (const w of nearWays) {
-    // _wayLocalRibbonsForTileの区間判定自体は「実際にタイルへかかる区間」限定のまま
-    // (自己交差防止のため広げない)。区間が見つからないway(=渚がこのタイルに無い)は、
-    // 後段のPhase2(最寄り区間の半平面)に任せる。
-    const localRibbons = _wayLocalRibbonsForTile(w.pts, x0, x1, z0, z1);
-    for (const ribbon of localRibbons) {
-      ribbonCount++;
-      const poly = _clipPolyToTile(ribbon, x0, x1, z0, z1);
-      if (poly.length < 3) { emptyCount++; continue; }
-      if (areaPolyBudgetOK('sea')) {
-        buildFixedFlatAreaPoly(poly, waterAreaMat, seaYOffset(), seaY, holes);
-        builtCount++;
-      } else {
-        budgetFailCount++;
-      }
+  seenCoastlineTiles.add(tx + ',' + tz);
+  pendingCoastlineTiles.delete(tx + ',' + tz);
+
+  const N = Math.round(OSM_TILE_M / COAST_CELL_M);
+  const grid = new Uint8Array(N * N);
+  let seaCells = 0;
+  for (let jz = 0; jz < N; jz++)
+    for (let ix = 0; ix < N; ix++) {
+      const cx = x0 + (ix + 0.5) * COAST_CELL_M, cz = z0 + (jz + 0.5) * COAST_CELL_M;
+      if (isSeaPoint(cx, cz, segs)) { grid[jz * N + ix] = 1; seaCells++; }
     }
+  if (seaCells === 0) {
+    console.log('[coastline] tile ' + tx + ',' + tz + ': segs=' + segs.length + ' seaCells=0');
+    return;
   }
-  // 【Phase2】このタイルを実際に横切るcoastline区間が1つも無かった(=渚から離れた
-  // 開けた水面、または純粋な陸地)場合、タイル中心から最寄りのcoastline区間を探し、
-  // その海側かどうかだけで判定する。海側なら(タイル中心が海側という強い手がかりなので)
-  // タイル全体をそのまま海で塗る。COASTLINE_SEA_FARより遠い区間は対象にしない。
-  // 【2026-08-04・実機報告(NYジャージーシティ沖)】以前はPhase1が1件でもribbonを作れたら
-  // (=その海岸のごく一部だけがこのタイルにかかっていただけでも)Phase2を丸ごとスキップ
-  // していた。ハドソン川のように岸のごく一部だけがタイル端にかかり、タイルの残り大部分は
-  // 開けた水面、というケースでその「残り大部分」が塗り残されていた。Phase1の結果に
-  // 関わらず常にPhase2(タイル中心の海側判定)も行う(同じ色・高さなので重ね塗りになっても
-  // 無害。むしろ「際の精密な形」と「中心の粗い全塗り」を両方敷く方が穴が残らない)。
-  {
-    // 【2026-08-04・実機報告(NYジャージーシティ沖、同じ場所がまだ地面)】タイル中心
-    // 1点だけの判定だと、桟橋・入江等で海岸線が複雑な場所では中心がたまたま陸側寄りに
-    // 誤判定され、Phase1のribbon(渚のごく近くだけ)とPhase2(中心1点)の両方が
-    // カバーしない「隙間」がタイル内に残ることがあった。中心+4隅の計5点それぞれで
-    // 最寄り区間を判定し、過半数(3点以上)が海側ならタイル全体を塗る(1点だけの判定より
-    // 頑健)。
-    const samples = [
-      { x: (x0 + x1) / 2, z: (z0 + z1) / 2 },
-      { x: x0, z: z0 }, { x: x1, z: z0 }, { x: x1, z: z1 }, { x: x0, z: z1 }
-    ];
-    let seaVotes = 0;
-    for (const s of samples) {
-      let bestDist = Infinity, bestSeg = null;
-      for (const w of nearWays) {
-        const pts = w.pts;
-        for (let i = 0; i < pts.length - 1; i++) {
-          const a = pts[i], b = pts[i + 1];
-          const d = _distPointToSegment(s.x, s.z, a.x, a.z, b.x, b.z);
-          if (d < bestDist) { bestDist = d; bestSeg = { ax: a.x, az: a.z, bx: b.x, bz: b.z }; }
-        }
+  // 横方向の連続をrunにまとめ、さらに上下で同じrunを矩形に結合する
+  // (全部海のタイルは矩形1枚になる。ドローコールを抑えるため)
+  const rects = [];
+  const doneRow = new Uint8Array(N * N);
+  for (let jz = 0; jz < N; jz++)
+    for (let ix = 0; ix < N; ix++) {
+      if (!grid[jz * N + ix] || doneRow[jz * N + ix]) continue;
+      let ex = ix; while (ex + 1 < N && grid[jz * N + ex + 1] && !doneRow[jz * N + ex + 1]) ex++;
+      let ez = jz;
+      for (;;) { // 下の行が同じ範囲で全部海なら伸ばす
+        const nz = ez + 1;
+        if (nz >= N) break;
+        let same = true;
+        for (let k = ix; k <= ex; k++) if (!grid[nz * N + k] || doneRow[nz * N + k]) { same = false; break; }
+        if (!same) break;
+        ez = nz;
       }
-      if (bestSeg && bestDist <= COASTLINE_SEA_FAR &&
-          _crossSide(bestSeg.ax, bestSeg.az, bestSeg.bx, bestSeg.bz, s.x, s.z) >= 0) {
-        seaVotes++;
-      }
+      for (let r = jz; r <= ez; r++) for (let k = ix; k <= ex; k++) doneRow[r * N + k] = 1;
+      rects.push({ x0: x0 + ix * COAST_CELL_M, x1: x0 + (ex + 1) * COAST_CELL_M,
+                   z0: z0 + jz * COAST_CELL_M, z1: z0 + (ez + 1) * COAST_CELL_M });
     }
-    if (seaVotes >= 3) {
-      const wholeTile = [{ x: x0, z: z0 }, { x: x1, z: z0 }, { x: x1, z: z1 }, { x: x0, z: z1 }];
-      if (areaPolyBudgetOK('sea')) {
-        buildFixedFlatAreaPoly(wholeTile, waterAreaMat, seaYOffset(), seaY, holes);
-        builtCount++;
-      } else {
-        budgetFailCount++;
-      }
-    }
+  let built = 0, budgetFail = 0;
+  for (const r of rects) {
+    if (!areaPolyBudgetOK('sea')) { budgetFail++; continue; }
+    buildFixedFlatAreaPoly(
+      [{ x: r.x0, z: r.z0 }, { x: r.x1, z: r.z0 }, { x: r.x1, z: r.z1 }, { x: r.x0, z: r.z1 }],
+      waterAreaMat, seaYOffset(), seaY, null);   // ← holesは不要。島は判定で除外済み
+    built++;
   }
-  console.log('[coastline] tile ' + key + ': nearWays=' + nearWays.length + ' ribbons=' + ribbonCount +
-    ' nearIslands=' + nearIslands.length + ' built=' + builtCount +
-    ' empty=' + emptyCount + ' budgetFail=' + budgetFailCount);
+  console.log('[coastline] tile ' + tx + ',' + tz + ': segs=' + segs.length +
+    ' seaCells=' + seaCells + '/' + (N * N) + ' rects=' + rects.length +
+    ' built=' + built + ' budgetFail=' + budgetFail);
 }
+// data.elements(1バッチ分のOverpass応答)からnatural=coastlineのwayを集めてストアへ入れ、
+// chainが古ければ再構築し、tileList(このバッチが対象にしたタイル位置の配列)の各タイルを
+// _fillCoastlineTileで判定する。batchKind==='building'はnatural=coastlineを含まないクエリ
+// なので何もしない(OSM_TILE_CLAUSES_BUILDING参照)。
+let _coastlineNoIdSeq = 0; // 通常のOverpass応答では起きないはずのel.id欠落用フォールバックキー
 function processCoastlineFill(elements, tileList) {
   if (!tileList || tileList.length === 0) return;
-  if (tileList[0].kind === 'building') return; // このkindのクエリはnatural=coastlineを含まない
-  // 【2026-08-12】el.idが無い(通常のOverpass応答では起きないはずの)フォールバック専用。
-  // ストアへは入れず、このバッチ内のタイル判定にだけ一時的に使う。
-  const fallbackOpenWays = [];
-  const fallbackIslands = [];
+  if (tileList[0].kind === 'building') return;
   const CLOSE_EPS = 1; // 始点・終点がこの距離(m)以内なら閉じたリング(=島)とみなす
   let newOpen = 0, newIsland = 0;
   for (const el of elements) {
@@ -961,27 +893,25 @@ function processCoastlineFill(elements, tileList) {
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
     for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
     const rec = { pts, minX, maxX, minZ, maxZ };
-    // 【2026-08-04・江の島が海に沈む不具合の対策】閉じたリング(=島1周のcoastline)は、
-    // 開いた本土coastlineと同じ「海側リボン」を作ると、島の外周をぐるっと囲む形になり
-    // 内側(島の陸地)まで海扱いになってしまう。開いた本土coastlineと閉じた島coastlineを
-    // 区別し、島はribbon化せず、後段でホール(buildFixedFlatAreaPolyのholes)として
-    // 海面ポリゴンから除外するだけにする。
+    const id = (el.id !== undefined && el.id !== null) ? el.id : ('noid_' + (_coastlineNoIdSeq++));
     if (closed) {
-      if (el.id !== undefined && el.id !== null) coastlineIslandStore.set(el.id, rec); else fallbackIslands.push(rec);
+      coastlineIslandStore.set(id, rec);
       newIsland++;
-      continue;
+    } else {
+      coastlineWayStore.set(id, rec);
+      newOpen++;
     }
-    if (el.id !== undefined && el.id !== null) coastlineWayStore.set(el.id, rec); else fallbackOpenWays.push(rec);
-    newOpen++;
+    _coastlineChainsDirty = true;
   }
   if (newOpen > 0 || newIsland > 0) {
     console.log('[coastline] batch: openWays=' + newOpen + ' islands=' + newIsland +
       ' tiles=' + tileList.length);
   }
+  if (_coastlineChainsDirty) rebuildCoastlineChains();
   const seaY = seaLevelY();
   for (const t of tileList) {
     if (seenCoastlineTiles.has(t.tx + ',' + t.tz)) continue;
-    _fillCoastlineTile(t.tx, t.tz, seaY, fallbackOpenWays, fallbackIslands);
+    _fillCoastlineTile(t.tx, t.tz, seaY);
   }
 }
 
