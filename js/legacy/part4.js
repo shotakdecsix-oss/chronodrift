@@ -265,6 +265,11 @@ function _commitWaterPoly(pts, holes, minX, maxX, minZ, maxZ) {
   if (typeof rebuildRoadsInBounds === 'function') {
     rebuildRoadsInBounds(minX - margin, maxX + margin, minZ - margin, maxZ + margin);
   }
+  // 【2026-08-12・IMPL_PROMPT_20260812_TERRAIN_YIELDS_TO_WATER.md】この水域が地形より後に
+  // 届いた場合の回収経路。ここは川・池(waterBedYAtの対象外=fixedYなし)も通るが、
+  // scanWaterBedLowering側でwaterBedYAtがnullを返すだけで実害は無い(海が同じ範囲に
+  // 重なっていれば正しく効く)。
+  markWaterBedDirty(minX, maxX, minZ, maxZ);
 }
 function queueWaterPolyRetry(pts, holes, minX, maxX, minZ, maxZ) {
   pendingAreaWaterPolys.push({ pts, holes, minX, maxX, minZ, maxZ });
@@ -480,6 +485,88 @@ function waterSurfaceYAt(x, z) {
 function _waterYAt(entry, x, z) {
   if (entry.fixedY != null) return entry.fixedY + entry.yOff; // 海
   return getGroundY(x, z) + entry.yOff;                        // 川・池
+}
+// 【2026-08-12・IMPL_PROMPT_20260812_TERRAIN_YIELDS_TO_WATER.md】地形格子ノードを水面下へ
+// 落とすための判定。DEMは水域の上に測定されていない正の値を返すため(NY実測: 海面7.30に
+// 対し地形7.92〜8.88)、そのまま描くと海面が地形の下に隠れる。海面ポリゴンの内側にある
+// 地形ノードだけ、DEMではなく水面基準の高さに書き換える(高さで追いかけて「上げる」のは
+// 2週間の往復の構造そのものなので、地形側を「下げる」)。waterSurfaceYAtと違う点:
+//   ・外側マージンを持たない(岸を削らないため)
+//   ・さらにWATER_BED_INSETだけ内側に入っていることを要求する
+//   ・複数の水域が重なる場合は「最も低い水面」を返す(maxを使うと、もう一方の水面が
+//     地形に埋もれるため)
+//   ・fixedYを持たない面(=川・池)は対象外。川・池は地形に沿う実装
+//     ([[RIVER_DRAPES_ON_TERRAIN]])になったので、下げると_waterYAtがgetGroundYを
+//     返す関係で「地形→水面→地形」の帰還ループになる
+const WATER_BED_INSET = 40;  // 輪郭からこれだけ内側のノードだけを下げる(m)
+const WATER_BED_DROP  = 0.6; // 水面からこれだけ下に置く(ゲーム単位)
+function waterBedYAt(x, z) {
+  let best = null;
+  for (const e of queryPolyGrid(areaPolyGrid, x, x, z, z)) {
+    if (e.kind !== 'flat') continue;
+    if (e.fixedY == null) continue; // 海(固定水面)だけを対象にする
+    if (x < e.minX || x > e.maxX || z < e.minZ || z > e.maxZ) continue;
+    if (!pointInPolygon(x, z, e.pts)) continue;
+    if (_nearPolygonBoundary(x, z, e.pts, WATER_BED_INSET)) continue; // 岸際は下げない
+    if (e.holes) {
+      let inHole = false;
+      for (const hp of e.holes) { if (hp.length >= 4 && pointInPolygon(x, z, hp)) { inHole = true; break; } }
+      if (inHole) continue; // 中州は陸なので下げない
+    }
+    const y = _waterYAt(e, x, z);
+    if (best === null || y < best) best = y; // 最小を採る
+  }
+  return best === null ? null : best - WATER_BED_DROP;
+}
+// 【2026-08-12・IMPL_PROMPT_20260812_TERRAIN_YIELDS_TO_WATER.md】水域が地形より後に届いた
+// 場合の回収経路。ポリゴンごとに即時反映するとupdateFarMeshが何百回も走るため、影響範囲
+// (bbox)をunionで溜めて低頻度で1回だけ適用する(scanPendingAreaWaterPolysと同じ考え方)。
+let _waterBedDirty = null; // {minX,maxX,minZ,maxZ} or null
+function markWaterBedDirty(minX, maxX, minZ, maxZ) {
+  if (!_waterBedDirty) _waterBedDirty = { minX, maxX, minZ, maxZ };
+  else {
+    _waterBedDirty.minX = Math.min(_waterBedDirty.minX, minX);
+    _waterBedDirty.maxX = Math.max(_waterBedDirty.maxX, maxX);
+    _waterBedDirty.minZ = Math.min(_waterBedDirty.minZ, minZ);
+    _waterBedDirty.maxZ = Math.max(_waterBedDirty.maxZ, maxZ);
+  }
+}
+let _waterBedScanFrame = 0;
+function scanWaterBedLowering() {
+  _waterBedScanFrame++;
+  if (_waterBedScanFrame % 90 !== 0) return; // scanPendingAreaWaterPolysと同じ周期
+  if (!_waterBedDirty) return;
+  const d = _waterBedDirty;
+  _waterBedDirty = null;
+  let changed = 0;
+  changed += _lowerGridInBounds(nearElev, nearCX, nearCZ, NEAR_W, NEAR_D, NEAR_SEGS, NEAR_SEGS1, d);
+  changed += _lowerGridInBounds(wideElev, wideCX, wideCZ, WIDE_W, WIDE_D, WIDE_SEGS, WIDE_SEGS1, d);
+  console.log('[waterbed] lowered nodes=' + changed +
+    ' bounds=' + Math.round(d.minX) + ',' + Math.round(d.minZ) +
+    '..' + Math.round(d.maxX) + ',' + Math.round(d.maxZ));
+  if (changed > 0) {
+    updateFarMesh(true); // 地形メッシュを新しい高さで作り直す
+    rebuildAreaPolysInBounds(d.minX, d.maxX, d.minZ, d.maxZ);
+    if (typeof rebuildRoadsInBounds === 'function') rebuildRoadsInBounds(d.minX, d.maxX, d.minZ, d.maxZ);
+  }
+}
+// gridの該当範囲のノードだけを走査して下げる。下げた件数を返す。
+function _lowerGridInBounds(grid, cX, cZ, W, D, SEGS, SEGS1, d) {
+  if (!grid) return 0;
+  const stepX = W / SEGS, stepZ = D / SEGS;
+  const x0 = cX - W / 2, z0 = cZ - D / 2;
+  let ix0 = Math.max(0, Math.floor((d.minX - x0) / stepX));
+  let ix1 = Math.min(SEGS, Math.ceil((d.maxX - x0) / stepX));
+  let iz0 = Math.max(0, Math.floor((d.minZ - z0) / stepZ));
+  let iz1 = Math.min(SEGS, Math.ceil((d.maxZ - z0) / stepZ));
+  let n = 0;
+  for (let iz = iz0; iz <= iz1; iz++)
+    for (let ix = ix0; ix <= ix1; ix++) {
+      const k = iz * SEGS1 + ix;
+      const bed = waterBedYAt(x0 + ix * stepX, z0 + iz * stepZ);
+      if (bed !== null && bed < grid[k]) { grid[k] = bed; n++; }
+    }
+  return n;
 }
 // 【2026-08-03】辺(弦)が地形を切って「地面が混ざり込む」のを防ぐため、最長辺がMAX_EDGE以下に
 // なるまで三角形を1→4の中点分割で再帰的に細分する。中点は辺キー("小さい方の頂点index_大きい方")
@@ -700,6 +787,10 @@ function buildFixedFlatAreaPoly(pts, mat, yOff, fixedY, holes) {
   const avoidPoly = { pts, minX, maxX, minZ, maxZ };
   avoidPolygons.push(avoidPoly);
   polyGridAdd(avoidGrid, avoidPoly);
+  // 【2026-08-12・IMPL_PROMPT_20260812_TERRAIN_YIELDS_TO_WATER.md】この海面が地形より後に
+  // 届いた場合、既存の地形格子ノードはまだDEMの生値のまま(海面より高いことが多い)なので、
+  // scanWaterBedLoweringで下げ直す必要がある範囲としてマークする。
+  markWaterBedDirty(minX, maxX, minZ, maxZ);
   return true;
 }
 // 直線(ax,az)-(bx,bz)を基準に、点(px,pz)が「海側」(進行方向(a→b)の右手側、OSMのcoastline
