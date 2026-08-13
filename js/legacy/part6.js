@@ -169,6 +169,20 @@ async function loadWideTerrain(centerX = 0, centerZ = 0) {
     const m = raw[i];
     arr[i] = (m == null) ? oceanFloor : (Math.max(m, landFloorM) - elevBase) * ELEV_SCALE;
   }
+  // 【2026-08-13・IMPL_PROMPT_20260813_TERRAIN_YIELDS_TO_SEA_V2.md】海の下の地形を海面より
+  // 下げる(part4.js seaBedYAt参照)。DEMは水域の上に測定されていない正の値を返すため、
+  // そのまま描くと海面が地形の下に隠れる(NY実測: 海面11.30に対し地形が+0.6〜3)。
+  if (typeof seaBedYAt === 'function') {
+    let k = 0, n = 0;
+    for (let iz = 0; iz < WIDE_SEGS1; iz++)
+      for (let ix = 0; ix < WIDE_SEGS1; ix++, k++) {
+        const wx = centerX - WIDE_W/2 + ix * WIDE_W / WIDE_SEGS;
+        const wz = centerZ - WIDE_D/2 + iz * WIDE_D / WIDE_SEGS;
+        const bed = seaBedYAt(wx, wz);
+        if (bed !== null && bed < arr[k]) { arr[k] = bed; n++; }
+      }
+    console.log('[seabed] WIDE lowered=' + n + '/' + arr.length);
+  }
   wideElev = arr; wideCX = centerX; wideCZ = centerZ; // データと中心を同時に更新
   wideLoading = false;
   _wideFailCount = 0; _wideGiveUp = false; // 成功したのでリセット
@@ -300,6 +314,20 @@ async function loadNearTerrain(centerX = 0, centerZ = 0) {
   for (let i = 0; i < raw.length; i++) {
     const m = raw[i];
     arr[i] = (m == null) ? oceanFloor : (Math.max(m, landFloorM) - elevBase) * ELEV_SCALE;
+  }
+  // 【2026-08-13・TERRAIN_YIELDS_TO_SEA_V2.md】loadWideTerrainと同じ理由・同じ式
+  // (part4.js seaBedYAt参照)。NEARはプレイヤー近傍の高解像度グリッドなので、ここが
+  // 直っていないと足元の海が地形に隠れる。
+  if (typeof seaBedYAt === 'function') {
+    let k = 0, n = 0;
+    for (let iz = 0; iz < NEAR_SEGS1; iz++)
+      for (let ix = 0; ix < NEAR_SEGS1; ix++, k++) {
+        const wx = centerX - NEAR_W/2 + ix * NEAR_W / NEAR_SEGS;
+        const wz = centerZ - NEAR_D/2 + iz * NEAR_D / NEAR_SEGS;
+        const bed = seaBedYAt(wx, wz);
+        if (bed !== null && bed < arr[k]) { arr[k] = bed; n++; }
+      }
+    console.log('[seabed] NEAR lowered=' + n + '/' + arr.length);
   }
   nearElev = arr; nearCX = centerX; nearCZ = centerZ;
   nearLoading = false;
