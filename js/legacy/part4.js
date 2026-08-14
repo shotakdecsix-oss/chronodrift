@@ -827,16 +827,27 @@ function isSeaPoint(px, pz, segs) {
 const SEA_BED_INSET = 60;    // 海岸線からこの距離以内のノードは下げない(m)。200m格子では150mは広すぎた
 const SEA_BED_DROP  = 0.6;   // 海面(seaLevelY)からこれだけ下に置く
 const SEA_BED_FAR   = 3000;  // これより遠い区間は判定に使わない(COAST_DECIDE_MAXと同じ思想)
-// 海なら「下げるべき高さ」を、そうでなければnullを返す。川・池には一切関与しない
-// (川は地形にドレープする実装で実機合格済み。ここで扱うのは海だけ)。part5.js farNodeYが
-// キャッシュ付きで呼ぶ(呼び出し元コメント参照)。
-function seaBedYAt(x, z) {
-  if (!coastlineSegs || coastlineSegs.length === 0) return null; // 海岸線が無ければ判定しない
-  for (const r of coastlineRings) if (pointInPolygon(x, z, r)) return null; // 島の内側は陸
+// 【2026-08-13・IMPL_PROMPT_20260813_SHORELINE_RAMP.md】旧seaBedYAtは「距離と海側判定」
+// (重い、区間を全走査する)と「返す高さ」(軽い)を1つの関数にしていた。汀線が大きな楔状に
+// 見える不具合(実測: 陸ノードが海面+50だと交点が陸ノードから192m沖にずれる。標高サンプルは
+// 543m間隔しかなく、護岸の急な立ち上がりはデータに存在しない=海中と543m内陸のサンプルを
+// 直線補間した産物)を直すには、岸から`SHORE_RAMP`以内の陸側ノードも(海面まで沈めるのでは
+// なく)海面高→元の高さへ連続的にブレンドする必要があり、この「ブレンド計算」は元の地形高さ
+// `base`に依存するため毎回行う必要がある(地形データの到着でbaseが変わるため)。一方
+// 「距離と海側判定」自体は地形データに依存せず海岸線が変わった時だけ変わるので、そこだけを
+// キャッシュしたい。この2つの寿命の違いを表現するため、重い判定を`coastGeomAt`、軽い
+// ブレンド計算を`seaClampY`に分離した(旧seaBedYAtは削除)。
+//
+// 海岸線からの距離と海/陸を返す。重い(区間を全走査する)のでfarNodeY側でキャッシュする対象。
+// null = 近くに海岸線が無い(判定しない)
+function coastGeomAt(x, z) {
+  if (!coastlineSegs || coastlineSegs.length === 0) return null;
+  let inRing = false;
+  for (const r of coastlineRings) if (pointInPolygon(x, z, r)) { inRing = true; break; }
   let best = Infinity, dot = 0;
   for (const s of coastlineSegs) {
     if (s.minX - x > SEA_BED_FAR || x - s.maxX > SEA_BED_FAR ||
-        s.minZ - z > SEA_BED_FAR || z - s.maxZ > SEA_BED_FAR) continue; // 粗い枝刈り
+        s.minZ - z > SEA_BED_FAR || z - s.maxZ > SEA_BED_FAR) continue;
     const dx = s.bx - s.ax, dz = s.bz - s.az, len2 = dx * dx + dz * dz;
     let t = len2 > 0 ? ((x - s.ax) * dx + (z - s.az) * dz) / len2 : 0;
     if (t < 0) t = 0; else if (t > 1) t = 1;
@@ -844,13 +855,30 @@ function seaBedYAt(x, z) {
     const d = (x - cx) * (x - cx) + (z - cz) * (z - cz);
     if (d < best) { best = d; dot = (x - cx) * (-dz) + (z - cz) * dx; }
   }
-  if (best === Infinity) return null;              // 近くに海岸線が1本も無い → 判定しない
-  if (dot < 0) return null;                        // 陸側
-  if (Math.sqrt(best) < SEA_BED_INSET) return null; // 岸際は触らない
-  return seaLevelY() - SEA_BED_DROP;
+  if (best === Infinity) return null;
+  return { d: Math.sqrt(best), sea: (dot >= 0) && !inRing }; // 島の内側は必ず陸
+}
+// 上の判定と元の高さから、そのノードに使う高さを返す。軽い。毎回呼ぶこと(baseはキャッシュ
+// できないため)。
+// 海側 : 海面下に沈める(旧seaBedYAtと同じ式)
+// 陸側 : 岸からSHORE_RAMPまで、海面高→元の高さへ連続的にブレンドする(汀線ランプ)。
+//        岸がいきなり高いと、地形と海面の交点が最大200m沖へずれて大きな楔になるため。
+//        ここで潰れる斜面は543m間隔のサンプルを直線補間した産物であり、実測値ではない。
+const SHORE_RAMP = 400;   // 汀線ランプの長さ(m)。唯一の調整つまみ
+function seaClampY(base, g) {
+  if (!g) return base;
+  const seaTop = seaLevelY() + seaYOffset();
+  if (g.sea) {
+    if (g.d < SEA_BED_INSET) return base;      // 岸ぎりぎりの海側は触らない
+    const y = seaLevelY() - SEA_BED_DROP;
+    return y < base ? y : base;
+  }
+  if (g.d >= SHORE_RAMP || base <= seaTop) return base;
+  const cap = seaTop + (base - seaTop) * (g.d / SHORE_RAMP);
+  return cap < base ? cap : base;
 }
 // 【2026-08-13・SEA_CLAMP_IN_FARNODEY.md】part5.js farNodeYのキャッシュは遅延評価
-// (参照されて初めてseaBedYAtを呼ぶ)なので、放っておくと画面は古いまま。海岸線が更新される
+// (参照されて初めてcoastGeomAtを呼ぶ)なので、放っておくと画面は古いまま。海岸線が更新される
 // たび(rebuildCoastlineChains末尾)に低頻度で1回だけ地形メッシュを作り直す。
 // 【前版(TERRAIN_YIELDS_TO_SEA_V2.md)からの置き換え】旧scanSeaBedは標高データを直接
 // 下げていたためNEAR/WIDEを交互に処理する2段構成だったが、今回はfarNodeY側のキャッシュを

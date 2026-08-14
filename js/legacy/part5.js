@@ -61,26 +61,28 @@ const FAR_Y = -0.15;                  // メッシュ全体のyオフセット
 // ここで上書きすれば見た目と当たり判定が構造的に一致する。標高データ(nearElev/wideElev)
 // そのものは書き換えない(判定が誤っても元に戻せる)。
 //
-// seaBedYAtは区間(coastlineSegs、数千本になりうる)を毎回全走査するため、ノードごとに
-// 結果をキャッシュする。海岸線が更新されるとcoastlineVersion(part4.js)が上がり、次に
+// 【2026-08-13・IMPL_PROMPT_20260813_SHORELINE_RAMP.md】キャッシュ対象をcoastGeomAtの結果
+// (重い、区間を全走査する判定)だけに変更した。高さの計算(seaClampY)は元の地形高さbaseに
+// 依存するため毎回行う(baseは地形データの到着で変わるためキャッシュしてはいけない)。
+// coastGeomAt自体は海岸線が更新されるとcoastlineVersion(part4.js)が上がり、次に
 // 参照されたときだけ再計算される(全消しにすると海岸線バッチのたびに数千点を再計算する
 // ことになるため、世代番号だけ見て個別に無効化する)。
-const _seaNodeCache = new Map();   // key "i|j" -> { v: coastlineVersion, y: number|null }
+const _seaNodeCache = new Map();   // key "i|j" -> { v: coastlineVersion, g: {d,sea}|null }
 function farNodeY(i, j) {
   // terrainY はpart6.jsで定義される。このファイル(part5.js)の末尾で行う
   // 起動直後の初期化呼び出し(updateFarMesh(true))はpart6.js読み込み前に実行されるため、
   // 未定義の間は0m(平坦)を返す(ReferenceError回避。typeofは未宣言識別子でも例外を投げない)。
   if (typeof terrainY !== 'function') return 0;
   const base = terrainY(i * FAR_STEP, j * FAR_STEP) || 0;
-  if (typeof seaBedYAt !== 'function' || typeof coastlineVersion === 'undefined') return base;
+  if (typeof coastGeomAt !== 'function' || typeof coastlineVersion === 'undefined') return base;
   const k = i + '|' + j;
   let e = _seaNodeCache.get(k);
   if (!e || e.v !== coastlineVersion) {
-    e = { v: coastlineVersion, y: seaBedYAt(i * FAR_STEP, j * FAR_STEP) };
+    e = { v: coastlineVersion, g: coastGeomAt(i * FAR_STEP, j * FAR_STEP) };
     if (_seaNodeCache.size > 40000) _seaNodeCache.clear(); // 移動し続けても際限なく増やさない
     _seaNodeCache.set(k, e);
   }
-  return (e.y !== null && e.y < base) ? e.y : base;
+  return seaClampY(base, e.g);
 }
 // 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER_v2.md 修正A-1】farNodeYの`|| 0`と同じ理由で、
 // 欠測を区別できるノードクエリを別途用意する(part4.jsの水面プロファイル計算専用)。
