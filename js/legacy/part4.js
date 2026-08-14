@@ -918,7 +918,12 @@ function scanPendingCoastlineTiles() {
   console.log('[coastline] pending=' + pendingCoastlineTiles.size +
     ' store=' + coastlineWayStore.size + ' seen=' + seenCoastlineTiles.size);
 }
-const COAST_CELL_M = 100;    // 判定セルの一辺。1600mタイル → 16×16
+// 【2026-08-13】100→50。実測で「見えている水際は海面ポリゴンの端」と確定した
+// (東方向: 海面ポリゴンの端=10m に対し、地形が海面を超えるのは440m先。つまり地形は
+//  水際を切っておらず、100mセルの階段がそのまま境界として見えていた)。
+// 50mにすると階段が半分になる。25mは1/4になるがタイル1枚あたりの判定回数が16倍になり、
+// 現状 [tileData] が200〜900msかかっているため段階的に下げること。
+const COAST_CELL_M = 50;     // 判定セルの一辺。1600mタイル → 32×32
 const COAST_DECIDE_MAX = 3000; // この距離内に海岸線が1本も無いタイルは判定せず保留する
 // タイル1枚をセル単位で判定して塗る。processCoastlineFill(新規到着バッチ)と
 // scanPendingCoastlineTiles(保留の再試行)の両方から呼ばれる。
