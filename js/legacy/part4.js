@@ -739,6 +739,7 @@ let coastlineChains = null;      // [ [{x,z},...], ... ] way73本→chain8本(�
 let coastlineRings = null;       // 閉じたchain(島)だけ
 let coastlineSegs = null;        // {ax,az,bx,bz,minX,maxX,minZ,maxZ} のフラット配列
 let _coastlineChainsDirty = true;
+let coastlineVersion = 0; // 【2026-08-13・SEA_CLAMP_IN_FARNODEY.md】海岸線が更新されるたびに++。part5.js farNodeYの海面クランプキャッシュ世代
 const COAST_JOIN_EPS = 1.0;      // 端点が一致とみなす距離(m)
 function rebuildCoastlineChains() {
   const ways = [];
@@ -776,10 +777,11 @@ function rebuildCoastlineChains() {
   _coastlineChainsDirty = false;
   console.log('[coastline] chains=' + chains.length + ' rings=' + coastlineRings.length +
     ' segs=' + coastlineSegs.length);
-  // 【2026-08-13・IMPL_PROMPT_20260813_TERRAIN_YIELDS_TO_SEA_V2.md】chainが更新された
-  // (=coastlineSegs/coastlineRingsの中身が変わった)ので、地形格子の海底下げも
-  // 低頻度スキャンでやり直す必要があると印を立てる。
-  _seaBedDirty = true;
+  // 【2026-08-13・IMPL_PROMPT_20260813_SEA_CLAMP_IN_FARNODEY.md】chainが更新された
+  // (=coastlineSegs/coastlineRingsの中身が変わった)ので、part5.js farNodeYの海面クランプ
+  // キャッシュ(_seaNodeCache)を世代番号で無効化し、地形メッシュも低頻度で作り直す。
+  coastlineVersion++;   // part5.js の海判定キャッシュを無効化する
+  _seaMeshDirty = true;
 }
 // 1点(px,pz)が「海か」を判定する。海側ベクトル=進行方向の右手側=(-dz,dx)(OSMのcoastline
 // 規約=陸が左・海が右)。segsは「そのタイル近辺だけに絞ったリスト」を渡すこと(全件走査を
@@ -798,27 +800,36 @@ function isSeaPoint(px, pz, segs) {
   if (best === Infinity) return false;
   return dot >= 0;
 }
-// 【2026-08-13・IMPL_PROMPT_20260813_TERRAIN_YIELDS_TO_SEA_V2.md】DEMは水域の上に測定
+// 【2026-08-13・IMPL_PROMPT_20260813_SEA_CLAMP_IN_FARNODEY.md】DEMは水域の上に測定
 // されていない正の値を返すため、そのまま描くと海面が地形の下に隠れる(NY実測: 海面11.30
 // に対し地形が+0.6〜3)。海岸線から直接「海であり、かつ岸から十分離れている」ノードだけを
 // 海面下へ落とす。
 //
-// 【前回版(revert済み)の教訓】(1) 余裕を海面ポリゴンの矩形の縁から測っていたため、
-// 100m四方の矩形が連なっていても各矩形の縁からWATER_BED_INSET(40m)を引くと中央の20m帯
+// 【前々回版(TERRAIN_YIELDS_TO_WATER.md、revert済み)の教訓】余裕を海面ポリゴンの矩形の
+// 縁から測っていたため、100m四方の矩形が連なっていても各矩形の縁から40mを引くと中央の20m帯
 // しか残らず、ほぼ全ノードが除外されていた(lowered nodes=39という極端に小さい値の原因)。
-// 今回は海岸線そのものから距離を測る。(2) 当時のポリゴンは陸を36%巻き込んでいたため、
-// 下げた少数のノードが陸に当たり水没した。今回はポリゴンを一切経由せず、coastlineSegsから
-// 直接判定する(isSeaPointと同じ最寄り区間+右手側判定のロジックを流用)。
+// 加えて当時のポリゴンは陸を36%巻き込んでいたため、下げた少数のノードが陸に当たり水没した。
+// →今回は海岸線そのものから距離を測り、ポリゴンを一切経由せず、coastlineSegsから直接
+// 判定する(isSeaPointと同じ最寄り区間+右手側判定のロジックを流用)。
+//
+// 【前回版(TERRAIN_YIELDS_TO_SEA_V2.md、実装のみでdiscard)の教訓】標高データ(nearElev=
+// 543m間隔/wideElev=840m間隔)のノード自体を下げる方式では、下げたノードと陸のノードの間が
+// 543mかけて補間され、海の大半がその傾斜帯に入ってしまう(海判定=trueの地点で地形が
+// 海面より+5.71残っていた)。→今回は上書きする場所を、データ格子(543m)から描画格子
+// (FAR_STEP=200m、part5.js farNodeY)へ移す。標高データ自体は書き換えない(判定が誤っても
+// 元に戻せる)。SEA_BED_INSET(岸際を下げない余裕)も、200m格子基準で150mは広すぎたため
+// 60mへ縮めた。
 //
 // 岸際を下げない理由(実測): 地形格子は200m間隔なので、汀線の陸側ノードと海側ノードの間が
 // 線形補間になり、岸から200m以内は地形が海面から陸の高さへ滑らかに立ち上がる。ここを
-// 下げると汀線が最大200m内陸へ食い込む。触らないのが正しい(セル一辺を100→50mにしても
-// 残差が全く動かなかったことでこの解釈は確定済み)。
-const SEA_BED_INSET = 150;   // 海岸線からこの距離以内のノードは下げない(m)
+// 下げると汀線が内陸へ食い込む。触らないのが正しい(セル一辺を100→50mにしても残差が
+// 全く動かなかったことでこの解釈は確定済み)。
+const SEA_BED_INSET = 60;    // 海岸線からこの距離以内のノードは下げない(m)。200m格子では150mは広すぎた
 const SEA_BED_DROP  = 0.6;   // 海面(seaLevelY)からこれだけ下に置く
 const SEA_BED_FAR   = 3000;  // これより遠い区間は判定に使わない(COAST_DECIDE_MAXと同じ思想)
 // 海なら「下げるべき高さ」を、そうでなければnullを返す。川・池には一切関与しない
-// (川は地形にドレープする実装で実機合格済み。ここで扱うのは海だけ)。
+// (川は地形にドレープする実装で実機合格済み。ここで扱うのは海だけ)。part5.js farNodeYが
+// キャッシュ付きで呼ぶ(呼び出し元コメント参照)。
 function seaBedYAt(x, z) {
   if (!coastlineSegs || coastlineSegs.length === 0) return null; // 海岸線が無ければ判定しない
   for (const r of coastlineRings) if (pointInPolygon(x, z, r)) return null; // 島の内側は陸
@@ -838,43 +849,23 @@ function seaBedYAt(x, z) {
   if (Math.sqrt(best) < SEA_BED_INSET) return null; // 岸際は触らない
   return seaLevelY() - SEA_BED_DROP;
 }
-// 【2026-08-13・TERRAIN_YIELDS_TO_SEA_V2.md】海岸線が地形より後に届いた場合の回収経路。
-// 下げる方向にしか動かないので何度走らせても安全(waterBedのdirty-bbox方式と違い、対象を
-// 絞り込まず毎回全格子を舐める代わりに、NEARとWIDEを交互に1回ずつ処理して1回の負荷を
-// 抑える——coastlineSegs自体は都市単位でしか変わらないため頻度は低くてよい)。
-let _seaBedDirty = true;      // rebuildCoastlineChains()の末尾でtrueにする
-let _seaBedScanFrame = 0;
-let _seaBedTurn = 0;          // NEARとWIDEを交互に処理して1回の負荷を抑える
+// 【2026-08-13・SEA_CLAMP_IN_FARNODEY.md】part5.js farNodeYのキャッシュは遅延評価
+// (参照されて初めてseaBedYAtを呼ぶ)なので、放っておくと画面は古いまま。海岸線が更新される
+// たび(rebuildCoastlineChains末尾)に低頻度で1回だけ地形メッシュを作り直す。
+// 【前版(TERRAIN_YIELDS_TO_SEA_V2.md)からの置き換え】旧scanSeaBedは標高データを直接
+// 下げていたためNEAR/WIDEを交互に処理する2段構成だったが、今回はfarNodeY側のキャッシュを
+// 無効化するだけなのでupdateFarMesh(true)を1回呼ぶだけでよい(関数名は流用)。
+let _seaMeshDirty = true;      // rebuildCoastlineChainsの末尾でtrueにする
+let _seaMeshScanFrame = 0;
 function scanSeaBed() {
-  _seaBedScanFrame++;
-  if (_seaBedScanFrame % 180 !== 0) return;   // 3秒に1回程度
-  if (!_seaBedDirty) return;
+  _seaMeshScanFrame++;
+  if (_seaMeshScanFrame % 180 !== 0) return;   // 3秒に1回程度
+  if (!_seaMeshDirty) return;
+  _seaMeshDirty = false;
   const t0 = performance.now();
-  let n = 0, label;
-  if (_seaBedTurn === 0) {
-    label = 'NEAR';
-    n = _lowerGridToSeaBed(nearElev, nearCX, nearCZ, NEAR_W, NEAR_D, NEAR_SEGS, NEAR_SEGS1);
-  } else {
-    label = 'WIDE';
-    n = _lowerGridToSeaBed(wideElev, wideCX, wideCZ, WIDE_W, WIDE_D, WIDE_SEGS, WIDE_SEGS1);
-    _seaBedDirty = false;                     // NEAR→WIDEの2回で1周とみなす
-  }
-  _seaBedTurn = 1 - _seaBedTurn;
-  console.log('[seabed] ' + label + ' lowered=' + n + ' (' + (performance.now() - t0).toFixed(0) + 'ms)');
-  if (n > 0) updateFarMesh(true);             // 地形メッシュを新しい高さで作り直す
-}
-function _lowerGridToSeaBed(grid, cX, cZ, W, D, SEGS, SEGS1) {
-  if (!grid) return 0;
-  const stepX = W / SEGS, stepZ = D / SEGS;
-  const x0 = cX - W / 2, z0 = cZ - D / 2;
-  let n = 0;
-  for (let iz = 0; iz < SEGS1; iz++)
-    for (let ix = 0; ix < SEGS1; ix++) {
-      const k = iz * SEGS1 + ix;
-      const bed = seaBedYAt(x0 + ix * stepX, z0 + iz * stepZ);
-      if (bed !== null && bed < grid[k]) { grid[k] = bed; n++; }
-    }
-  return n;
+  updateFarMesh(true);
+  console.log('[seabed] mesh rebuilt (' + (performance.now() - t0).toFixed(0) + 'ms) segs=' +
+    (coastlineSegs ? coastlineSegs.length : 0));
 }
 // 【2026-08-12・COASTLINE_CANDIDATE_SET.md】「見た」印は、実際に判定まで
 // たどり着けた時だけ打つ(=候補が0件で早期returnしただけのタイルは保留扱いにし、後で

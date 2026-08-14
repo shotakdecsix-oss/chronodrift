@@ -52,12 +52,35 @@ const FAR_Y = -0.15;                  // メッシュ全体のyオフセット
 // 格子ノード(i,j)の高さ(メッシュ頂点とクエリの両方がこの1つの関数を使う)。
 // NEAR(プレイヤー追従の高解像度グリッド)があればそれを、無ければWIDE(広域低解像度)を、
 // どちらも無ければ0mを返す(terrainY内のsampleGridが既にこの優先順位で処理する)。
+// 【2026-08-13・IMPL_PROMPT_20260813_SEA_CLAMP_IN_FARNODEY.md】海の下の地形を海面下へ落とす。
+// 標高データは543m(NEAR)/840m(WIDE)間隔しかないため、データ格子のノード自体を下げても
+// 補間で海の大半が持ち上がってしまう(前版=TERRAIN_YIELDS_TO_SEA_V2.mdで実測: 海判定trueの
+// 地点で地形が海面より+5.71残っていた)。描画格子(FAR_STEP=200m)のノードで上書きすることで、
+// 汀線の分解能を2.7倍にする。farNodeYはメッシュ構築とgetGroundYの共通入口(このファイル
+// 冒頭のコメント「描画されるメッシュ表面=farSurfaceYが返す値、が厳密に成り立つ」参照)なので、
+// ここで上書きすれば見た目と当たり判定が構造的に一致する。標高データ(nearElev/wideElev)
+// そのものは書き換えない(判定が誤っても元に戻せる)。
+//
+// seaBedYAtは区間(coastlineSegs、数千本になりうる)を毎回全走査するため、ノードごとに
+// 結果をキャッシュする。海岸線が更新されるとcoastlineVersion(part4.js)が上がり、次に
+// 参照されたときだけ再計算される(全消しにすると海岸線バッチのたびに数千点を再計算する
+// ことになるため、世代番号だけ見て個別に無効化する)。
+const _seaNodeCache = new Map();   // key "i|j" -> { v: coastlineVersion, y: number|null }
 function farNodeY(i, j) {
   // terrainY はpart6.jsで定義される。このファイル(part5.js)の末尾で行う
   // 起動直後の初期化呼び出し(updateFarMesh(true))はpart6.js読み込み前に実行されるため、
   // 未定義の間は0m(平坦)を返す(ReferenceError回避。typeofは未宣言識別子でも例外を投げない)。
   if (typeof terrainY !== 'function') return 0;
-  return terrainY(i * FAR_STEP, j * FAR_STEP) || 0;
+  const base = terrainY(i * FAR_STEP, j * FAR_STEP) || 0;
+  if (typeof seaBedYAt !== 'function' || typeof coastlineVersion === 'undefined') return base;
+  const k = i + '|' + j;
+  let e = _seaNodeCache.get(k);
+  if (!e || e.v !== coastlineVersion) {
+    e = { v: coastlineVersion, y: seaBedYAt(i * FAR_STEP, j * FAR_STEP) };
+    if (_seaNodeCache.size > 40000) _seaNodeCache.clear(); // 移動し続けても際限なく増やさない
+    _seaNodeCache.set(k, e);
+  }
+  return (e.y !== null && e.y < base) ? e.y : base;
 }
 // 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER_v2.md 修正A-1】farNodeYの`|| 0`と同じ理由で、
 // 欠測を区別できるノードクエリを別途用意する(part4.jsの水面プロファイル計算専用)。
