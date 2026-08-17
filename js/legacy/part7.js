@@ -1200,6 +1200,14 @@ document.addEventListener('touchstart', e => {
 
 // touchmove: passive:false to prevent page scroll during gameplay
 document.addEventListener('touchmove', e => {
+  // 【2026-08-17】設定パネル(#perfCtrl)の中で始まったスワイプは、ここで止めずに
+  // ブラウザ本来のスクロールに任せる。従来は無条件にpreventDefault()していたため、
+  // #perfCtrl(max-height:80vh・overflow-y:auto)が指でスクロールできなかった。
+  // CSSのtouch-action:pan-yは、passive:falseのリスナーがpreventDefault()すると効かない。
+  // touchmoveのe.targetはtouchstart時の要素に固定されるため、パネル外で始まった視点ドラッグが
+  // 途中でパネル上を通過してもここには入らない(誤検知しない)。
+  // 環境音セクション追加でパネル高が80vhを超え、初めて顕在化した既存バグ。
+  if (e.target && e.target.closest && e.target.closest('#perfCtrl')) return;
   e.preventDefault();
   for (const t of e.changedTouches) {
     if (t.identifier === joyId) {
