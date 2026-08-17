@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>環境音プロトタイプ POP — ChronoDrift</title>
+<style>
+  :root{
+    --bg:#12101c; --panel:#1c1930; --line:#2e2a48; --fg:#f2eeff;
+    --dim:#9c93bd; --accent:#ff8ec7; --accent2:#7cdcff; --lime:#b6f36a; --sun:#ffd166;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:radial-gradient(120% 90% at 50% 0%, #241f3d 0%, var(--bg) 60%);
+    min-height:100vh; color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;
+    font-size:14px; line-height:1.6; padding:16px; max-width:680px; margin:0 auto;
+    -webkit-text-size-adjust:100%;
+  }
+  h1{font-size:17px; margin:0 0 4px; letter-spacing:.02em}
+  .sub{color:var(--dim); font-size:12px; margin-bottom:16px}
+
+  #startWrap{
+    position:fixed; inset:0; background:rgba(18,16,28,.97); z-index:50;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:24px; text-align:center;
+  }
+  #startBtn{
+    background:linear-gradient(135deg,var(--accent),#ff6fa8); color:#2a0a1c; border:0; border-radius:999px;
+    padding:18px 46px; font-size:17px; font-weight:800; cursor:pointer; font-family:inherit;
+    box-shadow:0 8px 28px rgba(255,142,199,.35);
+  }
+  #startBtn:active{transform:scale(.97)}
+  .note{color:var(--dim); font-size:12px; max-width:340px}
+
+  .panel{
+    background:var(--panel); border:1px solid var(--line); border-radius:16px;
+    padding:14px; margin-bottom:12px;
+  }
+  .panel h2{
+    font-size:12px; color:var(--dim); margin:0 0 12px; font-weight:700;
+    letter-spacing:.08em; text-transform:uppercase;
+  }
+  .row{margin-bottom:14px}
+  .row:last-child{margin-bottom:0}
+  .lab{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:5px}
+  .lab span:first-child{font-size:13px}
+  .val{font-variant-numeric:tabular-nums; color:var(--accent2); font-size:12px}
+
+  input[type=range]{width:100%; -webkit-appearance:none; appearance:none; background:transparent; height:24px; margin:0}
+  input[type=range]::-webkit-slider-runnable-track{height:5px; background:#332e50; border-radius:3px}
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; width:20px; height:20px; border-radius:50%;
+    background:var(--accent); margin-top:-8px; cursor:pointer; border:2px solid #fff;
+  }
+  input[type=range]::-moz-range-track{height:5px; background:#332e50; border-radius:3px}
+  input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:var(--accent);border:2px solid #fff;cursor:pointer}
+
+  .chips{display:flex; flex-wrap:wrap; gap:7px}
+  .chip{
+    background:#272242; border:1px solid var(--line); color:var(--fg);
+    border-radius:999px; padding:7px 13px; font-size:12.5px; cursor:pointer; font-family:inherit;
+  }
+  .chip:active{background:#332c55}
+  .chip.on{background:var(--accent); color:#2a0a1c; border-color:var(--accent); font-weight:700}
+
+  #keyBadge{
+    display:inline-block; background:#272242; border:1px solid var(--line);
+    border-radius:8px; padding:4px 10px; font-size:12px; color:var(--sun);
+    font-variant-numeric:tabular-nums;
+  }
+  #beat{display:flex; gap:5px; margin-top:10px}
+  #beat i{flex:1; height:5px; border-radius:3px; background:#332e50; transition:background .05s}
+  #beat i.on{background:var(--lime)}
+
+  table.mix{width:100%; border-collapse:collapse; font-size:12px}
+  table.mix td{padding:3px 0; color:var(--dim)}
+  table.mix td:last-child{text-align:right; font-variant-numeric:tabular-nums; color:var(--fg)}
+  .bar{display:inline-block; height:5px; border-radius:3px; background:var(--accent2); vertical-align:middle; margin-right:6px; min-width:1px}
+
+  footer{color:var(--dim); font-size:11.5px; margin-top:18px; padding-bottom:90px; line-height:1.8}
+  code{background:#272242; padding:1px 5px; border-radius:4px; font-size:11px}
+
+  /* 停止／再開ボタン（常時表示・画面下に固定） */
+  #stopBar{
+    position:fixed; left:0; right:0; bottom:0; z-index:40; display:none;
+    background:linear-gradient(180deg,rgba(18,16,28,0),rgba(18,16,28,.94) 40%);
+    padding:18px 16px 16px; text-align:center; pointer-events:none;
+  }
+  #stopBar.show{display:block}
+  #stopBtn{
+    pointer-events:auto; font-family:inherit; cursor:pointer;
+    background:#ff5f8a; color:#2a0712; border:0; border-radius:999px;
+    padding:14px 40px; font-size:16px; font-weight:800;
+    box-shadow:0 6px 24px rgba(255,95,138,.35);
+  }
+  #stopBtn.paused{background:var(--lime); color:#132a04; box-shadow:0 6px 24px rgba(182,243,106,.35)}
+  #stopBtn:active{transform:scale(.97)}
+</style>
+</head>
+<body>
+
+<div id="startWrap">
+  <h1 style="font-size:19px">環境音プロトタイプ <span style="color:var(--accent)">POP</span></h1>
+  <p class="note">現実の音を真似るのではなく、<br>世界の状態を「かわいい楽器」で鳴らす版です。<br>音声ファイルは一切使っていません。</p>
+  <button id="startBtn">▶ 音を開始</button>
+  <p class="note" style="font-size:11px">※ 歩くと音階が鳴ります。移動速度スライダーを上げてみてください。</p>
+</div>
+
+<h1>環境音プロトタイプ <span style="color:var(--accent)">POP</span></h1>
+<p class="sub">同じゲーム状態を、ペンタトニックの楽器で鳴らす版</p>
+
+<div class="panel">
+  <h2>プリセット</h2>
+  <div class="chips" id="presets"></div>
+</div>
+
+<div class="panel">
+  <h2>ゲーム状態 — 環境</h2>
+  <div class="row">
+    <div class="lab"><span>海までの距離</span><span class="val" id="v_sea"></span></div>
+    <input type="range" id="s_sea" min="0" max="2000" step="10" value="2000">
+  </div>
+  <div class="row">
+    <div class="lab"><span>樹木密度（森の中か）</span><span class="val" id="v_forest"></span></div>
+    <input type="range" id="s_forest" min="0" max="100" step="1" value="0">
+  </div>
+  <div class="row">
+    <div class="lab"><span>道路密度（市街地か）</span><span class="val" id="v_urban"></span></div>
+    <input type="range" id="s_urban" min="0" max="100" step="1" value="30">
+  </div>
+  <div class="row">
+    <div class="lab"><span>降水量</span><span class="val" id="v_rain"></span></div>
+    <input type="range" id="s_rain" min="0" max="10" step="0.2" value="0">
+  </div>
+  <div class="row">
+    <div class="lab"><span>時刻</span><span class="val" id="v_hour"></span></div>
+    <input type="range" id="s_hour" min="0" max="23.75" step="0.25" value="14">
+    <div style="margin-top:8px">現在のキー: <span id="keyBadge">—</span></div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>ゲーム状態 — プレイヤー</h2>
+  <div class="row">
+    <div class="lab"><span>移動速度</span><span class="val" id="v_speed"></span></div>
+    <input type="range" id="s_speed" min="0" max="20" step="0.5" value="0">
+  </div>
+  <div class="row">
+    <div class="lab" style="margin-bottom:7px"><span>足元の種別（＝足音の楽器）</span></div>
+    <div class="chips" id="surfaces"></div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>出力</h2>
+  <div class="row">
+    <div class="lab"><span>にぎやかさ</span><span class="val" id="v_dens"></span></div>
+    <input type="range" id="s_dens" min="0" max="100" step="1" value="70">
+  </div>
+  <div class="row">
+    <div class="lab"><span>テンポ</span><span class="val" id="v_bpm"></span></div>
+    <input type="range" id="s_bpm" min="60" max="132" step="1" value="92">
+  </div>
+  <div class="row">
+    <div class="lab"><span>マスター音量</span><span class="val" id="v_vol"></span></div>
+    <input type="range" id="s_vol" min="0" max="100" step="1" value="70">
+    <div id="beat"><i></i><i></i><i></i><i></i></div>
+  </div>
+  <table class="mix" id="mix"></table>
+</div>
+
+<footer>
+  すべて <code>AudioContext</code> による合成音です。マリンバ／ベル／カリンバ等は
+  倍音の比率と減衰時間を変えた正弦波の重ね合わせ、残響は手続き生成したインパルス応答を
+  <code>ConvolverNode</code> に通したもの。旋律は時刻から決まるキーのペンタトニック上を
+  ランダムウォークします。<br>
+  ダウンロードする音声データは 0 バイトです。
+</footer>
+
+<div id="stopBar"><button id="stopBtn">■ 停止</button></div>
+
+<script>
+(function(){
+'use strict';
+
+/* ============================================================
+   状態
+   ============================================================ */
+const st = {
+  seaDist:2000, forest:0, urban:30, rain:0, hour:14,
+  speed:0, surface:'grass', dens:70, bpm:92, vol:70,
+};
+
+let ctx=null, N=null, running=false;
+
+/* ============================================================
+   楽器の定義
+   倍音を [周波数比, 音量, 減衰の速さ] で表す。
+   比が整数から外れているほど「金属的・ベルらしい」音になる。
+   ============================================================ */
+const INST = {
+  marimba: { partials:[[1,1,1],[3.9,0.32,0.45],[9.2,0.10,0.25]], dec:0.55, type:'sine',     rev:0.28, dly:0.10 },
+  bell:    { partials:[[1,1,1],[2.76,0.42,0.85],[5.40,0.22,0.6],[8.93,0.10,0.4]], dec:2.4, type:'sine', rev:0.55, dly:0.35 },
+  glock:   { partials:[[1,1,1],[3.01,0.5,0.7],[6.2,0.2,0.45]], dec:1.1, type:'sine',        rev:0.42, dly:0.30 },
+  kalimba: { partials:[[1,1,1],[2.02,0.38,0.65],[3.0,0.14,0.35]], dec:0.95, type:'triangle',rev:0.30, dly:0.18 },
+  woodblk: { partials:[[1,1,1],[3.1,0.55,0.3],[5.7,0.2,0.2]], dec:0.16, type:'sine',        rev:0.20, dly:0.06 },
+  pluck:   { partials:[[1,1,1],[2,0.45,0.5],[3,0.22,0.35],[4,0.1,0.25]], dec:0.30, type:'triangle', rev:0.16, dly:0.12 },
+  bass:    { partials:[[1,1,1],[2,0.22,0.5]], dec:0.42, type:'sine',                        rev:0.10, dly:0 },
+  pad:     { partials:[[1,1,1],[2,0.30,1],[3,0.12,1],[5,0.05,1]], dec:0, type:'sine',       rev:0.60, dly:0 },
+};
+
+const mtof = m => 440 * Math.pow(2, (m-69)/12);
+
+/* 1音を鳴らす（padはsustain、それ以外は打楽器的な減衰） */
+function note(midi, instName, when, amp, decScale){
+  const ac=N.ac, I=INST[instName], f0=mtof(midi);
+  const dec = I.dec * (decScale||1);
+  const out = ac.createGain(); out.gain.value = amp;
+  out.connect(N.dry);
+  if (I.rev) { const s=ac.createGain(); s.gain.value=I.rev; out.connect(s); s.connect(N.revIn); }
+  if (I.dly) { const s=ac.createGain(); s.gain.value=I.dly; out.connect(s); s.connect(N.dlyIn); }
+
+  I.partials.forEach(([ratio, pAmp, pDec])=>{
+    const o = ac.createOscillator();
+    o.type = I.type;
+    o.frequency.value = f0*ratio;
+    // わずかなデチューンで厚みを出す（完全に同位相だと硬く聞こえる）
+    o.detune.value = (Math.random()-0.5)*6;
+    const g = ac.createGain();
+    const d = dec*pDec;
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.exponentialRampToValueAtTime(Math.max(pAmp,0.0002), when+0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, when+d);
+    o.connect(g); g.connect(out);
+    o.start(when); o.stop(when+d+0.05);
+  });
+  // マレットの当たる瞬間の「コッ」（ごく短いノイズ）
+  if (instName!=='pad' && instName!=='bass'){
+    const s=ac.createBufferSource(); s.buffer=N.noise;
+    const bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=f0*3.2; bp.Q.value=1.4;
+    const g=ac.createGain();
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.exponentialRampToValueAtTime(0.22, when+0.003);
+    g.gain.exponentialRampToValueAtTime(0.0001, when+0.03);
+    s.connect(bp); bp.connect(g); g.connect(out);
+    s.start(when, Math.random()*1.5); s.stop(when+0.05);
+  }
+}
+
+/* パッド（持続音）: コードが変わるたびに前のを消してこれを鳴らす */
+let padVoices=[];
+function padChord(midis, when, amp){
+  const ac=N.ac;
+  padVoices.forEach(v=>{ try{ v.g.gain.cancelScheduledValues(when);
+    v.g.gain.setTargetAtTime(0.0001, when, 0.5); v.o.stop(when+3); }catch(e){} });
+  padVoices = [];
+  midis.forEach(m=>{
+    const f=mtof(m);
+    INST.pad.partials.forEach(([r,a])=>{
+      const o=ac.createOscillator(); o.type='sine'; o.frequency.value=f*r;
+      o.detune.value=(Math.random()-0.5)*8;
+      const g=ac.createGain();
+      g.gain.setValueAtTime(0.0001, when);
+      g.gain.setTargetAtTime(amp*a, when, 1.2);   // ゆっくり立ち上がる
+      o.connect(g); g.connect(N.padBus);
+      o.start(when);
+      padVoices.push({o,g});
+    });
+  });
+}
+
+/* ============================================================
+   時刻 → キー / スケール
+   ============================================================ */
+const MAJ=[0,2,4,7,9], MIN=[0,3,5,7,10];
+function keyOf(h){
+  if (h>=5 && h<9)   return {root:62, sc:MAJ, name:'D メジャーペンタ（朝）', bright:1.0};
+  if (h>=9 && h<16)  return {root:60, sc:MAJ, name:'C メジャーペンタ（昼）', bright:0.9};
+  if (h>=16 && h<19) return {root:57, sc:MAJ, name:'A メジャーペンタ（夕）', bright:0.7};
+  if (h>=19 && h<22) return {root:53, sc:MIN, name:'F マイナーペンタ（宵）', bright:0.5};
+  return {root:52, sc:MIN, name:'E マイナーペンタ（夜）', bright:0.35};
+}
+/* 音階の n 番目（オクターブをまたぐ） */
+function deg(key, n){
+  const L=key.sc.length;
+  const oct=Math.floor(n/L), i=((n%L)+L)%L;
+  return key.root + key.sc[i] + oct*12;
+}
+const PROG_MAJ=[0,9,5,7], PROG_MIN=[0,5,3,7];  // I - vi - IV - V 相当
+
+/* ============================================================
+   グラフ構築
+   ============================================================ */
+function makeIR(ac, sec, decay){
+  const len=ac.sampleRate*sec, b=ac.createBuffer(2,len,ac.sampleRate);
+  for(let c=0;c<2;c++){
+    const d=b.getChannelData(c);
+    for(let i=0;i<len;i++){
+      d[i]=(Math.random()*2-1)*Math.pow(1-i/len, decay);
+    }
+  }
+  return b;
+}
+function build(){
+  const ac=ctx;
+  const master=ac.createGain(); master.gain.value=0;
+  const comp=ac.createDynamicsCompressor();
+  comp.threshold.value=-16; comp.ratio.value=3.5; comp.attack.value=0.006; comp.release.value=0.22;
+  const analyser=ac.createAnalyser(); analyser.fftSize=512;
+  master.connect(comp); comp.connect(analyser); analyser.connect(ac.destination);
+
+  const dry=ac.createGain(); dry.gain.value=0.85; dry.connect(master);
+
+  // リバーブ（インパルス応答も手続き生成）
+  const revIn=ac.createGain(); revIn.gain.value=1;
+  const conv=ac.createConvolver(); conv.buffer=makeIR(ac,2.4,2.6);
+  const revOut=ac.createGain(); revOut.gain.value=0.55;
+  const revLP=ac.createBiquadFilter(); revLP.type='lowpass'; revLP.frequency.value=5200;
+  revIn.connect(conv); conv.connect(revLP); revLP.connect(revOut); revOut.connect(master);
+
+  // ディレイ（付点8分のフィードバック）
+  const dlyIn=ac.createGain(); dlyIn.gain.value=1;
+  const dly=ac.createDelay(1.5); dly.delayTime.value=0.42;
+  const fb=ac.createGain(); fb.gain.value=0.34;
+  const dlyLP=ac.createBiquadFilter(); dlyLP.type='lowpass'; dlyLP.frequency.value=3200;
+  const dlyOut=ac.createGain(); dlyOut.gain.value=0.42;
+  dlyIn.connect(dly); dly.connect(dlyLP); dlyLP.connect(fb); fb.connect(dly);
+  dlyLP.connect(dlyOut); dlyOut.connect(master);
+  dlyLP.connect(revIn);
+
+  // パッド専用バス（フィルタで明るさを時刻に連動）
+  const padBus=ac.createGain(); padBus.gain.value=1;
+  const padLP=ac.createBiquadFilter(); padLP.type='lowpass'; padLP.frequency.value=1800; padLP.Q.value=0.7;
+  padBus.connect(padLP); padLP.connect(dry);
+  const padSend=ac.createGain(); padSend.gain.value=0.7; padLP.connect(padSend); padSend.connect(revIn);
+
+  // 雨用のやわらかいノイズ（現実音ではなく「サーッ」という下地だけ）
+  const rainG=ac.createGain(); rainG.gain.value=0; rainG.connect(master);
+  const rainBP=ac.createBiquadFilter(); rainBP.type='bandpass'; rainBP.frequency.value=3000; rainBP.Q.value=0.4;
+  rainBP.connect(rainG);
+
+  const noise=(function(){
+    const len=ac.sampleRate*2, b=ac.createBuffer(1,len,ac.sampleRate), d=b.getChannelData(0);
+    for(let i=0;i<len;i++) d[i]=Math.random()*2-1;
+    return b;
+  })();
+  const rs=ac.createBufferSource(); rs.buffer=noise; rs.loop=true; rs.connect(rainBP); rs.start();
+
+  N={ac,master,analyser,dry,revIn,dlyIn,dly,padBus,padLP,rainG,noise};
+  master.gain.setTargetAtTime(st.vol/100, ac.currentTime, 0.4);
+}
+
+/* ============================================================
+   ゲーム状態 → 各パートの「濃さ」
+   ============================================================ */
+function mixLevels(){
+  const sea    = Math.max(0, 1-Math.pow(st.seaDist/2000, 0.55));
+  const forest = st.forest/100;
+  const urban  = st.urban/100;
+  const rain   = Math.min(1, st.rain/8);
+  const h=st.hour;
+  const trafficTime = 0.2 + 0.8*Math.exp(-Math.pow((h-8.5)/2.8,2)) + 0.7*Math.exp(-Math.pow((h-18)/3,2));
+  const birdTime    = 1.4*Math.exp(-Math.pow((h-5.5)/1.5,2)) + 0.5*Math.exp(-Math.pow((h-17)/2,2));
+  const night = (h<5 || h>19.5) ? 1 : 0;
+  return {
+    seaBell:  sea*0.95,
+    marimba:  forest*0.95,
+    pluck:    urban*Math.min(1.5,trafficTime)*0.8,
+    bassP:    urban*Math.min(1.4,trafficTime)*0.7,
+    rainG:    rain,
+    bird:     forest*Math.min(1.4,birdTime)*(1-rain),
+    night:    night*(1-rain),
+  };
+}
+
+/* ============================================================
+   スケジューラ（16分音符グリッドの先読み方式）
+   ============================================================ */
+let step=0, nextTime=0;
+const LOOKAHEAD=0.12;
+let melodyIdx=4;
+
+function schedule(){
+  if (!running) return;
+  const ac=N.ac;
+  const spb = 60/st.bpm;      // 1拍
+  const s16 = spb/4;          // 16分
+  const D = st.dens/100;
+  const key = keyOf(st.hour);
+  const m = mixLevels();
+
+  while (nextTime < ac.currentTime + LOOKAHEAD){
+    const t = nextTime;
+    const b16 = step % 16;        // 小節内の16分位置
+    const bar = Math.floor(step/16);
+
+    // --- パッド: 1小節ごとにコードチェンジ ---
+    if (b16===0){
+      const prog = (key.sc===MAJ?PROG_MAJ:PROG_MIN);
+      const r = key.root - 12 + prog[bar%4];
+      const third = key.sc===MAJ ? 4 : 3;
+      padChord([r, r+7, r+12+third], t, 0.055*(0.5+0.5*D));
+      N.padLP.frequency.setTargetAtTime(700+2600*key.bright, t, 1.5);
+    }
+
+    // --- ベース: 市街地が濃いほどポンポン跳ねる ---
+    if (m.bassP>0.05 && (b16===0 || b16===6 || b16===10)){
+      if (Math.random() < m.bassP*D*0.9){
+        const prog=(key.sc===MAJ?PROG_MAJ:PROG_MIN);
+        note(key.root-24+prog[bar%4], 'bass', t, 0.20*m.bassP, 1);
+      }
+    }
+
+    // --- 市街地: 軽快なプラックの刻み ---
+    if (m.pluck>0.05 && b16%2===0){
+      if (Math.random() < m.pluck*D*0.55){
+        melodyIdx += (Math.random()<0.5?1:-1)*(Math.random()<0.75?1:2);
+        melodyIdx = Math.max(0, Math.min(12, melodyIdx));
+        note(deg(key, melodyIdx), 'pluck', t, 0.14*m.pluck, 1);
+      }
+    }
+
+    // --- 森: マリンバのペンタトニック ---
+    if (m.marimba>0.05 && b16%2===0){
+      if (Math.random() < m.marimba*D*0.42){
+        melodyIdx += (Math.random()<0.5?1:-1)*(Math.random()<0.8?1:2);
+        melodyIdx = Math.max(0, Math.min(11, melodyIdx));
+        note(deg(key, melodyIdx), 'marimba', t, 0.16*m.marimba, 1);
+        // ときどきハモる
+        if (Math.random()<0.25) note(deg(key, melodyIdx+2), 'marimba', t+0.012, 0.09*m.marimba, 1);
+      }
+    }
+
+    // --- 海: 高音のベルがゆっくり漂う ---
+    if (m.seaBell>0.05 && b16%8===0){
+      if (Math.random() < m.seaBell*D*0.75){
+        const n = 10 + (Math.random()*6|0);
+        note(deg(key, n), 'bell', t, 0.11*m.seaBell, 1);
+      }
+    }
+
+    // --- 雨: グロッケンの水滴 ---
+    if (m.rainG>0.05){
+      if (Math.random() < m.rainG*D*0.30){
+        note(deg(key, 8+(Math.random()*8|0)), 'glock', t, 0.055*m.rainG, 0.8);
+      }
+    }
+
+    // --- 鳥: 音階に乗った3〜4音のモチーフ ---
+    if (m.bird>0.05 && b16%4===0){
+      if (Math.random() < m.bird*D*0.16){
+        let n = 12+(Math.random()*4|0);
+        const cnt = 3+(Math.random()*2|0);
+        for(let i=0;i<cnt;i++){
+          note(deg(key,n), 'glock', t+i*0.075, 0.075*m.bird, 0.5);
+          n += (Math.random()<0.6?1:-1);
+        }
+      }
+    }
+
+    // --- 夜: 低くやわらかい心音のような脈 ---
+    if (m.night>0.05 && b16===0){
+      note(key.root-12, 'kalimba', t, 0.10*m.night*D, 1.6);
+    }
+
+    // ビート表示
+    if (b16%4===0){
+      const idx=(b16/4)|0;
+      setTimeout(()=>{
+        const el=document.querySelectorAll('#beat i');
+        el.forEach((e,i)=>e.classList.toggle('on', i===idx));
+      }, Math.max(0,(t-ac.currentTime)*1000));
+    }
+
+    nextTime += s16;
+    step++;
+  }
+}
+
+/* ============================================================
+   足音＝音階（歩くとメロディになる）
+   ============================================================ */
+const SURF = {
+  grass:   {inst:'kalimba', n:'草地',       amp:0.20, dec:1.0},
+  asphalt: {inst:'woodblk', n:'アスファルト',amp:0.24, dec:1.0},
+  gravel:  {inst:'marimba', n:'砂利',       amp:0.18, dec:0.55},
+  wood:    {inst:'woodblk', n:'木道',       amp:0.30, dec:2.2},
+  stone:   {inst:'glock',   n:'石畳',       amp:0.15, dec:0.9},
+};
+let footIdx=0, footDir=1;
+function footstep(){
+  const key=keyOf(st.hour), cfg=SURF[st.surface];
+  // 音階を上り下りしながら歩く。端まで来たら折り返す。
+  footIdx += footDir;
+  if (footIdx>7){ footIdx=7; footDir=-1; }
+  if (footIdx<0){ footIdx=0; footDir=1; }
+  if (Math.random()<0.18) footDir*=-1;      // ときどき気まぐれに反転
+  note(deg(key, footIdx), cfg.inst, N.ac.currentTime+0.005, cfg.amp, cfg.dec);
+}
+
+/* ============================================================
+   毎フレーム
+   ============================================================ */
+let stepAcc=0, lastT=0;
+function tick(now){
+  requestAnimationFrame(tick);
+  if (!running) return;
+  const dt=Math.min(0.1,(now-lastT)/1000||0); lastT=now;
+
+  schedule();
+
+  if (st.speed>0.2){
+    const mps=st.speed/3.6, stride= st.speed>8?1.35:0.78;
+    stepAcc += (mps/stride)*dt;
+    while (stepAcc>=1){ stepAcc-=1; footstep(); }
+  } else stepAcc=0;
+
+  const m=mixLevels();
+  N.rainG.gain.setTargetAtTime(m.rainG*0.045, N.ac.currentTime, 0.4);
+  N.master.gain.setTargetAtTime(st.vol/100, N.ac.currentTime, 0.2);
+  drawMix(m);
+}
+
+/* ============================================================
+   UI
+   ============================================================ */
+const PRESETS=[
+  {n:'海岸（平塚）', s:{seaDist:60,  forest:5,  urban:25, rain:0, hour:15, speed:4, surface:'gravel'}},
+  {n:'大山の森',     s:{seaDist:2000,forest:95, urban:2,  rain:0, hour:6,  speed:4, surface:'grass'}},
+  {n:'市街地',       s:{seaDist:2000,forest:8,  urban:95, rain:0, hour:8.5,speed:5, surface:'asphalt'}},
+  {n:'雨の街',       s:{seaDist:2000,forest:10, urban:80, rain:6, hour:17, speed:5, surface:'asphalt'}},
+  {n:'夜の田舎道',   s:{seaDist:2000,forest:55, urban:8,  rain:0, hour:22, speed:3.5,surface:'grass'}},
+  {n:'江戸の宿場',   s:{seaDist:2000,forest:30, urban:45, rain:0, hour:17, speed:4, surface:'stone'}},
+  {n:'静止',         s:{speed:0}},
+];
+
+function fmt(){
+  const g=id=>document.getElementById(id);
+  g('v_sea').textContent    = st.seaDist>=2000?'内陸（海なし）':st.seaDist+' m';
+  g('v_forest').textContent = st.forest+' %';
+  g('v_urban').textContent  = st.urban+' %';
+  g('v_rain').textContent   = st.rain==0?'晴れ':st.rain.toFixed(1)+' mm/h';
+  const hh=Math.floor(st.hour), mm=Math.round((st.hour-hh)*60);
+  g('v_hour').textContent   = String(hh).padStart(2,'0')+':'+String(mm).padStart(2,'0');
+  g('v_speed').textContent  = st.speed==0?'停止':st.speed.toFixed(1)+' km/h';
+  g('v_dens').textContent   = st.dens+' %';
+  g('v_bpm').textContent    = st.bpm+' BPM';
+  g('v_vol').textContent    = st.vol+' %';
+  g('keyBadge').textContent = keyOf(st.hour).name;
+}
+
+const MIXROWS=[['seaBell','海のベル'],['marimba','森のマリンバ'],['pluck','街のプラック'],
+               ['bassP','ベース'],['rainG','雨のグロッケン'],['bird','鳥'],['night','夜の脈']];
+function drawMix(m){
+  document.getElementById('mix').innerHTML = MIXROWS.map(([k,l])=>{
+    const v=m[k]||0;
+    return '<tr><td>'+l+'</td><td><span class="bar" style="width:'+Math.round(v*90)+'px"></span>'+v.toFixed(2)+'</td></tr>';
+  }).join('');
+}
+
+function bindSlider(id,key){
+  const el=document.getElementById(id);
+  el.addEventListener('input',()=>{ st[key]=parseFloat(el.value); fmt(); });
+}
+function syncUI(){
+  const g=id=>document.getElementById(id);
+  g('s_sea').value=st.seaDist; g('s_forest').value=st.forest; g('s_urban').value=st.urban;
+  g('s_rain').value=st.rain; g('s_hour').value=st.hour; g('s_speed').value=st.speed;
+  g('s_dens').value=st.dens; g('s_bpm').value=st.bpm; g('s_vol').value=st.vol;
+  [...document.querySelectorAll('#surfaces .chip')].forEach(c=>c.classList.toggle('on', c.dataset.id===st.surface));
+  fmt();
+}
+
+const pEl=document.getElementById('presets');
+PRESETS.forEach(p=>{
+  const b=document.createElement('button');
+  b.className='chip'; b.textContent=p.n;
+  b.addEventListener('click',()=>{
+    Object.assign(st,p.s);
+    [...pEl.children].forEach(c=>c.classList.remove('on'));
+    b.classList.add('on'); syncUI();
+  });
+  pEl.appendChild(b);
+});
+const sEl=document.getElementById('surfaces');
+Object.keys(SURF).forEach(id=>{
+  const b=document.createElement('button');
+  b.className='chip'+(id===st.surface?' on':''); b.textContent=SURF[id].n; b.dataset.id=id;
+  b.addEventListener('click',()=>{
+    st.surface=id;
+    [...sEl.children].forEach(c=>c.classList.remove('on'));
+    b.classList.add('on');
+    if (running && st.speed<0.2) footstep();
+  });
+  sEl.appendChild(b);
+});
+
+['s_sea:seaDist','s_forest:forest','s_urban:urban','s_rain:rain','s_hour:hour',
+ 's_speed:speed','s_dens:dens','s_bpm:bpm','s_vol:vol'].forEach(x=>{
+  const [id,key]=x.split(':'); bindSlider(id,key);
+});
+fmt();
+
+function start(){
+  if (running) return;
+  ctx=new (window.AudioContext||window.webkitAudioContext)();
+  if (ctx.state==='suspended') ctx.resume();
+  build();
+  running=true;
+  nextTime=ctx.currentTime+0.1; step=0;
+  document.getElementById('startWrap').style.display='none';
+  document.getElementById('stopBar').classList.add('show');
+  lastT=performance.now();
+  requestAnimationFrame(tick);
+}
+const sb=document.getElementById('startBtn');
+sb.addEventListener('click',start);
+sb.addEventListener('touchend',function(e){e.preventDefault();start();},{passive:false});
+
+/* 停止／再開: AudioContext を suspend すると鳴っている全部が即座に凍結する */
+let paused=false;
+function togglePause(){
+  if (!ctx) return;
+  const btn=document.getElementById('stopBtn');
+  if (paused){
+    ctx.resume();
+    paused=false; running=true;
+    lastT=performance.now();
+    nextTime=ctx.currentTime+0.1;   // 再開時にスケジュールが溢れないよう巻き直す
+    btn.textContent='■ 停止'; btn.classList.remove('paused');
+  } else {
+    running=false;
+    ctx.suspend();
+    paused=true;
+    document.querySelectorAll('#beat i').forEach(e=>e.classList.remove('on'));
+    btn.textContent='▶ 再開'; btn.classList.add('paused');
+  }
+}
+const stb=document.getElementById('stopBtn');
+stb.addEventListener('click',togglePause);
+stb.addEventListener('touchend',function(e){e.preventDefault();togglePause();},{passive:false});
+window.addEventListener('keydown',function(e){
+  if (e.code==='Space' && ctx){ e.preventDefault(); togglePause(); }
+});
+document.addEventListener('visibilitychange',function(){
+  if (document.hidden && ctx && !paused) togglePause();
+});
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>環境音プロトタイプ — ChronoDrift</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --line:#262d38; --fg:#e6edf3;
+    --dim:#8b949e; --accent:#4ea1ff; --warm:#ffb454; --green:#5ad18a;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;
+    font-size:14px; line-height:1.6; padding:16px; max-width:680px; margin:0 auto;
+    -webkit-text-size-adjust:100%;
+  }
+  h1{font-size:17px; margin:0 0 4px; letter-spacing:.02em}
+  .sub{color:var(--dim); font-size:12px; margin-bottom:16px}
+
+  #startWrap{
+    position:fixed; inset:0; background:rgba(14,17,22,.97); z-index:50;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:24px; text-align:center;
+  }
+  #startBtn{
+    background:var(--accent); color:#06121f; border:0; border-radius:12px;
+    padding:18px 44px; font-size:17px; font-weight:700; cursor:pointer;
+    font-family:inherit;
+  }
+  #startBtn:active{transform:scale(.97)}
+  .note{color:var(--dim); font-size:12px; max-width:340px}
+
+  .panel{
+    background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:14px; margin-bottom:12px;
+  }
+  .panel h2{
+    font-size:12px; color:var(--dim); margin:0 0 12px; font-weight:600;
+    letter-spacing:.08em; text-transform:uppercase;
+  }
+  .row{margin-bottom:14px}
+  .row:last-child{margin-bottom:0}
+  .lab{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:5px}
+  .lab span:first-child{font-size:13px}
+  .val{font-variant-numeric:tabular-nums; color:var(--accent); font-size:12px}
+
+  input[type=range]{
+    width:100%; -webkit-appearance:none; appearance:none; background:transparent; height:24px; margin:0;
+  }
+  input[type=range]::-webkit-slider-runnable-track{height:4px; background:#2b3542; border-radius:2px}
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; width:20px; height:20px; border-radius:50%;
+    background:var(--accent); margin-top:-8px; cursor:pointer; border:0;
+  }
+  input[type=range]::-moz-range-track{height:4px; background:#2b3542; border-radius:2px}
+  input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:var(--accent);border:0;cursor:pointer}
+
+  .chips{display:flex; flex-wrap:wrap; gap:7px}
+  .chip{
+    background:#1e2531; border:1px solid var(--line); color:var(--fg);
+    border-radius:999px; padding:7px 13px; font-size:12.5px; cursor:pointer;
+    font-family:inherit;
+  }
+  .chip:active{background:#2a3341}
+  .chip.on{background:var(--accent); color:#06121f; border-color:var(--accent); font-weight:600}
+
+  #meterWrap{height:6px; background:#2b3542; border-radius:3px; overflow:hidden; margin-top:2px}
+  #meter{height:100%; width:0%; background:linear-gradient(90deg,var(--green),var(--warm)); transition:width .06s linear}
+
+  table.mix{width:100%; border-collapse:collapse; font-size:12px}
+  table.mix td{padding:3px 0; color:var(--dim)}
+  table.mix td:last-child{text-align:right; font-variant-numeric:tabular-nums; color:var(--fg)}
+  .bar{display:inline-block; height:5px; border-radius:3px; background:var(--accent); vertical-align:middle; margin-right:6px; min-width:1px}
+
+  footer{color:var(--dim); font-size:11.5px; margin-top:18px; padding-bottom:90px; line-height:1.8}
+  code{background:#1e2531; padding:1px 5px; border-radius:4px; font-size:11px}
+
+  /* 停止／再開ボタン（常時表示・画面下に固定） */
+  #stopBar{
+    position:fixed; left:0; right:0; bottom:0; z-index:40; display:none;
+    background:linear-gradient(180deg,rgba(14,17,22,0),rgba(14,17,22,.94) 40%);
+    padding:18px 16px 16px; text-align:center; pointer-events:none;
+  }
+  #stopBar.show{display:block}
+  #stopBtn{
+    pointer-events:auto; font-family:inherit; cursor:pointer;
+    background:#ff5f56; color:#2a0705; border:0; border-radius:999px;
+    padding:14px 40px; font-size:16px; font-weight:800;
+    box-shadow:0 6px 24px rgba(255,95,86,.35);
+  }
+  #stopBtn.paused{background:var(--green); color:#04210f; box-shadow:0 6px 24px rgba(90,209,138,.35)}
+  #stopBtn:active{transform:scale(.97)}
+</style>
+</head>
+<body>
+
+<div id="startWrap">
+  <h1 style="font-size:19px">環境音プロトタイプ</h1>
+  <p class="note">音声ファイルを一切使わず、すべてブラウザ内で合成しています。<br>音量にご注意ください（イヤホン推奨）。</p>
+  <button id="startBtn">▶ 音を開始</button>
+  <p class="note" style="font-size:11px">※ スマホは「最初のタップ」がないと音を出せない仕様です。このボタンがその役割です。</p>
+</div>
+
+<h1>環境音プロトタイプ</h1>
+<p class="sub">ゲーム内の状態（海までの距離・森・道路密度・天気・時刻）から音を合成するデモ</p>
+
+<div class="panel">
+  <h2>プリセット</h2>
+  <div class="chips" id="presets"></div>
+</div>
+
+<div class="panel">
+  <h2>ゲーム状態 — 環境</h2>
+  <div class="row">
+    <div class="lab"><span>海までの距離</span><span class="val" id="v_sea"></span></div>
+    <input type="range" id="s_sea" min="0" max="2000" step="10" value="2000">
+  </div>
+  <div class="row">
+    <div class="lab"><span>樹木密度（森の中か）</span><span class="val" id="v_forest"></span></div>
+    <input type="range" id="s_forest" min="0" max="100" step="1" value="0">
+  </div>
+  <div class="row">
+    <div class="lab"><span>道路密度（市街地か）</span><span class="val" id="v_urban"></span></div>
+    <input type="range" id="s_urban" min="0" max="100" step="1" value="30">
+  </div>
+  <div class="row">
+    <div class="lab"><span>降水量</span><span class="val" id="v_rain"></span></div>
+    <input type="range" id="s_rain" min="0" max="10" step="0.2" value="0">
+  </div>
+  <div class="row">
+    <div class="lab"><span>時刻</span><span class="val" id="v_hour"></span></div>
+    <input type="range" id="s_hour" min="0" max="23.75" step="0.25" value="14">
+  </div>
+</div>
+
+<div class="panel">
+  <h2>ゲーム状態 — プレイヤー</h2>
+  <div class="row">
+    <div class="lab"><span>移動速度</span><span class="val" id="v_speed"></span></div>
+    <input type="range" id="s_speed" min="0" max="20" step="0.5" value="0">
+  </div>
+  <div class="row">
+    <div class="lab" style="margin-bottom:7px"><span>足元の種別</span></div>
+    <div class="chips" id="surfaces"></div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>出力</h2>
+  <div class="row">
+    <div class="lab"><span>マスター音量</span><span class="val" id="v_vol"></span></div>
+    <input type="range" id="s_vol" min="0" max="100" step="1" value="70">
+    <div id="meterWrap"><div id="meter"></div></div>
+  </div>
+  <table class="mix" id="mix"></table>
+</div>
+
+<footer>
+  すべて <code>AudioContext</code> による合成音です。波＝ノイズ＋ローパス＋超低速LFO、
+  雨＝ハイパス／バンドパスの二層、交通＝ブラウンノイズの低域＋通過音のスケジューリング、
+  足音＝ノイズバーストのエンベロープ（地表で係数を変更）、鳥・虫＝時刻に連動した確率的トリガ。<br>
+  ダウンロードする音声データは 0 バイトです。
+</footer>
+
+<div id="stopBar"><button id="stopBtn">■ 停止</button></div>
+
+<script>
+(function(){
+'use strict';
+
+/* ============================================================
+   状態（ゲーム側から流し込む想定の値）
+   ============================================================ */
+const st = {
+  seaDist: 2000,   // m
+  forest: 0,       // 0-100
+  urban: 30,       // 0-100
+  rain: 0,         // mm/h
+  hour: 14,        // 0-24
+  speed: 0,        // km/h
+  surface: 'asphalt',
+  vol: 70,
+};
+
+let ctx = null, nodes = null, running = false;
+
+/* ============================================================
+   ノイズバッファ生成（起動時に一度だけ）
+   ============================================================ */
+function makeNoise(ac, kind, seconds){
+  const len = ac.sampleRate * seconds;
+  const buf = ac.createBuffer(1, len, ac.sampleRate);
+  const d = buf.getChannelData(0);
+  if (kind === 'white'){
+    for (let i=0;i<len;i++) d[i] = Math.random()*2-1;
+  } else if (kind === 'brown'){
+    let last = 0;
+    for (let i=0;i<len;i++){
+      const w = Math.random()*2-1;
+      last = (last + 0.02*w) / 1.02;
+      d[i] = last * 3.5;
+    }
+  } else { // pink（簡易 Voss-McCartney 風）
+    let b0=0,b1=0,b2=0;
+    for (let i=0;i<len;i++){
+      const w = Math.random()*2-1;
+      b0 = 0.99765*b0 + w*0.0990460;
+      b1 = 0.96300*b1 + w*0.2965164;
+      b2 = 0.57000*b2 + w*1.0526913;
+      d[i] = (b0+b1+b2+w*0.1848) * 0.25;
+    }
+  }
+  return buf;
+}
+
+function loopSource(ac, buf, dest){
+  const s = ac.createBufferSource();
+  s.buffer = buf; s.loop = true;
+  s.connect(dest); s.start();
+  return s;
+}
+
+/* LFO: 任意のAudioParamに「基準値 ± depth」の超低速な揺れを足す */
+function lfo(ac, freq, depth, param){
+  const o = ac.createOscillator();
+  const g = ac.createGain();
+  o.frequency.value = freq;
+  g.gain.value = depth;
+  o.connect(g); g.connect(param);
+  o.start();
+  return o;
+}
+
+/* ============================================================
+   音声グラフ構築
+   ============================================================ */
+function build(){
+  const ac = ctx;
+  const white = makeNoise(ac,'white',3);
+  const pink  = makeNoise(ac,'pink',3);
+  const brown = makeNoise(ac,'brown',3);
+
+  // --- マスター ---
+  const master = ac.createGain();      master.gain.value = 0;
+  const comp   = ac.createDynamicsCompressor();
+  comp.threshold.value = -18; comp.ratio.value = 4; comp.attack.value = 0.01; comp.release.value = 0.25;
+  const analyser = ac.createAnalyser(); analyser.fftSize = 512;
+  master.connect(comp); comp.connect(analyser); analyser.connect(ac.destination);
+
+  /* --- 波（海） -------------------------------------------------
+     白ノイズの高域を削って「ザーッ」に。うねりは 0.11Hz と 0.073Hz の
+     2本のLFOを重ねて、周期が読めない自然な寄せ返しにする。         */
+  const seaOut = ac.createGain();  seaOut.gain.value = 0;  seaOut.connect(master);
+  const seaSwell = ac.createGain(); seaSwell.gain.value = 0.5; seaSwell.connect(seaOut);
+  const seaLP = ac.createBiquadFilter();
+  seaLP.type='lowpass'; seaLP.frequency.value=420; seaLP.Q.value=0.8;
+  seaLP.connect(seaSwell);
+  loopSource(ac, white, seaLP);
+  lfo(ac, 0.110, 0.34, seaSwell.gain);
+  lfo(ac, 0.073, 0.20, seaSwell.gain);
+
+  // 砕ける波頭（少し高い帯域を、わずかに違う周期で）
+  const crestG = ac.createGain(); crestG.gain.value = 0.16; crestG.connect(seaOut);
+  const crestBP = ac.createBiquadFilter();
+  crestBP.type='bandpass'; crestBP.frequency.value=2100; crestBP.Q.value=0.7;
+  crestBP.connect(crestG);
+  loopSource(ac, white, crestBP);
+  lfo(ac, 0.104, 0.14, crestG.gain);
+
+  /* --- 風・木の葉ずれ（森） ------------------------------------- */
+  const windOut = ac.createGain(); windOut.gain.value = 0; windOut.connect(master);
+  const windBP = ac.createBiquadFilter();
+  windBP.type='bandpass'; windBP.frequency.value=760; windBP.Q.value=0.55;
+  windBP.connect(windOut);
+  loopSource(ac, pink, windBP);
+  lfo(ac, 0.067, 320, windBP.frequency);   // 風の強弱で音色が動く
+  lfo(ac, 0.131, 0.30, windOut.gain);      // 突風のうねり
+
+  const leafOut = ac.createGain(); leafOut.gain.value = 0; leafOut.connect(master);
+  const leafHP = ac.createBiquadFilter();
+  leafHP.type='highpass'; leafHP.frequency.value=2600;
+  leafHP.connect(leafOut);
+  loopSource(ac, white, leafHP);
+  lfo(ac, 0.089, 0.45, leafOut.gain);
+
+  /* --- 交通のざわめき（市街地） --------------------------------- */
+  const trafficOut = ac.createGain(); trafficOut.gain.value = 0; trafficOut.connect(master);
+  const rumbleLP = ac.createBiquadFilter();
+  rumbleLP.type='lowpass'; rumbleLP.frequency.value=190; rumbleLP.Q.value=0.9;
+  rumbleLP.connect(trafficOut);
+  loopSource(ac, brown, rumbleLP);
+  lfo(ac, 0.043, 0.25, trafficOut.gain);
+
+  /* --- 雨 -------------------------------------------------------- */
+  const rainOut = ac.createGain(); rainOut.gain.value = 0; rainOut.connect(master);
+  const rainHP = ac.createBiquadFilter();
+  rainHP.type='highpass'; rainHP.frequency.value=1100;
+  const rainShape = ac.createGain(); rainShape.gain.value = 0.75;
+  rainHP.connect(rainShape); rainShape.connect(rainOut);
+  loopSource(ac, white, rainHP);
+  const splashBP = ac.createBiquadFilter();
+  splashBP.type='bandpass'; splashBP.frequency.value=4200; splashBP.Q.value=0.5;
+  const splashG = ac.createGain(); splashG.gain.value = 0.35;
+  splashBP.connect(splashG); splashG.connect(rainOut);
+  loopSource(ac, white, splashBP);
+
+  /* --- 虫の音（夜） ---------------------------------------------- */
+  const bugOut = ac.createGain(); bugOut.gain.value = 0; bugOut.connect(master);
+
+  nodes = { ac, master, analyser, white, pink, brown,
+            seaOut, windOut, leafOut, trafficOut, rainOut, bugOut };
+
+  master.gain.setTargetAtTime(st.vol/100, ac.currentTime, 0.4);
+}
+
+/* ============================================================
+   単発イベント（車の通過・足音・鳥・虫）
+   ============================================================ */
+
+/* 車の通過音: バンドパスの中心周波数を下げながら音量を山なりに
+   → ドップラー効果の近似 */
+function carPass(level){
+  const ac = nodes.ac, t = ac.currentTime;
+  const dur = 2.2 + Math.random()*1.4;
+  const src = ac.createBufferSource(); src.buffer = nodes.pink; src.loop = true;
+  const bp = ac.createBiquadFilter(); bp.type='bandpass'; bp.Q.value=0.85;
+  const lp = ac.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=2600;
+  const g  = ac.createGain(); g.gain.value = 0;
+
+  bp.frequency.setValueAtTime(420, t);
+  bp.frequency.linearRampToValueAtTime(760, t+dur*0.45);
+  bp.frequency.exponentialRampToValueAtTime(230, t+dur);
+
+  const peak = 0.16*level*(0.6+Math.random()*0.7);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(Math.max(peak,0.0002), t+dur*0.45);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+
+  src.connect(bp); bp.connect(lp); lp.connect(g); g.connect(nodes.master);
+  src.start(t); src.stop(t+dur+0.05);
+}
+
+/* 足音: ノイズを短いエンベロープで切り出し、地表ごとにフィルタを変える */
+const SURF = {
+  asphalt:{ type:'bandpass', f:1500, q:1.1, dec:0.075, gain:0.55, grains:1 },
+  grass:  { type:'lowpass',  f:820,  q:0.9, dec:0.130, gain:0.42, grains:1 },
+  gravel: { type:'highpass', f:1300, q:0.8, dec:0.110, gain:0.50, grains:4 },
+  wood:   { type:'bandpass', f:330,  q:3.2, dec:0.190, gain:0.62, grains:1 },
+};
+function footstep(accent){
+  const ac = nodes.ac, cfg = SURF[st.surface];
+  for (let i=0;i<cfg.grains;i++){
+    const t = ac.currentTime + (i? Math.random()*0.035 : 0);
+    const src = ac.createBufferSource();
+    src.buffer = nodes.white;
+    src.playbackRate.value = 0.85 + Math.random()*0.3;
+    const f = ac.createBiquadFilter();
+    f.type = cfg.type;
+    f.frequency.value = cfg.f * (0.85 + Math.random()*0.3);
+    f.Q.value = cfg.q;
+    const g = ac.createGain();
+    const amp = cfg.gain * (accent?1:0.78) * (0.75+Math.random()*0.4) / (i?2.6:1);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(amp, t+0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t+cfg.dec);
+    src.connect(f); f.connect(g); g.connect(nodes.master);
+    src.start(t, Math.random()*2); src.stop(t+cfg.dec+0.05);
+  }
+}
+
+/* 鳥のさえずり: サイン波の周波数を素早く上下させる */
+function chirp(level){
+  const ac = nodes.ac;
+  const n = 2 + (Math.random()*4|0);
+  const base = 2200 + Math.random()*1600;
+  for (let i=0;i<n;i++){
+    const t = ac.currentTime + i*(0.07+Math.random()*0.06);
+    const o = ac.createOscillator(); o.type='sine';
+    const g = ac.createGain();
+    const f0 = base*(0.9+Math.random()*0.25);
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(f0*1.45, t+0.035);
+    o.frequency.exponentialRampToValueAtTime(f0*0.92, t+0.095);
+    const amp = 0.05*level*(0.6+Math.random()*0.6);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(amp, t+0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, t+0.10);
+    o.connect(g); g.connect(nodes.master);
+    o.start(t); o.stop(t+0.12);
+  }
+}
+
+/* 虫（夜のリズミカルな鳴き） */
+function cricket(level){
+  const ac = nodes.ac, t0 = ac.currentTime;
+  const reps = 3 + (Math.random()*3|0);
+  for (let i=0;i<reps;i++){
+    const t = t0 + i*0.14;
+    const src = ac.createBufferSource(); src.buffer = nodes.white;
+    const bp = ac.createBiquadFilter();
+    bp.type='bandpass'; bp.frequency.value = 4300+Math.random()*900; bp.Q.value=14;
+    const g = ac.createGain();
+    const amp = 0.09*level;
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.exponentialRampToValueAtTime(amp, t+0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t+0.055);
+    src.connect(bp); bp.connect(g); g.connect(nodes.master);
+    src.start(t, Math.random()*2); src.stop(t+0.08);
+  }
+}
+
+/* ============================================================
+   ゲーム状態 → 音量へのマッピング（ここが設計の本体）
+   ============================================================ */
+function mixLevels(){
+  // 海: 2000mでほぼ無音、0mで最大。距離の逆数系カーブ。
+  const sea = Math.max(0, 1 - Math.pow(st.seaDist/2000, 0.55));
+
+  const forest = st.forest/100;
+  const urban  = st.urban/100;
+  const rain   = Math.min(1, st.rain/8);
+
+  // 時刻係数
+  const h = st.hour;
+  const daylight = (h>=6 && h<=18) ? 1 : (h>=5 && h<6) ? (h-5) : (h>18 && h<19) ? (19-h) : 0;
+  // 交通量: 朝夕にピーク、深夜は激減
+  const trafficTime = 0.15 + 0.85*Math.exp(-Math.pow((h-8.5)/2.6,2))
+                           + 0.75*Math.exp(-Math.pow((h-18)/2.8,2));
+  // 鳥: 夜明けの大合唱が最大、夕方に小ピーク
+  const birdTime = 1.5*Math.exp(-Math.pow((h-5.5)/1.4,2)) + 0.5*Math.exp(-Math.pow((h-17)/1.8,2));
+  // 虫: 夜のみ
+  const bugTime = h<4.5 ? 1 : h>19.5 ? 1 : (h<5.5 ? (5.5-h) : h>18.5 ? (h-18.5) : 0);
+
+  return {
+    sea:     sea * 0.95 * (1 - 0.25*rain),
+    wind:    (0.16 + 0.62*forest) * (1 - 0.3*urban*(1-forest)),
+    leaf:    forest * 0.5 * (1 - 0.4*rain),
+    traffic: urban * Math.min(1.6, trafficTime) * 0.55,
+    rain:    rain * 0.55,
+    bug:     Math.min(1,bugTime) * (0.25 + 0.6*forest) * (1-rain) * 0.5,
+    // 単発イベント用
+    _carRate:  urban * Math.min(1.6, trafficTime) * 0.55,   // 毎秒の期待発生数
+    _birdRate: forest * Math.min(1.5,birdTime) * (1-rain) * 0.55,
+    _bugRate:  Math.min(1,bugTime) * (0.2+0.7*forest) * (1-rain) * 0.4,
+    _daylight: daylight,
+  };
+}
+
+function apply(){
+  if (!running) return;
+  const ac = nodes.ac, T = 0.35, now = ac.currentTime;
+  const m = mixLevels();
+  nodes.seaOut.gain.setTargetAtTime(m.sea, now, T);
+  nodes.windOut.gain.setTargetAtTime(m.wind, now, T);
+  nodes.leafOut.gain.setTargetAtTime(m.leaf, now, T);
+  nodes.trafficOut.gain.setTargetAtTime(m.traffic, now, T);
+  nodes.rainOut.gain.setTargetAtTime(m.rain, now, T);
+  nodes.master.gain.setTargetAtTime(st.vol/100, now, 0.2);
+  drawMix(m);
+}
+
+/* ============================================================
+   スケジューラ（単発イベントを確率的に発生させる）
+   ============================================================ */
+let stepAcc = 0, lastT = 0, footFlip = false;
+function tick(now){
+  requestAnimationFrame(tick);
+  if (!running) return;
+  const dt = Math.min(0.1, (now - lastT)/1000 || 0);
+  lastT = now;
+  const m = mixLevels();
+
+  // 足音: 速度から歩調を決める（歩幅 0.78m、走ると歩幅が伸びる）
+  if (st.speed > 0.2){
+    const mps = st.speed/3.6;
+    const stride = st.speed > 8 ? 1.35 : 0.78;
+    const rate = mps/stride;               // steps per second
+    stepAcc += rate*dt;
+    while (stepAcc >= 1){
+      stepAcc -= 1;
+      footFlip = !footFlip;
+      footstep(footFlip);
+    }
+  } else stepAcc = 0;
+
+  // 車の通過
+  if (Math.random() < m._carRate*dt*0.9) carPass(Math.min(1.3, m._carRate+0.3));
+  // 鳥
+  if (Math.random() < m._birdRate*dt*0.8) chirp(Math.min(1.4, 0.6+m._birdRate));
+  // 虫
+  if (Math.random() < m._bugRate*dt*1.4) cricket(Math.min(1.2, 0.5+m._bugRate));
+
+  // レベルメーター
+  const a = nodes.analyser, buf = new Uint8Array(a.fftSize);
+  a.getByteTimeDomainData(buf);
+  let peak = 0;
+  for (let i=0;i<buf.length;i++){ const v = Math.abs(buf[i]-128)/128; if (v>peak) peak=v; }
+  document.getElementById('meter').style.width = Math.min(100, peak*140).toFixed(0)+'%';
+}
+
+/* ============================================================
+   UI
+   ============================================================ */
+const PRESETS = [
+  {n:'海岸（平塚）', s:{seaDist:60,  forest:5,  urban:25, rain:0, hour:15, speed:4, surface:'gravel'}},
+  {n:'大山の森',     s:{seaDist:2000,forest:95, urban:2,  rain:0, hour:6,  speed:4, surface:'grass'}},
+  {n:'市街地',       s:{seaDist:2000,forest:8,  urban:95, rain:0, hour:8.5,speed:5, surface:'asphalt'}},
+  {n:'雨の街',       s:{seaDist:2000,forest:10, urban:80, rain:6, hour:17, speed:5, surface:'asphalt'}},
+  {n:'夜の田舎道',   s:{seaDist:2000,forest:55, urban:8,  rain:0, hour:22, speed:3.5,surface:'grass'}},
+  {n:'河原の木道',   s:{seaDist:1400,forest:35, urban:15, rain:0, hour:11, speed:4, surface:'wood'}},
+  {n:'静止（環境音のみ）', s:{speed:0}},
+];
+const SURFACES = [
+  {id:'asphalt', n:'アスファルト'},
+  {id:'grass',   n:'草地'},
+  {id:'gravel',  n:'砂利'},
+  {id:'wood',    n:'木道'},
+];
+
+function fmt(){
+  document.getElementById('v_sea').textContent    = st.seaDist>=2000 ? '内陸（海なし）' : st.seaDist+' m';
+  document.getElementById('v_forest').textContent = st.forest+' %';
+  document.getElementById('v_urban').textContent  = st.urban+' %';
+  document.getElementById('v_rain').textContent   = st.rain==0 ? '晴れ' : st.rain.toFixed(1)+' mm/h';
+  const hh = Math.floor(st.hour), mm = Math.round((st.hour-hh)*60);
+  document.getElementById('v_hour').textContent   = String(hh).padStart(2,'0')+':'+String(mm).padStart(2,'0');
+  document.getElementById('v_speed').textContent  = st.speed==0 ? '停止' : st.speed.toFixed(1)+' km/h';
+  document.getElementById('v_vol').textContent    = st.vol+' %';
+}
+
+const MIXROWS = [
+  ['sea','波'],['wind','風'],['leaf','葉ずれ'],
+  ['traffic','交通'],['rain','雨'],['bug','虫'],
+];
+function drawMix(m){
+  const el = document.getElementById('mix');
+  el.innerHTML = MIXROWS.map(([k,label])=>{
+    const v = m[k]||0;
+    const w = Math.round(v*90);
+    return '<tr><td>'+label+'</td><td><span class="bar" style="width:'+w+'px"></span>'+v.toFixed(2)+'</td></tr>';
+  }).join('');
+}
+
+function bindSlider(id, key, scale){
+  const el = document.getElementById(id);
+  el.addEventListener('input', ()=>{ st[key] = parseFloat(el.value)/(scale||1); fmt(); apply(); });
+}
+function syncUI(){
+  document.getElementById('s_sea').value = st.seaDist;
+  document.getElementById('s_forest').value = st.forest;
+  document.getElementById('s_urban').value = st.urban;
+  document.getElementById('s_rain').value = st.rain;
+  document.getElementById('s_hour').value = st.hour;
+  document.getElementById('s_speed').value = st.speed;
+  document.getElementById('s_vol').value = st.vol;
+  [...document.querySelectorAll('#surfaces .chip')].forEach(c=>{
+    c.classList.toggle('on', c.dataset.id === st.surface);
+  });
+  fmt();
+}
+
+// プリセット
+const pEl = document.getElementById('presets');
+PRESETS.forEach((p,i)=>{
+  const b = document.createElement('button');
+  b.className='chip'; b.textContent = p.n;
+  b.addEventListener('click', ()=>{
+    Object.assign(st, p.s);
+    [...pEl.children].forEach(c=>c.classList.remove('on'));
+    b.classList.add('on');
+    syncUI(); apply();
+  });
+  pEl.appendChild(b);
+});
+// 地表
+const sEl = document.getElementById('surfaces');
+SURFACES.forEach(s=>{
+  const b = document.createElement('button');
+  b.className='chip'+(s.id===st.surface?' on':''); b.textContent = s.n; b.dataset.id = s.id;
+  b.addEventListener('click', ()=>{
+    st.surface = s.id;
+    [...sEl.children].forEach(c=>c.classList.remove('on'));
+    b.classList.add('on');
+    if (running && st.speed < 0.2) footstep(true); // 停止中でも音を確認できるように
+  });
+  sEl.appendChild(b);
+});
+
+bindSlider('s_sea','seaDist');
+bindSlider('s_forest','forest');
+bindSlider('s_urban','urban');
+bindSlider('s_rain','rain');
+bindSlider('s_hour','hour');
+bindSlider('s_speed','speed');
+bindSlider('s_vol','vol');
+fmt();
+
+/* 起動: スマホでは「ユーザー操作」の中でしか AudioContext を鳴らせない */
+function start(){
+  if (running) return;
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === 'suspended') ctx.resume();
+  build();
+  running = true;
+  document.getElementById('startWrap').style.display = 'none';
+  document.getElementById('stopBar').classList.add('show');
+  lastT = performance.now();
+  apply();
+  requestAnimationFrame(tick);
+}
+const sb = document.getElementById('startBtn');
+sb.addEventListener('click', start);
+sb.addEventListener('touchend', function(e){ e.preventDefault(); start(); }, {passive:false});
+
+/* 停止／再開: AudioContext を suspend すると鳴っている全部が即座に凍結する */
+let paused = false;
+function togglePause(){
+  if (!ctx) return;
+  const btn = document.getElementById('stopBtn');
+  if (paused){
+    ctx.resume();
+    paused = false; running = true;
+    lastT = performance.now();
+    btn.textContent = '■ 停止';
+    btn.classList.remove('paused');
+  } else {
+    running = false;
+    ctx.suspend();
+    paused = true;
+    document.getElementById('meter').style.width = '0%';
+    btn.textContent = '▶ 再開';
+    btn.classList.add('paused');
+  }
+}
+const stb = document.getElementById('stopBtn');
+stb.addEventListener('click', togglePause);
+stb.addEventListener('touchend', function(e){ e.preventDefault(); togglePause(); }, {passive:false});
+// スペースキーでも止まる
+window.addEventListener('keydown', function(e){
+  if (e.code === 'Space' && running !== null && ctx){ e.preventDefault(); togglePause(); }
+});
+// タブを離れたら自動で止める
+document.addEventListener('visibilitychange', function(){
+  if (document.hidden && ctx && !paused) togglePause();
+});
+
+})();
+</script>
+</body>
+</html>

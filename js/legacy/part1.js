@@ -120,6 +120,11 @@ const I18N = {
     deployInfoUnavailable: 'デプロイ日時: 取得できません(サーバ経由で開いてください)',
     deployInfoLine: '🚀 デプロイ日時: {time}',
     deployInfoCommitSuffix: ', コミット: {time}',
+    // 【2026-08-17・IMPL_PROMPT_20260816_AMBIENT_AUDIO.md Phase1】環境音の設定UI(js/core/audio.js)。
+    audioSectionTitle: '🔊 環境音(試験実装)',
+    audioToggleOn: '🔊 ON',
+    audioToggleOff: '🔇 OFF',
+    audioDesc: '波・風・足音を合成音で再生します(音声ファイルは使いません)。ONにした直後は無音のことがありますが、画面を1回タップすると鳴り始めます',
   },
   en: {
     // ---- 静的UI(index.html) ----
@@ -228,6 +233,11 @@ const I18N = {
     deployInfoUnavailable: 'Deploy time: unavailable (please open via the server)',
     deployInfoLine: '🚀 Deploy time: {time}',
     deployInfoCommitSuffix: ', commit: {time}',
+    // 【2026-08-17・IMPL_PROMPT_20260816_AMBIENT_AUDIO.md Phase1】Ambient audio settings UI (js/core/audio.js).
+    audioSectionTitle: '🔊 Ambient audio (experimental)',
+    audioToggleOn: '🔊 ON',
+    audioToggleOff: '🔇 OFF',
+    audioDesc: 'Plays synthesized waves/wind/footsteps (no audio files used). It may stay silent right after turning ON — tap the screen once to start it',
   },
 };
 let currentLang = 'ja';

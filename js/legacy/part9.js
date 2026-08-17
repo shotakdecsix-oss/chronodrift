@@ -919,6 +919,56 @@ function geoOnUpdate(dt) {
   updatePlayerCamera();
 }
 
+// 【2026-08-16・IMPL_PROMPT_20260816_AMBIENT_AUDIO.md Phase1】環境音(js/core/audio.js)用の
+// 環境サンプリング。GameAudio.update(dt, env)へ渡すenvをここで組み立てる。
+// coastGeomAt/isNearWater/landuseTypeAt/isOnRoadはいずれもポリゴン・空間ハッシュ走査を伴い
+// 毎フレーム呼ぶと無駄なので、地形系の値(seaDist/waterNear/forest/urban/surface)は250msに
+// 1回だけ再サンプリングし、それ以外のフレームは前回値を使い回す。
+// 一方、足音(4-3)に使う「今フレームの水平移動距離」「airborne」「altLocked」は変数参照だけで
+// 済み実質コスト0なので、こちらは間引かず毎フレーム最新値に更新する(でないと250msに1回しか
+// 足音が判定されず、歩行中の足音間隔が不自然になる)。audio.js側はこの5フィールド仕様のenvに
+// move/airborne/altLockedが同居している前提で読む(audio.js冒頭のコメント参照)。
+let _audioEnvCache = null, _audioEnvT = 0, _audioLastX = null, _audioLastZ = null;
+function _audioEnv() {
+  const now = performance.now();
+  const px = player.position.x, pz = player.position.z;
+  let move = 0;
+  if (_audioLastX !== null) {
+    const dx = px - _audioLastX, dz = pz - _audioLastZ;
+    const d = Math.sqrt(dx * dx + dz * dz);
+    move = d < 5 ? d : 0; // 5m超/フレームはテレポート・モード切替とみなし無視(足音の暴発防止)
+  }
+  _audioLastX = px; _audioLastZ = pz;
+
+  if (_audioEnvCache && now - _audioEnvT < 250) {
+    _audioEnvCache.move = move;
+    _audioEnvCache.airborne = airborne;
+    _audioEnvCache.altLocked = altLocked;
+    return _audioEnvCache;
+  }
+  _audioEnvT = now;
+
+  // 【2026-08-17修正】当初は geom.sea (プレイヤーが海側にいる時だけ) で絞っていたが、
+  // プレイヤーは通常ずっと陸側(海に浮くことはない)にいるため、この絞り込みだと
+  // 波・海岸の風の音が実質いつまでも鳴らないバグになっていた。coastGeomAt().d は
+  // 陸側/海側を問わない「海岸線までの距離」なので、seaかどうかに関わらずそのまま使う。
+  const geom = coastGeomAt(px, pz);
+  const seaDist = geom ? geom.d : Infinity;
+  const waterNear = isNearWater(px, pz, 60);
+  const lu = landuseTypeAt(px, pz);
+  const forest = lu === 'forest' ? 1 : 0;
+  const urban = (lu === 'commercial' || lu === 'retail') ? 1.0
+    : lu === 'industrial' ? 0.7
+    : lu === 'residential' ? 0.5
+    : 0.15;
+  let surface = 'grass';
+  if (isOnRoad(px, pz, 1, 1)) surface = 'asphalt';
+  else if (waterNear) surface = 'water';
+
+  _audioEnvCache = { seaDist, waterNear, forest, urban, surface, move, airborne, altLocked };
+  return _audioEnvCache;
+}
+
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05);
@@ -929,6 +979,7 @@ function animate() {
   // 以降のstation labels・カメラ追従処理はカメラが確定済みであることに依存するため、
   // この呼び出しは他の処理より先に行う必要がある。
   if (window.ModeRegistry) ModeRegistry.update(dt);
+  if (window.GameAudio) GameAudio.update(dt, _audioEnv());
 
   // Station labels: billboard + ring spin
   for (const sl of stationLabels) {

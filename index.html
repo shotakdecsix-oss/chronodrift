@@ -523,6 +523,18 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
       <button id="langEnBtn" data-lang="en">English</button>
     </div>
   </div>
+
+  <!-- 【2026-08-16・IMPL_PROMPT_20260816_AMBIENT_AUDIO.md Phase1】環境音のON/OFF・音量。
+       既定OFF(AudioContextは最初のユーザー操作まで作らない)。実装はjs/core/audio.js。
+       文言は既存のt()/I18Nテーブル(part1.js)に統合済み。data-i18nはperfSectionTitle等と同じ形。 -->
+  <div class="settingsSection">
+    <span data-i18n="audioSectionTitle">🔊 環境音(試験実装)</span>
+    <div class="charRow">
+      <button id="audioToggleBtn" data-i18n="audioToggleOff">🔇 OFF</button>
+    </div>
+    <input id="audioVolSlider" type="range" min="0" max="100" step="1" value="70">
+    <div id="perfDesc" data-i18n="audioDesc">波・風・足音を合成音で再生します(音声ファイルは使いません)。ONにした直後は無音のことがありますが、画面を1回タップすると鳴り始めます</div>
+  </div>
 </div>
 
 <button id="uiToggleBtn" class="glass" title="UI表示/非表示" data-i18n-title="uiToggleTitle">🙈</button>
@@ -602,6 +614,7 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="js/core/mode-registry.js"></script>
+<script src="js/core/audio.js"></script>
 <script src="js/lib/pure.js"></script>
 <script src="js/legacy/part1.js"></script>
 <script src="js/legacy/part2.js"></script>

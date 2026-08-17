@@ -1,0 +1,1120 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>効果音プロトタイプ — ChronoDrift</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --line:#262d38; --fg:#e6edf3;
+    --dim:#8b949e; --accent:#4ea1ff; --green:#5ad18a; --warm:#ffb454; --red:#ff5f56;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;
+    font-size:14px; line-height:1.6; padding:16px; max-width:700px; margin:0 auto;
+    -webkit-text-size-adjust:100%;
+  }
+  h1{font-size:17px; margin:0 0 4px}
+  .sub{color:var(--dim); font-size:12px; margin-bottom:16px}
+
+  #startWrap{
+    position:fixed; inset:0; background:rgba(14,17,22,.97); z-index:50;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:24px; text-align:center;
+  }
+  #startBtn{
+    background:var(--accent); color:#06121f; border:0; border-radius:999px;
+    padding:18px 46px; font-size:17px; font-weight:800; cursor:pointer; font-family:inherit;
+  }
+  #startBtn:active{transform:scale(.97)}
+  .note{color:var(--dim); font-size:12px; max-width:360px}
+
+  .panel{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:12px}
+  .panel h2{font-size:12px; color:var(--dim); margin:0 0 4px; font-weight:700; letter-spacing:.08em; text-transform:uppercase}
+  .panel p.hint{font-size:11.5px; color:var(--dim); margin:0 0 12px}
+
+  .grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:8px}
+  .btn{
+    background:#1e2531; border:1px solid var(--line); color:var(--fg); font-family:inherit;
+    border-radius:10px; padding:12px 10px; font-size:13px; cursor:pointer; text-align:center;
+  }
+  .btn:active{background:#2a3341; transform:scale(.98)}
+  .btn small{display:block; color:var(--dim); font-size:10.5px; margin-top:2px; line-height:1.3}
+  .btn.on{background:var(--accent); color:#06121f; border-color:var(--accent); font-weight:700}
+  .btn.on small{color:#0b3050}
+
+  .lp{border-top:1px solid var(--line); padding-top:11px; margin-top:11px}
+  .lp:first-child{border-top:0; padding-top:0; margin-top:0}
+  .lprow{display:flex; align-items:center; gap:10px}
+  .tg{
+    flex:0 0 116px; background:#1e2531; border:1px solid var(--line); color:var(--fg); font-family:inherit;
+    border-radius:999px; padding:8px 6px; font-size:12.5px; cursor:pointer; text-align:center;
+  }
+  .tg.on{background:var(--green); color:#04210f; border-color:var(--green); font-weight:700}
+  .lprow input[type=range]{flex:1}
+  .pct{flex:0 0 38px; text-align:right; font-size:11.5px; color:var(--accent); font-variant-numeric:tabular-nums}
+
+  input[type=range]{-webkit-appearance:none; appearance:none; background:transparent; height:22px; margin:0; width:100%}
+  input[type=range]::-webkit-slider-runnable-track{height:4px; background:#2b3542; border-radius:2px}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:18px; height:18px; border-radius:50%; background:var(--accent); margin-top:-7px; border:0; cursor:pointer}
+  input[type=range]::-moz-range-track{height:4px; background:#2b3542; border-radius:2px}
+  input[type=range]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:var(--accent);border:0}
+
+  .chips{display:flex; flex-wrap:wrap; gap:7px}
+  .chip{background:#1e2531; border:1px solid var(--line); color:var(--fg); border-radius:999px; padding:7px 13px; font-size:12.5px; cursor:pointer; font-family:inherit}
+  .chip.on{background:var(--warm); color:#2a1a02; border-color:var(--warm); font-weight:700}
+
+  #meterWrap{height:6px; background:#2b3542; border-radius:3px; overflow:hidden; margin-top:8px}
+  #meter{height:100%; width:0%; background:linear-gradient(90deg,var(--green),var(--warm),var(--red)); transition:width .06s linear}
+
+  footer{color:var(--dim); font-size:11.5px; margin-top:18px; padding-bottom:96px; line-height:1.9}
+  code{background:#1e2531; padding:1px 5px; border-radius:4px; font-size:11px}
+
+  #stopBar{
+    position:fixed; left:0; right:0; bottom:0; z-index:40; display:none;
+    background:linear-gradient(180deg,rgba(14,17,22,0),rgba(14,17,22,.95) 40%);
+    padding:18px 16px 16px; text-align:center; pointer-events:none;
+  }
+  #stopBar.show{display:block}
+  #stopBar button{
+    pointer-events:auto; font-family:inherit; cursor:pointer; border:0; border-radius:999px;
+    padding:13px 26px; font-size:15px; font-weight:800; margin:0 4px;
+  }
+  #stopBtn{background:var(--red); color:#2a0705; box-shadow:0 6px 24px rgba(255,95,86,.35)}
+  #stopBtn.paused{background:var(--green); color:#04210f}
+  #allOffBtn{background:#2a3341; color:var(--fg)}
+  #stopBar button:active{transform:scale(.97)}
+</style>
+</head>
+<body>
+
+<div id="startWrap">
+  <h1 style="font-size:19px">効果音プロトタイプ</h1>
+  <p class="note">海・車・風・電車・雨・川。<br>典型的で「それだと分かる」音を目指した版です。<br>音声ファイルは使わず、すべて合成しています。</p>
+  <button id="startBtn">▶ 音を開始</button>
+  <p class="note" style="font-size:11px">ステレオで鳴ります。イヤホン／ヘッドホン推奨。<br>車と電車は左から右へ通過します。</p>
+</div>
+
+<h1>効果音プロトタイプ</h1>
+<p class="sub">1つずつ鳴らして「らしさ」を確かめる版</p>
+
+<div class="panel">
+  <h2>単発 — 押すと1回鳴る</h2>
+  <p class="hint">車と電車はステレオで左→右に通過します（ドップラー効果つき）。</p>
+  <div class="grid" id="oneShots"></div>
+</div>
+
+<div class="panel">
+  <h2>継続音 — ボタンでON/OFF、スライダーで強さ</h2>
+  <p class="hint">複数を同時にONにして重ねられます。</p>
+  <div id="loops"></div>
+</div>
+
+<div class="panel">
+  <h2>足音 — 押すと1歩鳴る</h2>
+  <div class="chips" id="surfaces"></div>
+</div>
+
+<div class="panel">
+  <h2>シーン — まとめて設定</h2>
+  <div class="chips" id="scenes"></div>
+</div>
+
+<div class="panel">
+  <h2>BGM — 背景音楽</h2>
+  <p class="hint">効果音とは別のバスで鳴ります。同時に鳴らして音量バランスを確かめてください。演奏は毎回その場で生成され、同じ小節は二度と来ません。</p>
+  <div class="chips" id="bgmStyles"></div>
+  <div class="lp" style="margin-top:12px">
+    <div class="lprow">
+      <button class="tg" id="bgmTg">BGM</button>
+      <input type="range" id="s_bgm" min="0" max="100" step="1" value="40">
+      <span class="pct" id="v_bgm">40</span>
+    </div>
+  </div>
+  <div class="lprow" style="margin-top:8px">
+    <span style="flex:0 0 116px; font-size:12.5px">テンポ</span>
+    <input type="range" id="s_bpm" min="56" max="112" step="1" value="78">
+    <span class="pct" id="v_bpm">78</span>
+  </div>
+  <div class="lprow" style="margin-top:4px">
+    <span style="flex:0 0 116px; font-size:12.5px">にぎやかさ</span>
+    <input type="range" id="s_dens" min="0" max="100" step="1" value="55">
+    <span class="pct" id="v_dens">55</span>
+  </div>
+  <div class="lprow" style="margin-top:4px">
+    <span style="flex:0 0 116px; font-size:12.5px">効果音で控える</span>
+    <input type="range" id="s_duck" min="0" max="100" step="1" value="60">
+    <span class="pct" id="v_duck">60</span>
+  </div>
+  <p class="hint" style="margin:10px 0 0">いまのコード: <span id="chordNow" style="color:var(--warm)">—</span></p>
+</div>
+
+<div class="panel">
+  <h2>出力</h2>
+  <div class="lprow">
+    <span style="flex:0 0 116px; font-size:12.5px">マスター音量</span>
+    <input type="range" id="s_vol" min="0" max="100" step="1" value="65">
+    <span class="pct" id="v_vol">65</span>
+  </div>
+  <div id="meterWrap"><div id="meter"></div></div>
+</div>
+
+<footer>
+  合成の要点：<br>
+  <b>波</b>＝1回ごとに「寄せる（ローパスを開く）→砕ける（広帯域の破裂）→引く（ハイパスの泡）」の3段階を持つ単発イベントを重ねる。<br>
+  <b>車</b>＝エンジン（のこぎり波の倍音）＋タイヤ（帯域ノイズ）に、周波数を落としながら左右へ<code>StereoPanner</code>で振る＝ドップラー。<br>
+  <b>電車</b>＝レール継目の「ガタン・ゴトン」を台車間隔から計算して並べ、金属の擦れ音と低域の唸りを重ねる。<br>
+  <b>踏切</b>＝2つの金属打音を交互に左右で。<b>雷</b>＝高域の破裂＋低域へ落ちていく長い唸り。<br>
+  <b>川</b>＝帯域ノイズ＋周波数が上に跳ねる「ポコッ」を多数。<b>風</b>＝共鳴の鋭いバンドパスを彷徨わせて唸りを作る。<br>
+  ダウンロードする音声データは 0 バイトです。
+</footer>
+
+<div id="stopBar">
+  <button id="allOffBtn">継続音を全部OFF</button>
+  <button id="stopBtn">■ 停止</button>
+</div>
+
+<script>
+(function(){
+'use strict';
+
+let ctx=null, N=null, running=false, paused=false;
+const L={};            // 継続音の状態 {on, amt}
+let surface='asphalt';
+
+/* ============================================================
+   共通ユーティリティ
+   ============================================================ */
+function noiseBuf(ac, kind, sec){
+  const len=ac.sampleRate*sec, b=ac.createBuffer(1,len,ac.sampleRate), d=b.getChannelData(0);
+  if (kind==='brown'){
+    let last=0;
+    for(let i=0;i<len;i++){ const w=Math.random()*2-1; last=(last+0.02*w)/1.02; d[i]=last*3.5; }
+  } else if (kind==='pink'){
+    let b0=0,b1=0,b2=0;
+    for(let i=0;i<len;i++){ const w=Math.random()*2-1;
+      b0=0.99765*b0+w*0.0990460; b1=0.96300*b1+w*0.2965164; b2=0.57000*b2+w*1.0526913;
+      d[i]=(b0+b1+b2+w*0.1848)*0.25; }
+  } else {
+    for(let i=0;i<len;i++) d[i]=Math.random()*2-1;
+  }
+  return b;
+}
+function src(buf, loop){
+  const s=N.ac.createBufferSource(); s.buffer=buf; if(loop) s.loop=true; return s;
+}
+function bq(type, freq, q){
+  const f=N.ac.createBiquadFilter(); f.type=type; f.frequency.value=freq; if(q!=null) f.Q.value=q; return f;
+}
+function gain(v){ const g=N.ac.createGain(); g.gain.value=v==null?1:v; return g; }
+function panner(v){ const p=N.ac.createStereoPanner(); p.pan.value=v||0; return p; }
+function chain(){ // chain(a,b,c,...) → 順に connect
+  for(let i=0;i<arguments.length-1;i++) arguments[i].connect(arguments[i+1]);
+  return arguments[arguments.length-1];
+}
+function distCurve(amount){
+  const n=1024, c=new Float32Array(n);
+  for(let i=0;i<n;i++){ const x=i*2/n-1; c[i]=Math.tanh(x*amount); }
+  return c;
+}
+/* 減衰エンベロープ（打撃音向け） */
+function hit(g, t, peak, dec, atk){
+  g.gain.setValueAtTime(0.0001,t);
+  g.gain.exponentialRampToValueAtTime(Math.max(peak,0.0002), t+(atk||0.004));
+  g.gain.exponentialRampToValueAtTime(0.0001, t+dec);
+}
+
+/* ============================================================
+   グラフの土台
+   ============================================================ */
+function build(){
+  const ac=ctx;
+  const master=gainRaw(ac,0);
+  const comp=ac.createDynamicsCompressor();
+  comp.threshold.value=-14; comp.ratio.value=4; comp.attack.value=0.005; comp.release.value=0.2;
+  const analyser=ac.createAnalyser(); analyser.fftSize=512;
+  master.connect(comp); comp.connect(analyser); analyser.connect(ac.destination);
+
+  // ごく薄い残響（屋外の広がり）
+  const revIn=gainRaw(ac,1);
+  const conv=ac.createConvolver();
+  (function(){
+    const sec=1.6, len=ac.sampleRate*sec, b=ac.createBuffer(2,len,ac.sampleRate);
+    for(let c=0;c<2;c++){ const d=b.getChannelData(c);
+      for(let i=0;i<len;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/len,3.2); }
+    conv.buffer=b;
+  })();
+  const revOut=gainRaw(ac,0.22);
+  revIn.connect(conv); conv.connect(revOut); revOut.connect(master);
+
+  N={ac,master,revIn,
+     white:noiseBuf(ac,'white',3), pink:noiseBuf(ac,'pink',3), brown:noiseBuf(ac,'brown',3),
+     horn:distCurve(3.2)};
+
+  buildLoops();
+  buildBgm();
+  master.gain.setTargetAtTime(vol()/100, ac.currentTime, 0.3);
+}
+function gainRaw(ac,v){ const g=ac.createGain(); g.gain.value=v; return g; }
+function vol(){ return parseFloat(document.getElementById('s_vol').value); }
+
+/* ============================================================
+   継続音
+   ============================================================ */
+const LOOPS=[
+  {id:'sea',   n:'海（波）',      def:70},
+  {id:'wind',  n:'風',            def:55},
+  {id:'rain',  n:'雨',            def:60},
+  {id:'river', n:'川（せせらぎ）',def:60},
+  {id:'city',  n:'街のざわめき',  def:50},
+  {id:'train', n:'電車の車内',    def:55},
+  {id:'xing',  n:'踏切',          def:70},
+];
+
+function buildLoops(){
+  const ac=N.ac;
+
+  /* --- 海：遠くの潮の下地。個々の波は単発イベントで重ねる --- */
+  const seaBed=gain(0); seaBed.connect(N.master);
+  const seaSrc=src(N.white,true);
+  const seaLP=bq('lowpass',300,0.9);
+  const seaG=gain(0.3);
+  seaSrc.connect(seaLP); seaLP.connect(seaG); seaG.connect(seaBed); seaSrc.start();
+  N.seaBed=seaBed;
+
+  /* --- 風：低い唸り＋共鳴の鋭いバンドパス（これが「ヒュー」を作る） --- */
+  const windOut=gain(0); windOut.connect(N.master); windOut.connect(N.revIn);
+  const wLow=src(N.brown,true), wLowF=bq('lowpass',260,0.8), wLowG=gain(0.55);
+  wLow.connect(wLowF); wLowF.connect(wLowG); wLowG.connect(windOut); wLow.start();
+  const wHowl=src(N.white,true), wHowlF=bq('bandpass',600,6.5), wHowlG=gain(0.5);
+  wHowl.connect(wHowlF); wHowlF.connect(wHowlG); wHowlG.connect(windOut); wHowl.start();
+  const wWhis=src(N.white,true), wWhisF=bq('bandpass',1500,16), wWhisG=gain(0);
+  wWhis.connect(wWhisF); wWhisF.connect(wWhisG); wWhisG.connect(windOut); wWhis.start();
+  N.wind={out:windOut, howlF:wHowlF, howlG:wHowlG, whisG:wWhisG, lowG:wLowG};
+
+  /* --- 雨：高域のシャーッ＋中域＋粒（粒はスケジューラで） --- */
+  const rainOut=gain(0); rainOut.connect(N.master);
+  const r1=src(N.white,true), r1F=bq('highpass',1300), r1G=gain(0.5);
+  r1.connect(r1F); r1F.connect(r1G); r1G.connect(rainOut); r1.start();
+  const r2=src(N.white,true), r2F=bq('bandpass',3200,0.4), r2G=gain(0.35);
+  r2.connect(r2F); r2F.connect(r2G); r2G.connect(rainOut); r2.start();
+  N.rain={out:rainOut};
+
+  /* --- 川：帯域ノイズ＋「ポコッ」（スケジューラ） --- */
+  const rivOut=gain(0); rivOut.connect(N.master); rivOut.connect(N.revIn);
+  const v1=src(N.white,true), v1F=bq('bandpass',1300,1.1), v1G=gain(0.45);
+  v1.connect(v1F); v1F.connect(v1G); v1G.connect(rivOut); v1.start();
+  const v2=src(N.white,true), v2F=bq('lowpass',700,0.9), v2G=gain(0.30);
+  v2.connect(v2F); v2F.connect(v2G); v2G.connect(rivOut); v2.start();
+  // せせらぎの「ゆらぎ」
+  const vLfo=ctx.createOscillator(); vLfo.frequency.value=0.7;
+  const vLfoG=gain(260); vLfo.connect(vLfoG); vLfoG.connect(v1F.frequency); vLfo.start();
+  N.river={out:rivOut};
+
+  /* --- 街のざわめき：低い交通の唸り（個々の車は単発） --- */
+  const cityOut=gain(0); cityOut.connect(N.master);
+  const c1=src(N.brown,true), c1F=bq('lowpass',210,0.9), c1G=gain(0.6);
+  c1.connect(c1F); c1F.connect(c1G); c1G.connect(cityOut); c1.start();
+  const c2=src(N.pink,true), c2F=bq('bandpass',700,0.5), c2G=gain(0.12);
+  c2.connect(c2F); c2F.connect(c2G); c2G.connect(cityOut); c2.start();
+  N.city={out:cityOut};
+
+  /* --- 電車の車内：低域の唸り＋モーター＋レール継目（スケジューラ） --- */
+  const trOut=gain(0); trOut.connect(N.master);
+  const t1=src(N.brown,true), t1F=bq('lowpass',170,1.0), t1G=gain(0.75);
+  t1.connect(t1F); t1F.connect(t1G); t1G.connect(trOut); t1.start();
+  const t2=src(N.white,true), t2F=bq('bandpass',2400,2.2), t2G=gain(0.14);
+  t2.connect(t2F); t2F.connect(t2G); t2G.connect(trOut); t2.start();
+  // モーターの持続音
+  const mo=ctx.createOscillator(); mo.type='sawtooth'; mo.frequency.value=112;
+  const moF=bq('lowpass',600,3.5), moG=gain(0.055);
+  mo.connect(moF); moF.connect(moG); moG.connect(trOut); mo.start();
+  N.train={out:trOut, motor:mo, motorG:moG};
+
+  /* --- 踏切：出力先だけ用意（打音はスケジューラ） --- */
+  const xOut=gain(0); xOut.connect(N.master); xOut.connect(N.revIn);
+  N.xing={out:xOut};
+
+  N.loopOut={sea:seaBed, wind:windOut, rain:rainOut, river:rivOut, city:cityOut, train:trOut, xing:xOut};
+}
+
+/* 継続音のレベル反映 */
+const LOOPMAX={sea:0.85, wind:0.7, rain:0.6, river:0.7, city:0.8, train:0.75, xing:0.9};
+function applyLoops(){
+  if(!N) return;
+  const t=N.ac.currentTime;
+  LOOPS.forEach(l=>{
+    const s=L[l.id];
+    const v = s.on ? (s.amt/100)*LOOPMAX[l.id] : 0;
+    N.loopOut[l.id].gain.setTargetAtTime(v, t, 0.35);
+  });
+  // 風は強さで音色も変える（強いほど高く鋭く唸る）
+  const w=L.wind.amt/100;
+  N.wind.howlF.frequency.setTargetAtTime(420+w*900, t, 0.6);
+  N.wind.howlF.Q.setTargetAtTime(4+w*9, t, 0.6);
+  N.wind.whisG.gain.setTargetAtTime(Math.max(0,(w-0.55))*0.55, t, 0.6);
+  // 電車の車内はモーターの高さ＝速度感
+  N.train.motor.frequency.setTargetAtTime(80+(L.train.amt/100)*95, t, 0.8);
+}
+
+/* ============================================================
+   単発音
+   ============================================================ */
+
+/* 波：寄せる→砕ける→引く の3段階 */
+function waveOne(amt, when){
+  const ac=N.ac, t=when||ac.currentTime;
+  const dur=3.4+Math.random()*2.4;
+  const p=panner((Math.random()-0.5)*1.2);
+  p.connect(N.master); const rs=gain(0.3); p.connect(rs); rs.connect(N.revIn);
+
+  // ① 寄せ（ローパスが開いていく）
+  const s1=src(N.white,true), f1=bq('lowpass',180,1.0), g1=gain(0);
+  s1.connect(f1); f1.connect(g1); g1.connect(p);
+  f1.frequency.setValueAtTime(180,t);
+  f1.frequency.linearRampToValueAtTime(1400, t+dur*0.42);
+  f1.frequency.linearRampToValueAtTime(600, t+dur);
+  g1.gain.setValueAtTime(0.0001,t);
+  g1.gain.exponentialRampToValueAtTime(0.42*amt, t+dur*0.40);
+  g1.gain.exponentialRampToValueAtTime(0.0001, t+dur*0.9);
+  s1.start(t, Math.random()*2); s1.stop(t+dur+0.1);
+
+  // ② 砕ける（広帯域の破裂）
+  const tc=t+dur*0.42;
+  const s2=src(N.white,true), f2=bq('bandpass',1100,0.45), g2=gain(0);
+  s2.connect(f2); f2.connect(g2); g2.connect(p);
+  f2.frequency.setValueAtTime(900,tc);
+  f2.frequency.exponentialRampToValueAtTime(2600, tc+0.35);
+  g2.gain.setValueAtTime(0.0001,tc);
+  g2.gain.exponentialRampToValueAtTime(0.34*amt, tc+0.14);
+  g2.gain.exponentialRampToValueAtTime(0.0001, tc+1.1);
+  s2.start(tc, Math.random()*2); s2.stop(tc+1.2);
+
+  // ③ 引き波（泡がはじける高域）
+  const tr=t+dur*0.55;
+  const s3=src(N.white,true), f3=bq('highpass',1600), g3=gain(0);
+  s3.connect(f3); f3.connect(g3); g3.connect(p);
+  g3.gain.setValueAtTime(0.0001,tr);
+  g3.gain.exponentialRampToValueAtTime(0.20*amt, tr+0.3);
+  g3.gain.exponentialRampToValueAtTime(0.0001, tr+dur*0.5);
+  s3.start(tr, Math.random()*2); s3.stop(tr+dur*0.5+0.1);
+}
+
+/* 車の通過：エンジン＋タイヤ＋ドップラー＋左右パン */
+function carPass(amt){
+  const ac=N.ac, t=ac.currentTime;
+  const dur=2.3+Math.random()*1.0;
+  const dir=Math.random()<0.5?1:-1;
+  const p=panner(-0.95*dir); p.connect(N.master);
+  const rs=gain(0.18); p.connect(rs); rs.connect(N.revIn);
+  p.pan.setValueAtTime(-0.95*dir,t);
+  p.pan.linearRampToValueAtTime(0.95*dir, t+dur);
+
+  const A=(amt==null?1:amt);
+  const f0=72+Math.random()*34;              // エンジンの基本周波数
+  const eng=gain(0); eng.connect(p);
+  [[1,1],[2,0.55],[3,0.30],[4,0.16]].forEach(([r,a])=>{
+    const o=ac.createOscillator(); o.type='sawtooth';
+    const g=gain(a*0.09*A);
+    // ドップラー：近づく間は高く、去る間は低く
+    o.frequency.setValueAtTime(f0*r*1.13, t);
+    o.frequency.linearRampToValueAtTime(f0*r*1.10, t+dur*0.44);
+    o.frequency.linearRampToValueAtTime(f0*r*0.88, t+dur*0.60);
+    o.frequency.linearRampToValueAtTime(f0*r*0.86, t+dur);
+    const lp=bq('lowpass',900,1.2);
+    o.connect(lp); lp.connect(g); g.connect(eng); o.start(t); o.stop(t+dur+0.05);
+  });
+  // タイヤのロードノイズ
+  const tir=src(N.pink,true), tf=bq('bandpass',900,0.75), tg=gain(0);
+  tir.connect(tf); tf.connect(tg); tg.connect(p);
+  tf.frequency.setValueAtTime(1050,t);
+  tf.frequency.linearRampToValueAtTime(760, t+dur);
+  tg.gain.setValueAtTime(0.0001,t);
+  tg.gain.exponentialRampToValueAtTime(0.22*A, t+dur*0.45);
+  tg.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+  tir.start(t, Math.random()*2); tir.stop(t+dur+0.05);
+  // エンジン全体の音量も山なり
+  eng.gain.setValueAtTime(0.0001,t);
+  eng.gain.exponentialRampToValueAtTime(1, t+dur*0.45);
+  eng.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+}
+
+/* クラクション：2音＋歪み */
+function horn(long){
+  const ac=N.ac, t=ac.currentTime, dur=long?0.85:0.32;
+  const ws=ac.createWaveShaper(); ws.curve=N.horn;
+  const lp=bq('lowpass',2600,1.0);
+  const g=gain(0);
+  ws.connect(lp); lp.connect(g); g.connect(N.master);
+  const rs=gain(0.2); g.connect(rs); rs.connect(N.revIn);
+  [440,554].forEach(f=>{
+    const o=ac.createOscillator(); o.type='sawtooth'; o.frequency.value=f;
+    const og=gain(0.16); o.connect(og); og.connect(ws); o.start(t); o.stop(t+dur+0.05);
+  });
+  g.gain.setValueAtTime(0.0001,t);
+  g.gain.exponentialRampToValueAtTime(0.55, t+0.015);
+  g.gain.setValueAtTime(0.55, t+dur-0.04);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+}
+
+/* レール継目の打音「ガタン」 */
+function railThump(t, amp, dest){
+  const ac=N.ac;
+  const s=src(N.white,false), f=bq('lowpass',150,1.4), g=gain(0);
+  s.connect(f); f.connect(g); g.connect(dest);
+  hit(g,t,amp,0.13,0.003);
+  s.start(t, Math.random()*2); s.stop(t+0.2);
+  // 金属の芯
+  const o=ac.createOscillator(); o.type='sine'; o.frequency.value=58+Math.random()*18;
+  const og=gain(0); o.connect(og); og.connect(dest);
+  hit(og,t,amp*0.8,0.10,0.002);
+  o.start(t); o.stop(t+0.15);
+  // 上の「カン」
+  const s2=src(N.white,false), f2=bq('bandpass',2600,3.0), g2=gain(0);
+  s2.connect(f2); f2.connect(g2); g2.connect(dest);
+  hit(g2,t,amp*0.35,0.06,0.002);
+  s2.start(t, Math.random()*2); s2.stop(t+0.1);
+}
+
+/* 電車の通過：継目のリズム＋擦れ＋低域＋ドップラー＋パン */
+function trainPass(cars){
+  const ac=N.ac, t=ac.currentTime;
+  const nCars=cars||6;
+  const speed=0.62;                    // 1両あたりの秒数
+  const dur=nCars*speed+1.6;
+  bgmDuck(1.0, dur*0.75);              // 通過中はBGMを控えさせる
+  const dir=Math.random()<0.5?1:-1;
+  const p=panner(-0.95*dir); p.connect(N.master);
+  const rs=gain(0.2); p.connect(rs); rs.connect(N.revIn);
+  p.pan.setValueAtTime(-0.95*dir,t);
+  p.pan.linearRampToValueAtTime(0.95*dir, t+dur);
+
+  const env=gain(0); env.connect(p);
+  env.gain.setValueAtTime(0.0001,t);
+  env.gain.exponentialRampToValueAtTime(1, t+dur*0.40);
+  env.gain.setValueAtTime(1, t+dur*0.58);
+  env.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+
+  // 低域の唸り
+  const b=src(N.brown,true), bf=bq('lowpass',200,1.1), bg=gain(0.55);
+  b.connect(bf); bf.connect(bg); bg.connect(env); b.start(t,Math.random()*2); b.stop(t+dur+0.1);
+  // 車輪とレールの擦れ（ドップラーで中心周波数を落とす）
+  const w=src(N.white,true), wf=bq('bandpass',2800,2.4), wg=gain(0.16);
+  w.connect(wf); wf.connect(wg); wg.connect(env);
+  wf.frequency.setValueAtTime(3200,t);
+  wf.frequency.linearRampToValueAtTime(3100, t+dur*0.45);
+  wf.frequency.linearRampToValueAtTime(2200, t+dur*0.62);
+  wf.frequency.linearRampToValueAtTime(2100, t+dur);
+  w.start(t,Math.random()*2); w.stop(t+dur+0.1);
+  // キーンという高い鳴き
+  const sq=src(N.white,true), sqf=bq('bandpass',4600,14), sqg=gain(0.05);
+  sq.connect(sqf); sqf.connect(sqg); sqg.connect(env);
+  sq.start(t,Math.random()*2); sq.stop(t+dur+0.1);
+
+  // レール継目：1両につき台車が2つ、台車には車軸が2つ → 「ガタン・ゴトン」の2連
+  for(let c=0;c<nCars;c++){
+    const base=t+0.8+c*speed;
+    [0, speed*0.55].forEach(off=>{
+      railThump(base+off,        0.30, env);
+      railThump(base+off+0.085,  0.22, env);
+    });
+  }
+}
+
+/* 発車（VVVFインバータの磁励音）：階段状に上がる音 */
+function vvvf(){
+  const ac=N.ac, t=ac.currentTime, dur=6.0;
+  const out=gain(0.10); out.connect(N.master);
+  const rs=gain(0.15); out.connect(rs); rs.connect(N.revIn);
+  const steps=[[0,120],[1.1,190],[2.2,300],[3.3,430],[4.4,560],[6.0,640]];
+  [[1,1],[2,0.4],[3,0.18]].forEach(([r,a])=>{
+    const o=ac.createOscillator(); o.type='sawtooth';
+    const f=bq('bandpass',900,1.6), g=gain(a*0.5);
+    o.connect(f); f.connect(g); g.connect(out);
+    o.frequency.setValueAtTime(steps[0][1]*r, t);
+    steps.forEach(([tt,ff])=>{ if(tt>0) o.frequency.linearRampToValueAtTime(ff*r, t+tt); });
+    o.start(t); o.stop(t+dur+0.2);
+  });
+  // 走り出しの継目とロードノイズ
+  const b=src(N.brown,true), bf=bq('lowpass',190,1.0), bg=gain(0);
+  b.connect(bf); bf.connect(bg); bg.connect(out);
+  bg.gain.setValueAtTime(0.0001,t); bg.gain.linearRampToValueAtTime(0.9, t+dur);
+  b.start(t,Math.random()*2); b.stop(t+dur+0.2);
+  let tt=1.2, gapv=0.62;
+  while(tt<dur){ railThump(t+tt,0.22,out); railThump(t+tt+0.08,0.16,out); tt+=gapv; gapv*=0.86; }
+  out.gain.setValueAtTime(0.0001,t);
+  out.gain.exponentialRampToValueAtTime(0.30,t+0.4);
+  out.gain.setValueAtTime(0.30,t+dur-1.0);
+  out.gain.exponentialRampToValueAtTime(0.0001,t+dur+0.15);
+}
+
+/* 踏切の警報音：金属打音を左右交互に */
+let xingFlip=false;
+function xingBell(){
+  const ac=N.ac, t=ac.currentTime;
+  xingFlip=!xingFlip;
+  const p=panner(xingFlip?-0.55:0.55); p.connect(N.xing.out);
+  const f0=xingFlip?700:660;
+  [[1,1],[2.71,0.5],[4.9,0.28],[7.4,0.14]].forEach(([r,a])=>{
+    const o=ac.createOscillator(); o.type='sine'; o.frequency.value=f0*r;
+    const g=gain(0); o.connect(g); g.connect(p);
+    hit(g,t,a*0.30,0.24*(1/Math.sqrt(r)),0.002);
+    o.start(t); o.stop(t+0.4);
+  });
+  const s=src(N.white,false), bf=bq('bandpass',f0*3,4), g=gain(0);
+  s.connect(bf); bf.connect(g); g.connect(p);
+  hit(g,t,0.12,0.05,0.001);
+  s.start(t,Math.random()*2); s.stop(t+0.1);
+}
+
+/* 雷 */
+function thunder(near){
+  const ac=N.ac, t=ac.currentTime;
+  bgmDuck(near?1.0:0.55, near?3.0:2.0);
+  const out=gain(1); out.connect(N.master);
+  const rs=gain(0.5); out.connect(rs); rs.connect(N.revIn);
+  if (near){ // 破裂
+    const s=src(N.white,false), f=bq('highpass',900), g=gain(0);
+    s.connect(f); f.connect(g); g.connect(out);
+    hit(g,t,0.75,0.35,0.002);
+    s.start(t,Math.random()*2); s.stop(t+0.5);
+  }
+  const dur=near?4.5:6.5;
+  const s2=src(N.brown,true), f2=bq('lowpass',400,0.9), g2=gain(0);
+  s2.connect(f2); f2.connect(g2); g2.connect(out);
+  f2.frequency.setValueAtTime(near?520:260,t);
+  f2.frequency.exponentialRampToValueAtTime(70, t+dur);
+  g2.gain.setValueAtTime(0.0001,t);
+  g2.gain.exponentialRampToValueAtTime(near?0.85:0.42, t+(near?0.12:0.9));
+  // ゴロゴロという揺らぎ
+  for(let i=0;i<7;i++){
+    const tt=t+(near?0.3:1.0)+i*(dur/9);
+    g2.gain.exponentialRampToValueAtTime(Math.max(0.02,(near?0.85:0.42)*(0.35+Math.random()*0.6)*(1-i/8)), tt);
+  }
+  g2.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+  s2.start(t,Math.random()*2); s2.stop(t+dur+0.2);
+}
+
+/* 雨粒（屋根・傘に当たる粒） */
+function drop(amt){
+  const ac=N.ac, t=ac.currentTime;
+  const s=src(N.white,false);
+  const f=bq('bandpass',1400+Math.random()*2800, 7+Math.random()*8);
+  const g=gain(0), p=panner((Math.random()-0.5)*1.4);
+  s.connect(f); f.connect(g); g.connect(p); p.connect(N.rain.out);
+  hit(g,t,0.30*amt*(0.5+Math.random()*0.8),0.035,0.001);
+  s.start(t,Math.random()*2); s.stop(t+0.08);
+}
+
+/* 川の泡「ポコッ」＝周波数が上に跳ねる正弦波 */
+function bubble(amt){
+  const ac=N.ac, t=ac.currentTime;
+  const o=ac.createOscillator(); o.type='sine';
+  const f0=700+Math.random()*1700;
+  o.frequency.setValueAtTime(f0,t);
+  o.frequency.exponentialRampToValueAtTime(f0*1.9, t+0.055);
+  const g=gain(0), p=panner((Math.random()-0.5)*1.5);
+  o.connect(g); g.connect(p); p.connect(N.river.out);
+  hit(g,t,0.16*amt*(0.4+Math.random()),0.07,0.004);
+  o.start(t); o.stop(t+0.12);
+}
+
+/* 足音 */
+const SURF={
+  asphalt:{n:'アスファルト', type:'bandpass', f:1500, q:1.1, dec:0.075, amp:0.55, grains:1},
+  grass:  {n:'草地',         type:'lowpass',  f:820,  q:0.9, dec:0.130, amp:0.42, grains:1},
+  gravel: {n:'砂利',         type:'highpass', f:1300, q:0.8, dec:0.110, amp:0.50, grains:4},
+  wood:   {n:'木道',         type:'bandpass', f:330,  q:3.2, dec:0.190, amp:0.62, grains:1},
+  water:  {n:'水たまり',     type:'bandpass', f:2200, q:1.0, dec:0.160, amp:0.45, grains:3},
+  snow:   {n:'雪',           type:'lowpass',  f:520,  q:0.8, dec:0.200, amp:0.38, grains:5},
+};
+function footstep(){
+  const cfg=SURF[surface], ac=N.ac;
+  for(let i=0;i<cfg.grains;i++){
+    const t=ac.currentTime+(i?Math.random()*0.04:0);
+    const s=src(N.white,false);
+    s.playbackRate.value=0.85+Math.random()*0.3;
+    const f=bq(cfg.type, cfg.f*(0.85+Math.random()*0.3), cfg.q);
+    const g=gain(0);
+    s.connect(f); f.connect(g); g.connect(N.master);
+    hit(g,t, cfg.amp*(0.75+Math.random()*0.4)/(i?2.6:1), cfg.dec, 0.005);
+    s.start(t, Math.random()*2); s.stop(t+cfg.dec+0.05);
+  }
+}
+
+/* ============================================================
+   BGM — シムシティ風のラウンジ・ジャズを手続き生成する
+   ============================================================ */
+const mtof = m => 440*Math.pow(2,(m-69)/12);
+
+function buildBgm(){
+  const ac=N.ac;
+  const out=gain(0);
+  const lp=bq('lowpass',3600,0.7);       // 少し丸めて「静か」に
+  out.connect(lp); lp.connect(N.master);
+  const rs=gain(0.5); lp.connect(rs); rs.connect(N.revIn);   // 残響を多めに
+  N.bgm={out, lp, duck:1};
+}
+
+/* --- エレピ（ローズ）: FMで金属質なアタックを作る。これがシムシティの音 --- */
+function rhodes(midi, t, amp, dec){
+  const ac=N.ac, f=mtof(midi);
+  const car=ac.createOscillator(); car.type='sine'; car.frequency.value=f;
+  const mod=ac.createOscillator(); mod.type='sine'; mod.frequency.value=f*2;
+  const mi=gain(0); mod.connect(mi); mi.connect(car.frequency);
+  mi.gain.setValueAtTime(f*1.7, t);                       // 打鍵直後だけ倍音が暴れる
+  mi.gain.exponentialRampToValueAtTime(f*0.015, t+0.20);
+  const g=gain(0); car.connect(g); g.connect(N.bgm.out);
+  g.gain.setValueAtTime(0.0001,t);
+  g.gain.exponentialRampToValueAtTime(Math.max(amp,0.0002), t+0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+dec);
+  car.start(t); car.stop(t+dec+0.05);
+  mod.start(t); mod.stop(t+dec+0.05);
+}
+
+/* --- ウッドベース --- */
+function upright(midi, t, amp, dec){
+  const ac=N.ac, f=mtof(midi);
+  const o=ac.createOscillator(); o.type='triangle';
+  o.frequency.setValueAtTime(f*1.04,t);
+  o.frequency.exponentialRampToValueAtTime(f, t+0.055);   // 指が着地するまでのわずかな滑り
+  const lp=bq('lowpass',430,1.3), g=gain(0);
+  o.connect(lp); lp.connect(g); g.connect(N.bgm.out);
+  g.gain.setValueAtTime(0.0001,t);
+  g.gain.exponentialRampToValueAtTime(Math.max(amp,0.0002), t+0.022);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+dec);
+  o.start(t); o.stop(t+dec+0.05);
+  const s=src(N.white,false), bf=bq('bandpass',280,2.2), sg=gain(0);
+  s.connect(bf); bf.connect(sg); sg.connect(N.bgm.out);
+  hit(sg,t,amp*0.22,0.05,0.002);                          // 弦をはじく音
+  s.start(t,Math.random()*2); s.stop(t+0.09);
+}
+
+/* --- ヴィブラフォン（トレモロつき） --- */
+function vibes(midi, t, amp, dec){
+  const ac=N.ac, f=mtof(midi);
+  const trem=gain(0.72); trem.connect(N.bgm.out);
+  const lfo=ac.createOscillator(); lfo.frequency.value=5.1;
+  const ld=gain(0.28); lfo.connect(ld); ld.connect(trem.gain);
+  lfo.start(t); lfo.stop(t+dec+0.2);
+  const env=gain(0); env.connect(trem);
+  [[1,1,1],[4,0.16,0.5]].forEach(([r,a,d])=>{
+    const o=ac.createOscillator(); o.type='sine'; o.frequency.value=f*r;
+    const g=gain(a);
+    o.connect(g); g.connect(env); o.start(t); o.stop(t+dec*d+0.1);
+  });
+  env.gain.setValueAtTime(0.0001,t);
+  env.gain.exponentialRampToValueAtTime(Math.max(amp,0.0002), t+0.008);
+  env.gain.exponentialRampToValueAtTime(0.0001, t+dec);
+}
+
+/* --- ブラシのスウィッシュ／シンバルのチッ --- */
+function brush(t, amp){
+  const s=src(N.white,true), f=bq('bandpass',3600,0.55), g=gain(0);
+  s.connect(f); f.connect(g); g.connect(N.bgm.out);
+  g.gain.setValueAtTime(0.0001,t);
+  g.gain.exponentialRampToValueAtTime(Math.max(amp,0.0002), t+0.07);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+0.30);
+  s.start(t,Math.random()*2); s.stop(t+0.36);
+}
+function ride(t, amp){
+  const s=src(N.white,false), f=bq('highpass',6800), g=gain(0);
+  s.connect(f); f.connect(g); g.connect(N.bgm.out);
+  hit(g,t,amp,0.09,0.002);
+  s.start(t,Math.random()*2); s.stop(t+0.14);
+}
+function shaker(t, amp){
+  const s=src(N.white,false), f=bq('bandpass',7200,1.2), g=gain(0);
+  s.connect(f); f.connect(g); g.connect(N.bgm.out);
+  hit(g,t,amp,0.055,0.004);
+  s.start(t,Math.random()*2); s.stop(t+0.1);
+}
+
+/* --- コード進行（ラウンジの定番ターンアラウンド in C） --- */
+const PROG=[
+  {n:'Cmaj9', bass:36, voice:[64,67,71,74], scale:[64,67,69,71,74,76]},
+  {n:'Am9',   bass:33, voice:[60,64,67,71], scale:[59,60,64,67,71,72]},
+  {n:'Dm9',   bass:38, voice:[57,60,65,69], scale:[60,62,65,69,72,74]},
+  {n:'G13',   bass:43, voice:[59,62,65,69], scale:[59,62,65,67,69,74]},
+];
+const SUB={n:'Db9', bass:37, voice:[59,63,66,68], scale:[59,63,66,68,71]};  // 裏コード（ときどき差し替え）
+
+const BGM_STYLES=[
+  {id:'lounge',  n:'ラウンジ・ジャズ'},
+  {id:'ambient', n:'アンビエント'},
+  {id:'bossa',   n:'ボサノバ'},
+];
+let bgmStyle='lounge', bgmOn=false, bgmBeat=0, bgmNextBeat=0, melIdx=2, barChords=[];
+
+function chordFor(bar){
+  if (!barChords[bar]){
+    let c = PROG[bar % PROG.length];
+    if (c.n==='G13' && Math.random()<0.28) c = SUB;      // 4小節目をまれに裏コードへ
+    barChords[bar]=c;
+    if (bar>8) delete barChords[bar-8];
+  }
+  return barChords[bar];
+}
+
+function bgmSchedule(){
+  if (!bgmOn || !N.bgm) return;
+  const ac=N.ac;
+  const bpm=parseFloat(document.getElementById('s_bpm').value);
+  const D=parseFloat(document.getElementById('s_dens').value)/100;
+  const beat=60/bpm;
+  const swing=beat*0.63;                 // 裏拍を後ろへ寄せる＝スウィング
+
+  if (bgmNextBeat===0) bgmNextBeat=ac.currentTime+0.15;
+
+  while (bgmNextBeat < ac.currentTime + 0.20){
+    const t=bgmNextBeat, b=bgmBeat, bar=Math.floor(b/4), bib=b%4;
+    const ch=chordFor(bar), nx=chordFor(bar+1);
+
+    if (bgmStyle==='ambient'){
+      /* コードだけを長く。ドラムなし。 */
+      if (b%8===0){
+        ch.voice.forEach((m,i)=> rhodes(m-12, t+i*0.09, 0.075*(0.6+0.4*D), 7.0));
+        upright(ch.bass, t, 0.10, 2.4);
+      }
+      if (b%4===2 && Math.random()<0.35*D){
+        melIdx=Math.max(0,Math.min(ch.scale.length-1, melIdx+(Math.random()<0.5?1:-1)));
+        vibes(ch.scale[melIdx]+12, t+beat*0.3, 0.055*D, 3.2);
+      }
+    }
+
+    else if (bgmStyle==='bossa'){
+      /* ボサノバ: ベースは1拍と3拍半、コードは裏に食い込む */
+      if (bib===0) upright(ch.bass, t, 0.15, 0.55);
+      if (bib===2) upright(ch.bass+7, t+beat*0.5, 0.12, 0.5);
+      const hits=[0.0,0.75,1.5,2.5,3.0];
+      if (bib===0){
+        hits.forEach(h=>{
+          if (Math.random()<0.55+0.4*D){
+            ch.voice.forEach((m,i)=> rhodes(m, t+h*beat+i*0.008, 0.055*(0.6+0.5*D), 1.1));
+          }
+        });
+      }
+      shaker(t, 0.028*D);
+      shaker(t+beat*0.5, 0.020*D);
+      if (bib===1 || bib===3) brush(t+beat*0.5, 0.014*D);
+      if (bar%2===1 && bib===2 && Math.random()<0.4*D){
+        for(let i=0;i<3;i++){
+          melIdx=Math.max(0,Math.min(ch.scale.length-1, melIdx+(Math.random()<0.5?1:-1)));
+          vibes(ch.scale[melIdx]+12, t+i*beat*0.33, 0.05*D, 1.4);
+        }
+      }
+    }
+
+    else {
+      /* ラウンジ・ジャズ（本命） */
+      // ウォーキングベース
+      let bn;
+      if (bib===0) bn=ch.bass;
+      else if (bib===1) bn=ch.bass+[7,5,3,4][Math.random()*4|0];
+      else if (bib===2) bn=ch.bass+[7,12,5][Math.random()*3|0];
+      else bn=nx.bass+(Math.random()<0.5?-1:1)+(Math.random()<0.3?12:0);   // 次のコードへの経過音
+      if (bib===0 || bib===2 || Math.random()<0.35+0.5*D) upright(bn, t, 0.155, 0.52);
+
+      // エレピのコンピング（1拍目と2拍の裏に置くのがジャズの呼吸）
+      const comp=[];
+      if (Math.random()<0.55+0.3*D) comp.push(0);
+      if (Math.random()<0.30+0.4*D) comp.push(swing);
+      comp.forEach(off=>{
+        const v=ch.voice.slice();
+        if (Math.random()<0.3) v.shift();               // ときどき音を抜く
+        v.forEach((m,i)=> rhodes(m+(Math.random()<0.15?12:0), t+off+i*0.010,
+                                0.062*(0.55+0.5*D), 1.7+Math.random()*0.8));
+      });
+
+      // シンバルはスウィングした8分で刻む（ごく小さく）
+      ride(t, 0.030*(0.5+0.6*D));
+      if (Math.random()<0.75) ride(t+swing, 0.019*(0.5+0.6*D));
+      // 2・4拍のブラシ
+      if (bib===1 || bib===3) brush(t, 0.020*(0.5+0.6*D));
+
+      // 4小節ごとにぽつりとメロディ
+      if (bar%4===3 && bib===0 && Math.random()<0.55*D){
+        const n=2+(Math.random()*3|0);
+        for(let i=0;i<n;i++){
+          melIdx=Math.max(0,Math.min(ch.scale.length-1, melIdx+(Math.random()<0.5?1:-1)));
+          vibes(ch.scale[melIdx]+12, t+i*swing*0.9, 0.048*D, 1.9);
+        }
+      }
+    }
+
+    if (bib===0){
+      const el=document.getElementById('chordNow');
+      const nm=ch.n;
+      setTimeout(()=>{ el.textContent=nm; }, Math.max(0,(t-ac.currentTime)*1000));
+    }
+
+    bgmNextBeat += beat;
+    bgmBeat++;
+  }
+}
+
+/* BGMを効果音で少し控えさせる（ダッキング） */
+function bgmDuck(strength, seconds){
+  if (!N.bgm || !bgmOn) return;
+  const amt=parseFloat(document.getElementById('s_duck').value)/100;
+  if (amt<=0) return;
+  const t=N.ac.currentTime, base=bgmLevel();
+  const g=N.bgm.out.gain;
+  g.cancelScheduledValues(t);
+  g.setTargetAtTime(base*(1-amt*strength), t, 0.12);
+  g.setTargetAtTime(base, t+seconds, 0.5);
+}
+function bgmLevel(){ return (parseFloat(document.getElementById('s_bgm').value)/100)*0.55; }
+function applyBgm(){
+  if(!N.bgm) return;
+  N.bgm.out.gain.setTargetAtTime(bgmOn?bgmLevel():0, N.ac.currentTime, 0.4);
+}
+
+/* ============================================================
+   スケジューラ（継続音の中の粒・イベント）
+   ============================================================ */
+let nextWave=0, nextXing=0, nextRailT=0, lastT=0;
+function tick(now){
+  requestAnimationFrame(tick);
+  if(!running) return;
+  const dt=Math.min(0.1,(now-lastT)/1000||0); lastT=now;
+  const T=N.ac.currentTime;
+
+  bgmSchedule();
+
+  // 波：一定間隔で次の波を仕込む（重なって連続に聞こえる）
+  if (L.sea.on){
+    if (T>nextWave){
+      const a=L.sea.amt/100;
+      waveOne(a, T+0.05);
+      nextWave = T + 2.6 + Math.random()*2.2 - a*0.9;
+    }
+  } else nextWave=0;
+
+  // 雨粒
+  if (L.rain.on){
+    const a=L.rain.amt/100;
+    const rate=a*a*46;                       // 強いほど急に増える
+    let k=rate*dt;
+    while(k>0){ if(Math.random()<Math.min(1,k)) drop(a); k-=1; }
+  }
+  // 川の泡
+  if (L.river.on){
+    const a=L.river.amt/100, rate=a*11;
+    let k=rate*dt;
+    while(k>0){ if(Math.random()<Math.min(1,k)) bubble(a); k-=1; }
+  }
+  // 街：車がときどき通る
+  if (L.city.on){
+    const a=L.city.amt/100;
+    if (Math.random() < a*0.55*dt) carPass(0.55+a*0.6);
+    if (Math.random() < a*0.012*dt) horn(false);   // まれにクラクション
+  }
+  // 電車の車内：レール継目を一定リズムで
+  if (L.train.on){
+    const a=L.train.amt/100;
+    const gap=Math.max(0.22, 0.95-a*0.62);
+    if (T>nextRailT){
+      const amp=0.16+a*0.20;
+      railThump(T+0.02, amp, N.train.out);
+      railThump(T+0.02+0.085, amp*0.7, N.train.out);
+      nextRailT=T+gap;
+    }
+  } else nextRailT=0;
+  // 踏切：カン・カン・カン…（0.40秒周期で左右交互）
+  if (L.xing.on){
+    if (T>nextXing){ xingBell(); nextXing = Math.max(T, nextXing) + 0.40; }
+  } else nextXing=0;
+
+  meter();
+}
+let meterBuf=null;
+function meter(){
+  if(!N.an) return;
+  if(!meterBuf) meterBuf=new Uint8Array(N.an.fftSize);
+  N.an.getByteTimeDomainData(meterBuf);
+  let peak=0;
+  for(let i=0;i<meterBuf.length;i++){ const v=Math.abs(meterBuf[i]-128)/128; if(v>peak) peak=v; }
+  document.getElementById('meter').style.width=Math.min(100,peak*130).toFixed(0)+'%';
+}
+
+/* ============================================================
+   UI
+   ============================================================ */
+const ONESHOTS=[
+  {n:'車が通過',      d:'ドップラー＋左右',  f:()=>carPass(1)},
+  {n:'クラクション',  d:'プッ',              f:()=>horn(false)},
+  {n:'クラクション長',d:'プァーッ',          f:()=>horn(true)},
+  {n:'電車が通過',    d:'6両・ガタンゴトン', f:()=>trainPass(6)},
+  {n:'電車が通過（短）',d:'2両',             f:()=>trainPass(2)},
+  {n:'発車',          d:'VVVF磁励音',        f:()=>vvvf()},
+  {n:'波 1回',        d:'寄せ→砕け→引き',   f:()=>waveOne(0.9)},
+  {n:'雷（近い）',    d:'バリッ…ゴロゴロ',   f:()=>thunder(true)},
+  {n:'雷（遠い）',    d:'ゴロゴロ',          f:()=>thunder(false)},
+];
+const SCENES=[
+  {n:'海岸',       s:{sea:[1,80], wind:[1,45], rain:[0,0], river:[0,0], city:[0,0], train:[0,0], xing:[0,0]}, surf:'gravel'},
+  {n:'相模川の河原',s:{sea:[0,0], wind:[1,30], rain:[0,0], river:[1,70], city:[1,20], train:[0,0], xing:[0,0]}, surf:'grass'},
+  {n:'街の交差点', s:{sea:[0,0], wind:[1,20], rain:[0,0], river:[0,0], city:[1,85], train:[0,0], xing:[0,0]}, surf:'asphalt'},
+  {n:'雨の街',     s:{sea:[0,0], wind:[1,35], rain:[1,75], river:[0,0], city:[1,55], train:[0,0], xing:[0,0]}, surf:'water'},
+  {n:'嵐の海',     s:{sea:[1,100],wind:[1,95], rain:[1,85], river:[0,0], city:[0,0], train:[0,0], xing:[0,0]}, surf:'water'},
+  {n:'踏切の前',   s:{sea:[0,0], wind:[1,25], rain:[0,0], river:[0,0], city:[1,45], train:[0,0], xing:[1,75]}, surf:'asphalt'},
+  {n:'電車の中',   s:{sea:[0,0], wind:[0,0],  rain:[0,0], river:[0,0], city:[0,0], train:[1,65], xing:[0,0]}, surf:'wood'},
+  {n:'全部OFF',    s:{sea:[0,0], wind:[0,0],  rain:[0,0], river:[0,0], city:[0,0], train:[0,0], xing:[0,0]}},
+];
+
+// 単発ボタン
+const osEl=document.getElementById('oneShots');
+ONESHOTS.forEach(o=>{
+  const b=document.createElement('button');
+  b.className='btn'; b.innerHTML=o.n+'<small>'+o.d+'</small>';
+  const go=e=>{ if(e) e.preventDefault(); if(running) o.f(); };
+  b.addEventListener('click',go);
+  osEl.appendChild(b);
+});
+
+// 継続音
+const lpEl=document.getElementById('loops');
+LOOPS.forEach(l=>{
+  L[l.id]={on:false, amt:l.def};
+  const wrap=document.createElement('div'); wrap.className='lp';
+  const row=document.createElement('div'); row.className='lprow';
+  const tg=document.createElement('button'); tg.className='tg'; tg.textContent=l.n;
+  const sl=document.createElement('input'); sl.type='range'; sl.min=0; sl.max=100; sl.step=1; sl.value=l.def;
+  const pc=document.createElement('span'); pc.className='pct'; pc.textContent=l.def;
+  tg.addEventListener('click',()=>{
+    L[l.id].on=!L[l.id].on;
+    tg.classList.toggle('on', L[l.id].on);
+    applyLoops();
+  });
+  sl.addEventListener('input',()=>{
+    L[l.id].amt=parseFloat(sl.value); pc.textContent=sl.value;
+    if(!L[l.id].on){ L[l.id].on=true; tg.classList.add('on'); }
+    applyLoops();
+  });
+  row.appendChild(tg); row.appendChild(sl); row.appendChild(pc);
+  wrap.appendChild(row); lpEl.appendChild(wrap);
+  L[l.id]._tg=tg; L[l.id]._sl=sl; L[l.id]._pc=pc;
+});
+
+// 足音
+const sfEl=document.getElementById('surfaces');
+Object.keys(SURF).forEach(id=>{
+  const b=document.createElement('button');
+  b.className='chip'+(id===surface?' on':''); b.textContent=SURF[id].n; b.dataset.id=id;
+  b.addEventListener('click',()=>{
+    surface=id;
+    [...sfEl.children].forEach(c=>c.classList.toggle('on', c.dataset.id===surface));
+    if(running) footstep();
+  });
+  sfEl.appendChild(b);
+});
+
+// シーン
+const scEl=document.getElementById('scenes');
+SCENES.forEach(s=>{
+  const b=document.createElement('button');
+  b.className='chip'; b.textContent=s.n;
+  b.addEventListener('click',()=>{
+    [...scEl.children].forEach(c=>c.classList.remove('on')); b.classList.add('on');
+    Object.keys(s.s).forEach(k=>{
+      const [on,amt]=s.s[k];
+      L[k].on=!!on; L[k].amt=amt||L[k].amt;
+      L[k]._tg.classList.toggle('on', L[k].on);
+      L[k]._sl.value=L[k].amt; L[k]._pc.textContent=L[k].amt;
+    });
+    if (s.surf){ surface=s.surf; [...sfEl.children].forEach(c=>c.classList.toggle('on', c.dataset.id===surface)); }
+    applyLoops();
+  });
+  scEl.appendChild(b);
+});
+
+// BGM
+const bsEl=document.getElementById('bgmStyles');
+BGM_STYLES.forEach(s=>{
+  const b=document.createElement('button');
+  b.className='chip'+(s.id===bgmStyle?' on':''); b.textContent=s.n; b.dataset.id=s.id;
+  b.addEventListener('click',()=>{
+    bgmStyle=s.id;
+    [...bsEl.children].forEach(c=>c.classList.toggle('on', c.dataset.id===bgmStyle));
+    barChords=[];                                  // 進行を作り直す
+    if (!bgmOn){ bgmOn=true; document.getElementById('bgmTg').classList.add('on'); applyBgm(); }
+  });
+  bsEl.appendChild(b);
+});
+const bgmTg=document.getElementById('bgmTg');
+bgmTg.addEventListener('click',()=>{
+  bgmOn=!bgmOn; bgmTg.classList.toggle('on',bgmOn);
+  if (bgmOn && N) bgmNextBeat=N.ac.currentTime+0.15;
+  applyBgm();
+});
+document.getElementById('s_bgm').addEventListener('input',function(){
+  document.getElementById('v_bgm').textContent=this.value;
+  if(!bgmOn){ bgmOn=true; bgmTg.classList.add('on'); if(N) bgmNextBeat=N.ac.currentTime+0.15; }
+  applyBgm();
+});
+[['s_bpm','v_bpm'],['s_dens','v_dens'],['s_duck','v_duck']].forEach(([s,v])=>{
+  document.getElementById(s).addEventListener('input',function(){
+    document.getElementById(v).textContent=this.value;
+  });
+});
+
+document.getElementById('s_vol').addEventListener('input',function(){
+  document.getElementById('v_vol').textContent=this.value;
+  if(N) N.master.gain.setTargetAtTime(vol()/100, N.ac.currentTime, 0.15);
+});
+
+/* 起動・停止 */
+function start(){
+  if(running) return;
+  ctx=new (window.AudioContext||window.webkitAudioContext)();
+  if(ctx.state==='suspended') ctx.resume();
+  build();
+  // メーター用
+  N.an=ctx.createAnalyser(); N.an.fftSize=512;
+  N.master.connect(N.an);
+  running=true;
+  document.getElementById('startWrap').style.display='none';
+  document.getElementById('stopBar').classList.add('show');
+  lastT=performance.now();
+  applyLoops();
+  requestAnimationFrame(tick);
+}
+const sb=document.getElementById('startBtn');
+sb.addEventListener('click',start);
+sb.addEventListener('touchend',e=>{e.preventDefault();start();},{passive:false});
+
+function togglePause(){
+  if(!ctx) return;
+  const btn=document.getElementById('stopBtn');
+  if(paused){
+    ctx.resume(); paused=false; running=true; lastT=performance.now();
+    nextWave=0; nextXing=0; nextRailT=0; bgmNextBeat=0;
+    btn.textContent='■ 停止'; btn.classList.remove('paused');
+  } else {
+    running=false; ctx.suspend(); paused=true;
+    document.getElementById('meter').style.width='0%';
+    btn.textContent='▶ 再開'; btn.classList.add('paused');
+  }
+}
+const stb=document.getElementById('stopBtn');
+stb.addEventListener('click',togglePause);
+stb.addEventListener('touchend',e=>{e.preventDefault();togglePause();},{passive:false});
+
+function allOff(){
+  LOOPS.forEach(l=>{ L[l.id].on=false; L[l.id]._tg.classList.remove('on'); });
+  [...scEl.children].forEach(c=>c.classList.remove('on'));
+  applyLoops();
+}
+const ao=document.getElementById('allOffBtn');
+ao.addEventListener('click',allOff);
+ao.addEventListener('touchend',e=>{e.preventDefault();allOff();},{passive:false});
+
+window.addEventListener('keydown',e=>{ if(e.code==='Space'&&ctx){e.preventDefault();togglePause();} });
+document.addEventListener('visibilitychange',()=>{ if(document.hidden&&ctx&&!paused) togglePause(); });
+
+})();
+</script>
+</body>
+</html>
