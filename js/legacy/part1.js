@@ -96,6 +96,11 @@ const I18N = {
     geoBtnLabelActive: '🛰 追従中',
     geoFollowBadgeLabel: '🛰 GPS追従中',
     geoFollowBadgeTitle: 'タップで解除',
+    // 【2026-08-17・IMPL_PROMPT_20260815_GEO_RAIL_LOCK.md】GPS追従中の「線路ロック」トグル。3状態。
+    railLockBadgeLabel: '🚃 線路ロック',
+    railLockBadgeLabelActive: '🚃 線路ロック中',
+    railLockBadgeLabelSearching: '🚃 線路を探索中',
+    railLockBadgeTitle: 'タップで切替(線路ロック)',
     mapHintGeoTracking: '📡 GPS追従中(現在地ボタンでいつでも解除できます)',
     mapHintGeoStopped: '📡 GPS追従を解除しました',
     mapHintGeoBlocked: '⚠️ このサイトで位置情報がブロックされています。ブラウザのアドレスバー付近の🔒(サイト情報)アイコン→位置情報の設定を「許可」に変更してから、もう一度お試しください',
@@ -209,6 +214,11 @@ const I18N = {
     geoBtnLabelActive: '🛰 Following',
     geoFollowBadgeLabel: '🛰 GPS Following',
     geoFollowBadgeTitle: 'Tap to stop',
+    // 【2026-08-17・IMPL_PROMPT_20260815_GEO_RAIL_LOCK.md】"Rail Lock" toggle during GPS follow. 3 states.
+    railLockBadgeLabel: '🚃 Rail Lock',
+    railLockBadgeLabelActive: '🚃 Rail Locked',
+    railLockBadgeLabelSearching: '🚃 Seeking rail',
+    railLockBadgeTitle: 'Tap to toggle',
     mapHintGeoTracking: '📡 Following your GPS location (tap the location button to stop anytime)',
     mapHintGeoStopped: '📡 GPS follow stopped',
     mapHintGeoBlocked: '⚠️ Location access is blocked for this site. Tap the 🔒 (site info) icon near the address bar, allow Location, then try again',

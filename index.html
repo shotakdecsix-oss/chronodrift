@@ -193,6 +193,24 @@ body {
 #routeCamModeBtn:hover { background:rgba(30,110,160,0.95); }
 #routeCamModeBtn.active { background:rgba(139,123,255,0.45); border-color:var(--accent); }
 
+/* 【2026-08-17・IMPL_PROMPT_20260815_GEO_RAIL_LOCK.md】GPS追従中だけ使える「線路ロック」トグル。
+   geoFollowBadge/routeSimBadgeと同じ常時表示バッジパターン(altKeepBtnと同じactive配色)。
+   top位置は+184px(geoFollowBadgeの直下=+96pxではなく、routeSpeedHudのさらに下)にしている —
+   routeSimBadge/routeSpeedHudはhasRoute(経路検索済みか)だけで表示が決まりgeoModeActiveとは
+   独立のため、GPS追従中に経路検索だけ済んでいる状態だと両方同時に表示され得る。+96pxへ
+   単純に積むと衝突するため、既存の帯の一番下に置く。 */
+#railLockBadge {
+  position:fixed; top:calc(var(--safe-top) + 184px); right:var(--safe-right);
+  border-radius:999px; padding:6px 14px; font-size:12px; font-family:inherit; z-index:45;
+  color:var(--text); white-space:nowrap; pointer-events:all; cursor:pointer;
+  display:none;
+  transition:transform .1s, opacity .2s;
+}
+#railLockBadge.show { display:block; }
+#railLockBadge:active { transform:scale(.94); }
+#railLockBadge.active { background:rgba(139,123,255,0.45); border-color:var(--accent); }
+#railLockBadge.searching { opacity:.6; }
+
 /* Touch joystick */
 #joystick {
   position:fixed; bottom:calc(var(--safe-bottom) + 24px); left:calc(var(--safe-left) + 12px);
@@ -425,6 +443,11 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
      ジョイスティックの取得対象から除外する作りのため、divのままだとタップがそちらに
      奪われてワンタッチ解除が効かなくなる。 -->
 <button id="geoFollowBadge" type="button" class="glass" data-i18n="geoFollowBadgeLabel" data-i18n-title="geoFollowBadgeTitle" title="タップで解除">🛰 GPS追従中</button>
+
+<!-- 【2026-08-17・IMPL_PROMPT_20260815_GEO_RAIL_LOCK.md】GPS追従モード中だけ使える「線路ロック」
+     トグル。geoFollowBadgeと同じ理由でbuttonにする(タップ即応答)。表示条件・3状態ラベルの
+     切替はpart7.js updateGeoBtnUI/updateRailLockBadgeが行う。 -->
+<button id="railLockBadge" type="button" class="glass" data-i18n="railLockBadgeLabel" data-i18n-title="railLockBadgeTitle" title="タップで切替(線路ロック)">🚃 線路ロック</button>
 
 <!-- 2026-07-28: 経路シミュレーション(モードB)中であることを常時示すバッジ(part10.js)。
      geoFollowBadgeと同じ理由でbuttonにする(タップで即終了=ワンタッチ離脱)。 -->

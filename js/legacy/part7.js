@@ -324,6 +324,61 @@ let geoVelX = 0, geoVelZ = 0;          // 推定水平速度(m/s)
 const GEO_MAX_SPEED = 8;               // 速度推定の上限(m/s)。GPS誤差による瞬間的な暴走を抑える(早歩き〜軽いジョグ程度まで許容)
 const GEO_EXTRAPOLATE_MAX = 5;         // 新しいフィックスが来ないまま外挿し続ける秒数の上限(信号ロスト時の暴走防止)
 
+// 【2026-08-17・IMPL_PROMPT_20260815_GEO_RAIL_LOCK.md】GPS追従モード中だけ使える「線路ロック」。
+// 電車に乗ると、Android Fused Location Provider(iOSの同等機能)のroad snapping仕様により、
+// 車両移動と判定した測位値が最寄り「道路」の中心線へ吸着され、線路ではなく並走道路の上に
+// 乗ってしまう不具合の対症療法。Web Geolocation APIにこの補正を無効化する手段はなく、
+// OS側の挙動をアプリから止めることはできないため、こちら側でXZ座標を最寄りの線路
+// セグメントへ引き戻す。ユーザーが明示的にONにした時だけ働く(速度による自動ON判定はしない)。
+let railLockOn = false;      // ユーザーがトグルをONにしているか
+let railLockOk = false;      // 直近のフィックスで実際に線路へスナップできたか(UI表示用)
+let railLockLastWid = null;  // 直前にスナップした線路のway ID(連続性ボーナス用)
+let railLockDir = null;      // 直近スナップ時の線路方向(正規化ベクトル{x,z})。向き決定に使う
+// 【本指示書3-1には無いが3-5(向き決定)の要件を満たすために必要な状態】進行方向の符号
+// (+1/-1)。速度がほぼ0(停車中)の間はこの符号を更新せず保持することで、停車中に体の
+// 向きが反転しないようにする(part9.js geoOnUpdate参照)。
+let railLockFacingSign = 1;
+
+const RAIL_SNAP_MAX_DIST = 80;   // この距離(m)以内に線路が無ければスナップしない
+const RAIL_SAME_WAY_BONUS = 0.6; // 直前と同じwidのセグメントは距離をこの倍率で評価(並走路線のちらつき防止)
+const GEO_MAX_SPEED_RAIL = 60;   // 線路ロックON中の速度推定上限(m/s)。216km/h相当(新幹線も想定)
+
+// (x, z) から半径RAIL_SNAP_MAX_DIST以内で最も近い線路セグメントへ垂線投影する。
+// 見つからなければnull。返り値 { x, z, wid, dirX, dirZ, dist }。
+// roadGrid(part1.js、ROAD_CELL=40m四方の空間ハッシュ)を使い、roadRecords全件走査はしない。
+function snapToRail(x, z) {
+  const cellR = Math.ceil(RAIL_SNAP_MAX_DIST / ROAD_CELL); // 80/40=2 → ±2セル、5×5=25セル
+  const gx = Math.floor(x / ROAD_CELL), gz = Math.floor(z / ROAD_CELL);
+  const seen = new Set(); // 同じレコードが複数セルに登録されているため二重評価を避ける(可読性のため)
+  let best = null, bestEval = Infinity;
+  for (let dx = -cellR; dx <= cellR; dx++) {
+    for (let dz = -cellR; dz <= cellR; dz++) {
+      const arr = roadGrid.get((gx + dx) + ',' + (gz + dz));
+      if (!arr) continue;
+      for (const r of arr) {
+        if (r.type !== 'railway') continue; // 'water'や道路種別は絶対に含めない
+        if (seen.has(r)) continue;
+        seen.add(r);
+        const rdx = r.x2 - r.x1, rdz = r.z2 - r.z1;
+        const len2 = rdx * rdx + rdz * rdz;
+        if (len2 < 0.01) continue; // 退化セグメント(isOnRoad/isNearWaterと同じガード)
+        let t = ((x - r.x1) * rdx + (z - r.z1) * rdz) / len2;
+        if (t < 0) t = 0; else if (t > 1) t = 1; // 線分の外側へ外挿しない
+        const cx = r.x1 + rdx * t, cz = r.z1 + rdz * t;
+        const dist = Math.hypot(x - cx, z - cz);
+        if (dist > RAIL_SNAP_MAX_DIST) continue;
+        const evalDist = dist * (r.wid === railLockLastWid ? RAIL_SAME_WAY_BONUS : 1.0);
+        if (evalDist < bestEval) {
+          bestEval = evalDist;
+          const len = Math.sqrt(len2);
+          best = { x: cx, z: cz, wid: r.wid, dirX: rdx / len, dirZ: rdz / len, dist };
+        }
+      }
+    }
+  }
+  return best;
+}
+
 // 【2026-07-27・向きをスマホのコンパスに変更(ユーザー要望)】GPS移動ベクトルからの推定は
 // フィックスが数秒おきにしか来ない上に短距離では誤差が大きく、視界が安定しないとの報告。
 // Device Orientation(コンパス)は静止中も含め高頻度・連続的に向きが取れるため、これを
@@ -401,24 +456,56 @@ function onGeoFix(pos) {
     return;
   }
   const { x, z } = latLonToXZ(lat, lon);
+
+  // 【2026-08-17・IMPL_PROMPT_20260815_GEO_RAIL_LOCK.md】線路ロック: ONの間、生のXZ座標を
+  // 最寄りの線路セグメントへ垂線投影してから以降の速度推定・向き推定・ミニマップ表示に流す。
+  // 見つからない場合(線路データ未ロード区間・線路が遠い等)は生座標のまま通す(フォールバック。
+  // フリーズ・ワープはしない)。以降、既存コードのx/zの参照はすべてpx/pzに置き換えている。
+  let px = x, pz = z;
+  let railDist = null;
+  if (railLockOn) {
+    const s = snapToRail(px, pz);
+    if (s) {
+      px = s.x; pz = s.z;
+      railLockLastWid = s.wid;
+      railLockDir = { x: s.dirX, z: s.dirZ };
+      railLockOk = true;
+      railDist = s.dist;
+    } else {
+      railLockOk = false;   // 線路が見つからない: 生座標のまま通す(フォールバック)
+    }
+  } else {
+    railLockOk = false; railLockLastWid = null; railLockDir = null;
+  }
+  updateRailLockBadge(); // 状態の反映はフィックスのたび(数秒に1回)。毎フレームはやらない
+  // スナップ後座標をlat/lonに戻す(ミニマップ表示と下のログ出力の両方で使い回す)
+  const snappedLL = xzToLatLon(px, pz);
+  // 実機デバッグの生命線: 生lat/lon・スナップ後lat/lon・railLockOk・最寄り線路までの距離を1行で出す
+  console.log('[geo] fix lat/lon=', lat.toFixed(6), lon.toFixed(6),
+    'snapped lat/lon=', snappedLL.lat.toFixed(6), snappedLL.lon.toFixed(6),
+    'railLockOn=', railLockOn, 'railLockOk=', railLockOk,
+    'railDist=', railDist === null ? 'n/a' : railDist.toFixed(1) + 'm');
+
   const now = performance.now();
 
   // 速度推定(dead reckoning用)。直近フィックスからの単純な有限差分だが、GPS誤差による
-  // 瞬間的な暴走を防ぐためGEO_MAX_SPEEDで上限クランプする。極端に短い間隔(重複フィックス等)
-  // は分母が小さくノイズが増幅されるため速度推定に使わない(位置・向きの更新は別途行う)。
+  // 瞬間的な暴走を防ぐためGEO_MAX_SPEED(線路ロック中はGEO_MAX_SPEED_RAIL=60m/s・216km/h相当。
+  // 新幹線も想定)で上限クランプする。極端に短い間隔(重複フィックス等)は分母が小さく
+  // ノイズが増幅されるため速度推定に使わない(位置・向きの更新は別途行う)。
   if (geoAnchorTime !== null) {
     const dtSec = (now - geoAnchorTime) / 1000;
     if (dtSec > 0.15) {
-      let vx = (x - geoAnchorX) / dtSec, vz = (z - geoAnchorZ) / dtSec;
+      let vx = (px - geoAnchorX) / dtSec, vz = (pz - geoAnchorZ) / dtSec;
       const speed = Math.hypot(vx, vz);
-      if (speed > GEO_MAX_SPEED) { const s = GEO_MAX_SPEED / speed; vx *= s; vz *= s; }
+      const maxSpeed = railLockOn ? GEO_MAX_SPEED_RAIL : GEO_MAX_SPEED;
+      if (speed > maxSpeed) { const s = maxSpeed / speed; vx *= s; vz *= s; }
       geoVelX = vx; geoVelZ = vz;
     }
   }
-  geoAnchorX = x; geoAnchorZ = z; geoAnchorTime = now;
+  geoAnchorX = px; geoAnchorZ = pz; geoAnchorTime = now;
 
   if (geoLastFixXZ) {
-    const dx = x - geoLastFixXZ.x, dz = z - geoLastFixXZ.z;
+    const dx = px - geoLastFixXZ.x, dz = pz - geoLastFixXZ.z;
     const dist = Math.hypot(dx, dz);
     if (dist >= GEO_HEADING_MIN_DIST) {
       // 【2026-07-28修正・ユーザー報告(経路シムで同じ症状が出て発覚)】camYawの前方ベクトルは
@@ -431,12 +518,16 @@ function onGeoFix(pos) {
       // 同じ規約(Frame A)が必要なため、geoOnUpdate側で+Math.PIして変換している(このFrame B
       // の値自体は変更不要)。
       geoTargetYaw = Math.atan2(-dx, -dz);
-      geoLastFixXZ = { x, z };
+      geoLastFixXZ = { x: px, z: pz };
     }
   } else {
-    geoLastFixXZ = { x, z };
+    geoLastFixXZ = { x: px, z: pz };
   }
-  if (leafletMap && playerMarker) playerMarker.setLatLng([lat, lon]);
+  // 【2026-08-17】ミニマップのマーカーも3D側と同じスナップ後座標にする(線路ロック中に
+  // ミニマップだけ生GPS位置=道路上のままだと3D側と位置が食い違って見えるため)。
+  if (leafletMap && playerMarker) {
+    playerMarker.setLatLng([snappedLL.lat, snappedLL.lon]);
+  }
 }
 
 function updateGeoBtnUI() {
@@ -452,6 +543,22 @@ function updateGeoBtnUI() {
   // 画面上に常時見える小さなバッジを追加し、追従中だけ表示する(UI非表示モードでも
   // addressDisplayと同格の重要情報として残す。非表示リストに加えていない)。
   if (geoFollowBadgeEl) geoFollowBadgeEl.classList.toggle('show', geoModeActive);
+  // 【2026-08-17・IMPL_PROMPT_20260815_GEO_RAIL_LOCK.md】線路ロックバッジもGPS追従中だけ表示。
+  if (railLockBadgeEl) railLockBadgeEl.classList.toggle('show', geoModeActive);
+}
+
+// 【2026-08-17・IMPL_PROMPT_20260815_GEO_RAIL_LOCK.md】線路ロックバッジの3状態ラベル・配色を
+// 反映する。呼び出しはonGeoFixのたび(数秒に1回)とトグル操作時のみ(geoOnUpdate内で毎フレーム
+// やらない)。data-i18n属性ごと書き換えることで、既存applyI18n()の言語切替にも自動追従する
+// (js/core/audio.jsの設定UIトグルと同じパターン)。
+function updateRailLockBadge() {
+  if (!railLockBadgeEl) return;
+  railLockBadgeEl.classList.toggle('active', railLockOn);
+  railLockBadgeEl.classList.toggle('searching', railLockOn && !railLockOk);
+  const key = !railLockOn ? 'railLockBadgeLabel'
+    : (railLockOk ? 'railLockBadgeLabelActive' : 'railLockBadgeLabelSearching');
+  railLockBadgeEl.setAttribute('data-i18n', key);
+  railLockBadgeEl.textContent = t(key);
 }
 
 function startGeoFollow() {
@@ -544,6 +651,10 @@ function stopGeoFollow() {
   geoModeActive = false;
   geoLastFixXZ = null; geoTargetYaw = null;
   geoAnchorTime = null; geoVelX = 0; geoVelZ = 0;
+  // 【2026-08-17・IMPL_PROMPT_20260815_GEO_RAIL_LOCK.md】GPS追従を抜けたのに線路ロック状態が
+  // 残るのは禁止(下車後の切り忘れとは別に、追従自体をやめた時は必ずリセットする)。
+  railLockOn = false; railLockOk = false; railLockLastWid = null; railLockDir = null;
+  updateRailLockBadge();
   detachOrientationListener();
   if (window.ModeRegistry) ModeRegistry.switchMode('explore');
   updateGeoBtnUI();
@@ -559,6 +670,15 @@ const geoFollowBadgeEl = document.getElementById('geoFollowBadge');
 // 常時表示のバッジ自体をワンタッチで追従解除できるようにする(bindTapButtonで
 // タッチ/クリックどちらでも即座に反応。他のHUDボタンと同じパターン)。
 if (geoFollowBadgeEl) bindTapButton(geoFollowBadgeEl, () => { if (geoModeActive) stopGeoFollow(); });
+
+// 【2026-08-17・IMPL_PROMPT_20260815_GEO_RAIL_LOCK.md】線路ロックのON/OFFトグル。
+// bindTapButtonを使う(clickだけだと横向き時に反応しないことがある既知の不具合、上記コメント参照)。
+const railLockBadgeEl = document.getElementById('railLockBadge');
+if (railLockBadgeEl) bindTapButton(railLockBadgeEl, () => {
+  railLockOn = !railLockOn;
+  if (!railLockOn) { railLockLastWid = null; railLockDir = null; railLockOk = false; }
+  updateRailLockBadge();
+});
 
 // 【2026-07-23修正】引数名がグローバルのi18n関数t()と衝突し、この関数内で
 // t('gpsElevation',...)を呼ぶと引数(経過時間の数値)の方が優先されて

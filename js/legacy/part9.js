@@ -837,11 +837,27 @@ function geoOnUpdate(dt) {
   player.position.z += dz * Math.min(1, dt * GEO_POS_SMOOTH);
   const isMoving = Math.hypot(geoVelX, geoVelZ) > 0.15 || Math.hypot(dx, dz) > 0.05;
 
-  // 向き: スマホのコンパス(geoCompassHeading、part7.js)が新しければ最優先で使う。
-  // 取れていない/古い(GEO_COMPASS_STALE_MS超)場合はGPS移動ベクトル推定(geoTargetYaw)に
-  // フォールバックする。explore同様の角度差平滑で回頭する(体の向き=実際に歩いている方向)。
+  // 向き: 線路ロック中(railLockOn && railLockOk)は線路方向を最優先で使う。電車内は車体の
+  // 金属でコンパスが狂うため([[project_isehara_game_geo_train_road_snap]])。それ以外はスマホの
+  // コンパス(geoCompassHeading、part7.js)が新しければ次点で使う。どちらも無ければGPS移動
+  // ベクトル推定(geoTargetYaw)にフォールバックする。explore同様の角度差平滑で回頭する
+  // (体の向き=実際に歩いている方向)。
   let effectiveYaw = geoTargetYaw;
-  if (geoCompassHeading !== null && geoCompassLastUpdate !== null &&
+  if (railLockOn && railLockOk && railLockDir) {
+    // 【2026-08-17・IMPL_PROMPT_20260815_GEO_RAIL_LOCK.md】線路方向(railLockDir)は向き(前後)を
+    // 決めていない正規化ベクトルなので、直近の推定速度ベクトル(geoVelX/Z)との内積の符号で
+    // 進行方向を決める。速度がほぼ0(停車中)の間はrailLockFacingSign(part7.js)を更新せず、
+    // 直前の符号を保持する(停車中に体の向きが反転しないように)。
+    const speedMag = Math.hypot(geoVelX, geoVelZ);
+    if (speedMag >= 0.5) {
+      const dot = geoVelX * railLockDir.x + geoVelZ * railLockDir.z;
+      railLockFacingSign = dot < 0 ? -1 : 1;
+    }
+    const fx = railLockDir.x * railLockFacingSign, fz = railLockDir.z * railLockFacingSign;
+    // 既存のgeoTargetYaw/GEO_COMPASS分岐と同じFrame B規約(atan2(-dx,-dz)、part7.js onGeoFix
+    // 参照)で揃える。独自の符号調整はしない([[project_isehara_game_body_vs_camera_yaw_convention]])。
+    effectiveYaw = Math.atan2(-fx, -fz);
+  } else if (geoCompassHeading !== null && geoCompassLastUpdate !== null &&
       (performance.now() - geoCompassLastUpdate) < GEO_COMPASS_STALE_MS) {
     // GEO_COMPASS_OFFSET_DEG(part7.js): 実機で進行方向と逆向きになる報告があったための補正。
     const hRad = (geoCompassHeading + GEO_COMPASS_OFFSET_DEG) * Math.PI / 180;
