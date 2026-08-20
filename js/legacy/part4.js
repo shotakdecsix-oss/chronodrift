@@ -187,6 +187,12 @@ function recenterOrigin(lat, lon) {
   MID_LAT = lat; MID_LON = lon;
   COS_LAT = Math.cos(lat * Math.PI / 180);
   regionBaseReady = false;
+  // 【2026-08-19・IMPL_PROMPT_20260819_GSI_DEM_FALLBACK.md】指示書は対象ファイルにpart6.jsを
+  // 挙げていたが、実際にregionBaseReadyをfalseへ戻しているのはこの関数(part4.js)であり、
+  // part6.jsにはrecenterOrigin自体が存在しない。DEM整備状況は地域ごとに異なる
+  // (_gsiPreferHiResはpart5.js)ため、regionBaseReadyと同じ「地域をまたいだ時だけ」の
+  // リセット地点であるここに合わせて戻す。
+  if (typeof _gsiPreferHiRes !== 'undefined') _gsiPreferHiRes = false;
   // 【2026-08-12・COASTLINE_CANDIDATE_SET.md】coastlineWayStore/coastlineIslandStoreは
   // 旧原点基準のx,z座標を保持しているため、原点付け替えで全部無効になる。忘れると
   // 別都市の海岸線が新しい原点の座標系に紛れ込む(この関数はcoastlineWayStore/

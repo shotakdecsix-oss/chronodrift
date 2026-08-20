@@ -183,20 +183,32 @@ async function runLimited(items, worker, limit = FETCH_CONCURRENCY) {
 // 日本国内では国土地理院の標高タイル(dem_png: DEM10B相当、z14、約10mメッシュ)を
 // 並列取得する。レート制限・日次上限が無く、地形読み込みが数十秒→数秒になる。
 // ・タイルはCORS対応なのでプロキシを通さず直接fetchできる(ブラウザHTTPキャッシュも効く)
-// ・海上などタイルが無い場所は404が正常応答 → 「データ無し」(呼び出し側で海底/0m扱い)
 // ・日本のカバー範囲外の点が混じるグリッドや、ネットワークエラー時は null を返し、
 //   呼び出し側が従来どおり opentopodata へフォールバックする(挙動の安全網は従来のまま)
-const GSI_DEM_Z = 14;
-const _gsiTiles = new Map(); // "tx,ty" -> Promise<Float32Array|null> (null=タイル無し/海上)
-const GSI_TILE_CACHE_MAX = 120; // 約30MB。超えたら古い順に捨てる(HTTPキャッシュがあるので再取得は速い)
+//
+// 【2026-08-19・IMPL_PROMPT_20260819_GSI_DEM_FALLBACK.md】404は「海」ではない。
+// GSIの標高タイルはDEM5A/5B/5C(z15)/DEM10B(z14=dem_png)の4種類あり、整備範囲が異なる。
+// 東京都心・湾岸はDEM5Aのみ整備でdem_pngは全面404。実測: dem_png/14/14556/6456=404、
+// 同一地点の dem5a_png/15/29107/12906 = 3.64m。404を「海」と断定していたため、
+// 晴海・豊洲・有明が丸ごとoceanFloorに落ち水没していた。
+// 【無効値(2^23)は従来どおり「水面=データ無し」で確定させる】これは実測で正しいと確認済み
+// (豊洲沖はタイル200・ピクセル無効値)。再挑戦するのは「タイル自体が404」の点だけ。
+const GSI_DEM_SETS = [
+  { name: 'dem_png',   z: 14 },  // DEM10B。全国だが都市部・平野部に穴がある
+  { name: 'dem5a_png', z: 15 },  // 航空レーザ。都市部・平野部
+  { name: 'dem5b_png', z: 15 },
+  { name: 'dem5c_png', z: 15 },
+];
+const _gsiTiles = new Map(); // "set/tx,ty" -> Promise<Float32Array|null> (null=そのDEMにタイル無し)
+const GSI_TILE_CACHE_MAX = 240; // 【2026-08-19】z15はz14の4倍の枚数が要るので120→240
 function gsiCovers(lat, lon) { return lat >= 20 && lat <= 46 && lon >= 122 && lon <= 154; }
-function _gsiLoadTile(tx, ty) {
-  const key = tx + ',' + ty;
+function _gsiLoadTile(set, tx, ty) {
+  const key = set.name + '/' + tx + ',' + ty;
   let p = _gsiTiles.get(key);
   if (p) return p;
   p = (async () => {
-    const res = await fetch(`https://cyberjapandata.gsi.go.jp/xyz/dem_png/${GSI_DEM_Z}/${tx}/${ty}.png`);
-    if (res.status === 404) return null; // 海上など: タイルが存在しない(正常系)
+    const res = await fetch(`https://cyberjapandata.gsi.go.jp/xyz/${set.name}/${set.z}/${tx}/${ty}.png`);
+    if (res.status === 404) return null; // このDEMには無い。呼び出し側が次のDEMを試す
     if (!res.ok) throw new Error('GSI HTTP ' + res.status);
     const bmp = await createImageBitmap(await res.blob());
     const cv = document.createElement('canvas');
@@ -225,6 +237,56 @@ function _gsiLoadTile(tx, ty) {
   }
   return p;
 }
+// 【2026-08-19】DEM種別ごとにズームが違うので、タイル座標とピクセル座標を種別ごとに求める
+function _gsiTileXY(set, lat, lon) {
+  const n = 2 ** set.z;
+  const xt = (lon + 180) / 360 * n;
+  const latR = lat * Math.PI / 180;
+  const yt = (1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * n;
+  const tx = Math.floor(xt), ty = Math.floor(yt);
+  return { key: set.name + '/' + tx + ',' + ty, tx, ty,
+    px: Math.min(255, Math.floor((xt - tx) * 256)),
+    py: Math.min(255, Math.floor((yt - ty) * 256)) };
+}
+// 【2026-08-19】dem_pngが404だった地域では、以降dem5aを先に試す(404の空振りを減らす)。
+// 地域をまたぐと整備状況が変わるので、recenterOrigin(part4.js)でfalseに戻す。
+let _gsiPreferHiRes = false;
+function _gsiSetsOrdered() {
+  if (!_gsiPreferHiRes) return GSI_DEM_SETS;
+  return [GSI_DEM_SETS[1], GSI_DEM_SETS[0], GSI_DEM_SETS[2], GSI_DEM_SETS[3]];
+}
+// 【2026-08-19】1つのDEM種別について、まだ値が決まっていない点(idxs)だけを取得する。
+// 戻り値 = 次のDEMで再挑戦すべき点のindex配列(=そのDEMにタイルが無かった点)。
+// 無効値(水面)と'gsiError'はここで確定させる(再挑戦しない)。
+async function _gsiFetchPass(set, latlons, idxs, out) {
+  const jobs = idxs.map(i => Object.assign({ i }, _gsiTileXY(set, latlons[i].lat, latlons[i].lon)));
+  const tiles = new Map(); // key -> Float32Array | null(タイル無し) | 'error'(取得失敗)
+  const keys = [...new Set(jobs.map(j => j.key))];
+  await runLimited(keys, async (k) => {
+    const j = jobs.find(jb => jb.key === k);
+    try {
+      tiles.set(k, await _gsiLoadTile(set, j.tx, j.ty));
+    } catch (e) {
+      try {
+        tiles.set(k, await _gsiLoadTile(set, j.tx, j.ty)); // 1回だけリトライ(既存の方針を踏襲)
+      } catch (e2) {
+        tiles.set(k, 'error'); // このタイルの点だけ呼び出し側でopentopodataに回す
+      }
+    }
+  }, 8);
+  const retry = [];
+  for (const j of jobs) {
+    const tile = tiles.get(j.key);
+    if (tile === 'error') { out[j.i] = 'gsiError'; continue; }
+    if (tile == null) { retry.push(j.i); continue; }   // ★タイル自体が無い → 次のDEMへ
+    const h = tile[j.py * 256 + j.px];
+    out[j.i] = Number.isFinite(h) ? h : null;          // 無効値=水面。ここで確定(再挑戦しない)
+  }
+  if (set.name === 'dem_png' && retry.length > 0) _gsiPreferHiRes = true;
+  console.log('[gsiDem] ' + set.name + ': 確定=' + (idxs.length - retry.length) +
+              ' 次DEMへ=' + retry.length);
+  return retry;
+}
 // latlons([{lat,lon},...])に対応する標高(m)の配列を返す。データ無し地点(海上)は null、
 // 取得失敗(404以外のエラー)地点は 'gsiError'(呼び出し側でopentopodataへ個別補完させる)。
 // グリッド全体が使えない場合(国外の点が混じる)だけ null を返す。
@@ -236,39 +298,17 @@ function _gsiLoadTile(tx, ty) {
 // 56%が地形/周辺タイル待ちの再キューで消費されていたことを確認)。エラーをタイル単位に
 // 閉じ込め、1回だけリトライしてもダメならそのタイルに属する点だけを後段でopentopodataに
 // 回す(全滅ではなく局所的な補完で済む)。
+// 【2026-08-19・IMPL_PROMPT_20260819_GSI_DEM_FALLBACK.md】DEM種別を上位から順に多段で試す
+// (dem_png→dem5a→dem5b→dem5c)。あるDEMにタイル自体が無い(404)点だけ次のDEMへ回す。
 async function fetchElevationsGSI(latlons) {
   if (!latlons.length || !latlons.every(ll => gsiCovers(ll.lat, ll.lon))) return null;
-  const n = 2 ** GSI_DEM_Z;
-  const jobs = latlons.map(ll => {
-    const xt = (ll.lon + 180) / 360 * n;
-    const latR = ll.lat * Math.PI / 180;
-    const yt = (1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * n;
-    const tx = Math.floor(xt), ty = Math.floor(yt);
-    return { key: tx + ',' + ty, tx, ty,
-      px: Math.min(255, Math.floor((xt - tx) * 256)),
-      py: Math.min(255, Math.floor((yt - ty) * 256)) };
-  });
-  // タイル単位に重複排除して並列取得(キャッシュ削除に巻き込まれないようローカルに保持)
-  const tiles = new Map(); // key -> Float32Array|null(海上)|'error'(取得失敗)
-  const keys = [...new Set(jobs.map(j => j.key))];
-  await runLimited(keys, async (k) => {
-    const j = jobs.find(jb => jb.key === k);
-    try {
-      tiles.set(k, await _gsiLoadTile(j.tx, j.ty));
-    } catch (e) {
-      try {
-        tiles.set(k, await _gsiLoadTile(j.tx, j.ty)); // 1回だけリトライ
-      } catch (e2) {
-        tiles.set(k, 'error'); // このタイルの点だけ呼び出し側でopentopodataに回す
-      }
-    }
-  }, 8);
-  const out = jobs.map(j => {
-    const tile = tiles.get(j.key);
-    if (tile === 'error') return 'gsiError';
-    const h = tile ? tile[j.py * 256 + j.px] : NaN;
-    return Number.isFinite(h) ? h : null;
-  });
+  const out = new Array(latlons.length);
+  let pending = latlons.map((_, i) => i);
+  for (const set of _gsiSetsOrdered()) {
+    if (pending.length === 0) break;
+    pending = await _gsiFetchPass(set, latlons, pending, out);
+  }
+  for (const i of pending) out[i] = null; // 全DEMで404 = 本当にデータが無い(海・国外)
   // 【2026-07-21・国外の誤判定対策】gsiCoversは矩形(緯度20-46°・経度122-154°)による
   // ざっくりした判定で、日本の遠隔離島(沖ノ鳥島・南鳥島・与那国等)を確実に含めるために
   // 広めに取ってある。この矩形は結果的に韓国・北朝鮮・ロシア極東・台湾・中国沿岸の一部も
