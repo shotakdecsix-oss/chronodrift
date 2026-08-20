@@ -198,21 +198,31 @@ async function runLimited(items, worker, limit = FETCH_CONCURRENCY) {
 // dem_pngは最後の保険(DEM5系が未整備な山間部を拾う)として残す。dem5c_pngはログで一度も
 // 確定に寄与しなかった(確定=0を連発)ため外す。ここまで到達する点は本物の海であり、海の
 // 高さはcoastline判定(part4.js seaClampY)が受け持つので、標高が取れなくてよい。
+// 【2026-08-19 v3・IMPL_PROMPT_20260819_GSI_DEM_FALLBACK_v3.md】dem5b_pngも実測で
+// 「確定=0」を連発し一度も寄与しなかった(dem5aが無い地域はdem_pngが拾うため中間の5Bは
+// 不要と判明)ため削除。3種→2種でリクエストが1/3減る。水の境界の改善(v2の方針)自体は
+// 変えない。
 const GSI_DEM_SETS = [
   { name: 'dem5a_png', z: 15 },  // 航空レーザ5mメッシュ。都市部・平野部。最優先
-  { name: 'dem5b_png', z: 15 },  // 写真測量5mメッシュ。5Aが無い地域を補う
   { name: 'dem_png',   z: 14 },  // DEM10B。全国だが低平地の精度が壊滅的。最後の保険
 ];
 const _gsiTiles = new Map(); // "set/tx,ty" -> Promise<Float32Array|null> (null=そのDEMにタイル無し)
 const GSI_TILE_CACHE_MAX = 240; // 【2026-08-19】z15はz14の4倍の枚数が要るので120→240
+// 【2026-08-19 v3】404(または全ピクセル無効値)だったタイルを永続記憶する。_gsiTilesは
+// Float32Array(1枚262KB)を抱えるためGSI_TILE_CACHE_MAXで追い出されるが、「存在しない」
+// という事実は軽いので追い出さない。東京湾のように全DEMで欠測する海域は初回に1度404を
+// 引くだけで済み、v2で膨れた再取得(毎フレーム同じ404を引き直す)が消える。タイル座標は
+// 緯度経度由来の絶対値なので、recenterOriginでクリアしない(地域を移動しても意味が変わらない)。
+const _gsiMissing = new Set(); // "set/tx,ty"
 function gsiCovers(lat, lon) { return lat >= 20 && lat <= 46 && lon >= 122 && lon <= 154; }
 function _gsiLoadTile(set, tx, ty) {
   const key = set.name + '/' + tx + ',' + ty;
+  if (_gsiMissing.has(key)) return Promise.resolve(null); // 二度と取りに行かない
   let p = _gsiTiles.get(key);
   if (p) return p;
   p = (async () => {
     const res = await fetch(`https://cyberjapandata.gsi.go.jp/xyz/${set.name}/${set.z}/${tx}/${ty}.png`);
-    if (res.status === 404) return null; // このDEMには無い。呼び出し側が次のDEMを試す
+    if (res.status === 404) { _gsiMissing.add(key); return null; } // このDEMには無い。呼び出し側が次のDEMを試す
     if (!res.ok) throw new Error('GSI HTTP ' + res.status);
     const bmp = await createImageBitmap(await res.blob());
     const cv = document.createElement('canvas');
@@ -224,11 +234,16 @@ function _gsiLoadTile(set, tx, ty) {
     bmp.close();
     const d = ctx.getImageData(0, 0, 256, 256).data;
     const out = new Float32Array(65536);
+    let valid = 0; // 【2026-08-19 v3】
     for (let i = 0; i < 65536; i++) {
       // 標高 = (R*2^16 + G*2^8 + B) * 0.01m。2^23 は無効値(海など)。それ以上は負値(2^24を引く)
       const x = d[i * 4] * 65536 + d[i * 4 + 1] * 256 + d[i * 4 + 2];
       out[i] = (x === 8388608) ? NaN : (x < 8388608 ? x : x - 16777216) * 0.01;
+      if (x !== 8388608) valid++; // 【2026-08-19 v3】
     }
+    // 【2026-08-19 v3】タイルは200で返るが中身が全部無効値、という状態が実在する
+    // (実測: 豊洲沖)。次回以降このタイルを取りに行かないよう404と同じ扱いにする。
+    if (valid === 0) { _gsiMissing.add(key); return null; }
     return out;
   })();
   p.catch(() => _gsiTiles.delete(key)); // 失敗Promiseをキャッシュに残すと永久に失敗し続けるため取り除く
@@ -253,12 +268,13 @@ function _gsiTileXY(set, lat, lon) {
     py: Math.min(255, Math.floor((yt - ty) * 256)) };
 }
 // 【2026-08-19 v2】DEM5系が1点も当たらない地域(山間部・離島)では、以降dem_pngを先に試す
-// (dem5a/5bの空振りを2回引くのを避ける)。地域をまたぐと整備状況が変わるので、
-// recenterOrigin(part4.js)でfalseに戻す。
+// (dem5aの空振りを引いてから回るのを避ける。v3でdem5b削除後もこの学習の意味は同じ)。
+// 地域をまたぐと整備状況が変わるので、recenterOrigin(part4.js)でfalseに戻す。
 let _gsiPreferWide = false;
 function _gsiSetsOrdered() {
   if (!_gsiPreferWide) return GSI_DEM_SETS;
-  return [GSI_DEM_SETS[2], GSI_DEM_SETS[0], GSI_DEM_SETS[1]];
+  // 【2026-08-19 v3】dem5b_png削除で2種になったため添字を修正([1]=dem_png, [0]=dem5a_png)。
+  return [GSI_DEM_SETS[1], GSI_DEM_SETS[0]];
 }
 // 【2026-08-19】1つのDEM種別について、まだ値が決まっていない点(idxs)だけを取得する。
 // 戻り値 = 次のDEMで再挑戦すべき点のindex配列(=そのDEMにタイルが無かった点)。
@@ -293,7 +309,7 @@ async function _gsiFetchPass(set, latlons, idxs, out) {
   }
   if (set.name === 'dem5a_png' && retry.length === idxs.length) _gsiPreferWide = true;
   console.log('[gsiDem] ' + set.name + ': 確定=' + (idxs.length - retry.length) +
-              ' 次DEMへ=' + retry.length);
+              ' 次DEMへ=' + retry.length + ' 既知欠測=' + _gsiMissing.size);
   return retry;
 }
 // latlons([{lat,lon},...])に対応する標高(m)の配列を返す。データ無し地点(海上)は null、
@@ -308,9 +324,9 @@ async function _gsiFetchPass(set, latlons, idxs, out) {
 // 閉じ込め、1回だけリトライしてもダメならそのタイルに属する点だけを後段でopentopodataに
 // 回す(全滅ではなく局所的な補完で済む)。
 // 【2026-08-19・IMPL_PROMPT_20260819_GSI_DEM_FALLBACK.md】DEM種別を上位から順に多段で試す。
-// 【2026-08-19 v2】精度順(dem5a→dem5b→dem_png)に変更。あるDEMにタイル自体が無い(404)、
+// 【2026-08-19 v2】精度順(dem5a→dem_png)に変更。あるDEMにタイル自体が無い(404)、
 // または値はあるが無効値(2^23)の点は、いずれも次のDEMへ回す(v2の§3-2、精度の低いDEMが
-// 埋立地等で「値はあるが潰れている」ケースがあるため)。
+// 埋立地等で「値はあるが潰れている」ケースがあるため)。dem5b_pngはv3で削除(§3-1)。
 async function fetchElevationsGSI(latlons) {
   if (!latlons.length || !latlons.every(ll => gsiCovers(ll.lat, ll.lon))) return null;
   const out = new Array(latlons.length);
