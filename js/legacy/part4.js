@@ -190,9 +190,11 @@ function recenterOrigin(lat, lon) {
   // 【2026-08-19・IMPL_PROMPT_20260819_GSI_DEM_FALLBACK.md】指示書は対象ファイルにpart6.jsを
   // 挙げていたが、実際にregionBaseReadyをfalseへ戻しているのはこの関数(part4.js)であり、
   // part6.jsにはrecenterOrigin自体が存在しない。DEM整備状況は地域ごとに異なる
-  // (_gsiPreferHiResはpart5.js)ため、regionBaseReadyと同じ「地域をまたいだ時だけ」の
+  // (_gsiPreferWideはpart5.js)ため、regionBaseReadyと同じ「地域をまたいだ時だけ」の
   // リセット地点であるここに合わせて戻す。
-  if (typeof _gsiPreferHiRes !== 'undefined') _gsiPreferHiRes = false;
+  // 【2026-08-19 v2・IMPL_PROMPT_20260819_GSI_DEM_FALLBACK_v2.md】フラグ名を_gsiPreferHiRes
+  // →_gsiPreferWideへ改名(意味が「高精度DEMを先に」→「広域DEM10Bを先に」へ反転したため)。
+  if (typeof _gsiPreferWide !== 'undefined') _gsiPreferWide = false;
   // 【2026-08-12・COASTLINE_CANDIDATE_SET.md】coastlineWayStore/coastlineIslandStoreは
   // 旧原点基準のx,z座標を保持しているため、原点付け替えで全部無効になる。忘れると
   // 別都市の海岸線が新しい原点の座標系に紛れ込む(この関数はcoastlineWayStore/
