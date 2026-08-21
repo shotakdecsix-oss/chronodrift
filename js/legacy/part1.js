@@ -133,7 +133,8 @@ const I18N = {
     // 【2026-08-19・IMPL_PROMPT_20260819_02_GEN_PROGRESS_HUD.md】生成進捗HUD(#genProgressHud)。
     // #status/showToastとは別要素(マップ読み込み完了トースト等と表示時間帯が重なるため分離)。
     genProgressColdStart: '⏳ サーバーを起こしています…',
-    genProgressFetching: '🛰 地図データを取得中… {n}/{m}',
+    // 【2026-08-21・ユーザー要望】genProgressFetching(「地図データを取得中…」)は撤去。
+    // 移動中の先読み境界で常時発生する通常状態のため、詰まりのサインとして機能していなかった。
     genProgressWaitTerrain: '⛰ 地形を待っています… {n}/{m}',
     genProgressBuildingPending: '🏢 建物を配置中… {n}/{m}',
     genProgressGaveUp: '⚠ 一部の地図データを取得できませんでした(自動で再試行します)',
@@ -259,7 +260,7 @@ const I18N = {
     audioDesc: 'Plays synthesized waves/wind/footsteps (no audio files used). It may stay silent right after turning ON — tap the screen once to start it',
     // 【2026-08-19・IMPL_PROMPT_20260819_02_GEN_PROGRESS_HUD.md】Generation progress HUD (#genProgressHud).
     genProgressColdStart: '⏳ Waking up the server…',
-    genProgressFetching: '🛰 Fetching map data… {n}/{m}',
+    // 2026-08-21: genProgressFetching removed at user's request (see ja block above).
     genProgressWaitTerrain: '⛰ Waiting for terrain… {n}/{m}',
     genProgressBuildingPending: '🏢 Placing buildings… {n}/{m}',
     genProgressGaveUp: '⚠ Some map data could not be fetched (retrying automatically)',

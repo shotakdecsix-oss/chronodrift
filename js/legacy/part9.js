@@ -394,16 +394,24 @@ function updateGenProgressHUD(counts, total) {
         // performance.now()<30000の慣用句を使う。
         key = 'genProgressColdStart';
       } else {
+        // 【2026-08-21・ユーザー要望】「地図データを取得中…」(fetching)表示は不要と判断され撤去。
+        // fetchingは移動中の先読み境界(視界の端)で常時どれかのタイルが該当する通常状態のため、
+        // 起動直後・ジャンプ直後以外でも出てしまい、意味のある「詰まっているサイン」になっていなかった。
         const cands = [
-          ['genProgressFetching', counts.fetching || 0],
           ['genProgressWaitTerrain', counts.waitTerrain || 0],
           ['genProgressBuildingPending', counts.buildingPending || 0],
         ];
         cands.sort((a, b) => b[1] - a[1]);
-        // 指示書がカバーしていない縁: コールドスタート枠(30秒)を過ぎてもunqueuedが大半のまま
-        // 滞留するケース(fetching/waitTerrain/buildingPendingがいずれも0)向けの汎用文言。
-        key = cands[0][1] > 0 ? cands[0][0] : 'genProgressGeneric';
-        n = doneCount; m = total;
+        if (cands[0][1] > 0) {
+          key = cands[0][0];
+          n = doneCount; m = total;
+        } else if ((counts.unqueued || 0) > 0) {
+          // 指示書がカバーしていない縁: コールドスタート枠(30秒)を過ぎてもunqueuedが残っている
+          // ケース(キュー詰まり疑い)向けの汎用文言。これはfetchingとは別で残す。
+          key = 'genProgressGeneric';
+          n = doneCount; m = total;
+        }
+        // else: fetchingだけが残っている通常状態 → keyはnullのまま(非表示)
       }
     }
     // doneCount >= total (全部done)ならkey=nullのまま → 下でフェードアウト
