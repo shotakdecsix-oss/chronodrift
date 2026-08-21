@@ -265,7 +265,11 @@ const _YARD_UP_AXIS = new THREE.Vector3(0, 1, 0);
 const _YARD_YAW_Q = new THREE.Quaternion();
 const _YARD_FLATTEN_Q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
 
-function addBuilding(x, z, w, d, h, style, isReal, rot) {
+// 【2026-08-21・IMPL_PROMPT_20260819_03_NEARBY_PLACE_NAMES.md Phase2】placeName/placeKindは
+// 任意引数。実OSM建物のtags.name(part8.js)を持つ場合だけ渡され、下部でnamedPlacePoints
+// (part1.js)へ軽量レコードとして登録する。手続き生成の建物は呼ばず(undefinedのまま)、
+// 従来通り登録されない。
+function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
   const _origH = h; // 遠方アンロード時、再生成できるよう元のhを覚えておく(下でhを斜面ぶん延長するため)
   // 4隅+中心の地形高さを見て、最低点を基礎にし最高点まで胴体を延長。
   // (中心1点だけだと斜面で山側が埋まり、谷側が浮いていた)
@@ -722,6 +726,14 @@ function addBuilding(x, z, w, d, h, style, isReal, rot) {
   const brec = { x, z, w, d, h: _origH, style, gy, parts, cbox, ck: currentChunkKey, bid, real: !!isReal, rot: rot || 0 };
   buildingRecords.push(brec);
   meshedBuildingGridAdd(brec);
+  // 【2026-08-21・IMPL_PROMPT_20260819_03_NEARBY_PLACE_NAMES.md Phase2】name付き実建物を
+  // 近くの場所表示用の空間ハッシュへ登録する。タイル破棄時はlandusePolygonsと同じ
+  // dropAreaRecordsInTile(part4.js)がminX/maxX/minZ/maxZ(=x,z)で一緒に破棄する。
+  if (placeName) {
+    const _npEntry = { x, z, minX: x, maxX: x, minZ: z, maxZ: z, name: placeName, kind: placeKind || 'building' };
+    namedPlacePoints.push(_npEntry);
+    polyGridAdd(namedPlaceGrid, _npEntry);
+  }
 }
 
 // ======= 現実モード: リアル道路・線路・高速高架 =======

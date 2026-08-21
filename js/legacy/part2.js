@@ -666,14 +666,18 @@ const STATION_HUB_MIN_COUNT = 2;  // これ以上の駅ノードが半径内に�
 // しつつ)蓄積し、判定時は蓄積済みの全駅を対象にする。遠方ジャンプはlocation.reload()を
 // 伴うため(jumpToLatLon参照)、モジュール変数はそのタイミングで自然に空になり、
 // 座標系(浮動原点)の不整合を心配する必要はない。
-const globalStationPoints = new Map(); // ノードID → {x,z}
+const globalStationPoints = new Map(); // ノードID → {x,z,name}
 // elements内の駅ノード(railway=station/halt, public_transport=station)をグローバルに登録する。
 function registerStationPoints(elements) {
   for (const el of elements) {
     if (el.type !== 'node' || !el.tags || globalStationPoints.has(el.id)) continue;
     const t = el.tags;
     if (t.railway === 'station' || t.railway === 'halt' || t.public_transport === 'station') {
-      globalStationPoints.set(el.id, latLonToXZ(el.lat, el.lon));
+      const p = latLonToXZ(el.lat, el.lon);
+      // 【2026-08-21・IMPL_PROMPT_20260819_03_NEARBY_PLACE_NAMES.md Phase1】近くの駅名表示用に
+      // nameタグも保持する(通信は増やさない。既存のOverpass応答から拾うだけ)。name:jaがあれば優先。
+      p.name = t['name:ja'] || t.name || '';
+      globalStationPoints.set(el.id, p);
     }
   }
 }

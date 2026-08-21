@@ -1106,6 +1106,20 @@ function dropAreaRecordsInTile(tx, tz, tileM) {
       }
     }
   }
+  // 【2026-08-21・IMPL_PROMPT_20260819_03_NEARBY_PLACE_NAMES.md Phase2】namedPlacePoints
+  // (nameタグ付き実建物の軽量レコード)もlandusePolygonsと全く同じやり方でタイル単位に破棄する
+  // (消し忘れると存在しない建物の名前が出続ける、指示書で明示的に注意された点)。
+  if (typeof namedPlacePoints !== 'undefined' && Array.isArray(namedPlacePoints)) {
+    w = 0;
+    for (const e of namedPlacePoints) { if (inTile(e)) { dropped++; continue; } namedPlacePoints[w++] = e; }
+    if (w !== namedPlacePoints.length) {
+      namedPlacePoints.length = w;
+      if (typeof namedPlaceGrid !== 'undefined' && namedPlaceGrid) {
+        namedPlaceGrid.clear();
+        for (const e of namedPlacePoints) polyGridAdd(namedPlaceGrid, e);
+      }
+    }
+  }
   // 【2026-08-03・修正P3(v3 perf)】pendingAreaTrees(森・公園の木のゲート待ち隔離キュー)も
   // 同じ理由でパージする。タイルが作り直される=そのタイルに帰属するwayはun-seeされ
   // 再取得時にhandleAreaFeatureが新しいポリゴンとして積み直すため、古いポリゴン参照を

@@ -57,6 +57,69 @@ function checkAddressDisplay() {
   updateAddressDisplay();
 }
 
+// ======= 近くの「名前のある場所」表示(#nearbyPlaceDisplay、A-1) =======
+// 【2026-08-21・IMPL_PROMPT_20260819_03_NEARBY_PLACE_NAMES.md】通信は一切増やさない
+// (駅ノード・実建物のnameタグは既存のOverpass応答から拾うだけ)。ローカル判定のみなので、
+// Nominatim(住所表示、10秒/150m制限あり)とは別に高頻度(30フレーム=~0.5秒ごと)で更新する。
+const nearbyPlaceEl = document.getElementById('nearbyPlaceDisplay');
+const NEARBY_STATION_RADIUS_M = 300;
+const NEARBY_PLACE_RADIUS_M = 50;
+let _nearbyPlaceFrame = 0, _nearbyPlaceLastText = null, _nearbyPlaceLastLang = null;
+// 半径r以内でname付きの最寄り駅(part2.js globalStationPoints)。駅の総数はセッション全体でも
+// せいぜい数百件程度なので、isStationHubNearと同じ考え方で線形走査で十分軽い(part2.js参照)。
+function nearestStationWithin(x, z, r) {
+  if (typeof globalStationPoints === 'undefined') return null;
+  const r2 = r * r;
+  let best = null, bestD2 = Infinity;
+  for (const s of globalStationPoints.values()) {
+    if (!s.name) continue;
+    const dx = s.x - x, dz = s.z - z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 <= r2 && d2 < bestD2) { bestD2 = d2; best = s; }
+  }
+  return best ? { name: best.name, dist: Math.sqrt(bestD2) } : null;
+}
+// 半径r以内の最寄りname付き実建物(part1.js namedPlaceGrid)。空間ハッシュ経由なので全件走査はしない。
+function nearestNamedPlaceWithin(x, z, r) {
+  if (typeof namedPlaceGrid === 'undefined') return null;
+  const near = queryPolyGrid(namedPlaceGrid, x - r, x + r, z - r, z + r);
+  const r2 = r * r;
+  let best = null, bestD2 = Infinity;
+  for (const e of near) {
+    const dx = e.x - x, dz = e.z - z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 <= r2 && d2 < bestD2) { bestD2 = d2; best = e; }
+  }
+  return best ? { name: best.name, dist: Math.sqrt(bestD2) } : null;
+}
+function checkNearbyPlace(force) {
+  if (!nearbyPlaceEl || !initialWorldLoaded) return;
+  _nearbyPlaceFrame++;
+  if (!force && _nearbyPlaceFrame % 30 !== 0) return; // ~0.5秒ごと(通信を伴わないローカル判定のみ)
+  const px = player.position.x, pz = player.position.z;
+  const station = nearestStationWithin(px, pz, NEARBY_STATION_RADIUS_M);
+  const place = nearestNamedPlaceWithin(px, pz, NEARBY_PLACE_RADIUS_M);
+  // 指示書の指定通り「近い方を出す」。place判定半径(50m)はstation判定半径(300m)より狭いので、
+  // 両方見つかるケースの大半は自然にplaceが優先される。
+  let text = null;
+  if (place && (!station || place.dist <= station.dist)) {
+    text = t('nearbyPlaceLabel', { name: place.name });
+  } else if (station) {
+    text = t('nearbyStationLabel', { name: station.name, dist: Math.round(station.dist) });
+  }
+  // {name}/{dist}を含むためdata-i18nの汎用スウィープには乗せられない。
+  // 言語切替時も再描画されるよう、テキストだけでなく言語も変化判定に含める。
+  if (text === _nearbyPlaceLastText && currentLang === _nearbyPlaceLastLang) return;
+  _nearbyPlaceLastText = text; _nearbyPlaceLastLang = currentLang;
+  if (text) { nearbyPlaceEl.textContent = text; nearbyPlaceEl.classList.add('show'); }
+  else nearbyPlaceEl.classList.remove('show');
+}
+// applyI18n()の言語切替時、次の0.5秒周期を待たず即座に再描画させるためのフック
+// (既存のrefreshXxxLabelパターンと同じ)。
+function refreshNearbyPlaceDisplay() {
+  checkNearbyPlace(true);
+}
+
 // ======= MAP JUMP (Leaflet overlay) =======
 let leafletMap = null, playerMarker = null;
 const mapOverlay = document.getElementById('mapOverlay');

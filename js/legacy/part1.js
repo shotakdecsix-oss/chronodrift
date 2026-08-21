@@ -130,16 +130,10 @@ const I18N = {
     audioToggleOn: '🔊 ON',
     audioToggleOff: '🔇 OFF',
     audioDesc: '波・風・足音を合成音で再生します(音声ファイルは使いません)。ONにした直後は無音のことがありますが、画面を1回タップすると鳴り始めます',
-    // 【2026-08-19・IMPL_PROMPT_20260819_02_GEN_PROGRESS_HUD.md】生成進捗HUD(#genProgressHud)。
-    // #status/showToastとは別要素(マップ読み込み完了トースト等と表示時間帯が重なるため分離)。
-    genProgressColdStart: '⏳ サーバーを起こしています…',
-    // 【2026-08-21・ユーザー要望】genProgressFetching(「地図データを取得中…」)は撤去。
-    // 移動中の先読み境界で常時発生する通常状態のため、詰まりのサインとして機能していなかった。
-    genProgressWaitTerrain: '⛰ 地形を待っています… {n}/{m}',
-    genProgressBuildingPending: '🏢 建物を配置中… {n}/{m}',
-    genProgressGaveUp: '⚠ 一部の地図データを取得できませんでした(自動で再試行します)',
-    // 指示書がカバーしていない縁: コールドスタート枠を過ぎてもunqueuedが大半のまま滞留するケース用の汎用文言。
-    genProgressGeneric: '🛰 周辺を生成中… {n}/{m}',
+    // 【2026-08-21・IMPL_PROMPT_20260819_03_NEARBY_PLACE_NAMES.md】近くの駅名・施設名(#nearbyPlaceDisplay)。
+    // {name}はOSMのnameタグ(現地語)をそのまま差し込むので翻訳しない。
+    nearbyStationLabel: '🚉 {name} {dist}m',
+    nearbyPlaceLabel: '🏛 {name}',
   },
   en: {
     // ---- 静的UI(index.html) ----
@@ -258,13 +252,10 @@ const I18N = {
     audioToggleOn: '🔊 ON',
     audioToggleOff: '🔇 OFF',
     audioDesc: 'Plays synthesized waves/wind/footsteps (no audio files used). It may stay silent right after turning ON — tap the screen once to start it',
-    // 【2026-08-19・IMPL_PROMPT_20260819_02_GEN_PROGRESS_HUD.md】Generation progress HUD (#genProgressHud).
-    genProgressColdStart: '⏳ Waking up the server…',
-    // 2026-08-21: genProgressFetching removed at user's request (see ja block above).
-    genProgressWaitTerrain: '⛰ Waiting for terrain… {n}/{m}',
-    genProgressBuildingPending: '🏢 Placing buildings… {n}/{m}',
-    genProgressGaveUp: '⚠ Some map data could not be fetched (retrying automatically)',
-    genProgressGeneric: '🛰 Generating the area… {n}/{m}',
+    // 2026-08-21: nearby station/place display (#nearbyPlaceDisplay). {name} is the OSM name
+    // tag (local language) inserted as-is, not translated.
+    nearbyStationLabel: '🚉 {name} {dist}m',
+    nearbyPlaceLabel: '🏛 {name}',
   },
 };
 let currentLang = 'ja';
@@ -298,9 +289,9 @@ function applyI18n() {
   if (typeof updateLangButtons === 'function') updateLangButtons();
   if (typeof refreshMeijiCredit === 'function') refreshMeijiCredit();
   if (typeof refreshDeployInfo === 'function') refreshDeployInfo();
-  // 【2026-08-19・IMPL_PROMPT_20260819_02_GEN_PROGRESS_HUD.md】{n}/{m}を含む動的文言のため
-  // 上のdata-i18nスウィープ(引数無しでt()を呼ぶ)には乗せず、直近のcounts/totalで再描画する。
-  if (typeof refreshGenProgressHUD === 'function') refreshGenProgressHUD();
+  // 【2026-08-21・IMPL_PROMPT_20260819_03_NEARBY_PLACE_NAMES.md】{name}/{dist}を含む動的文言の
+  // ため上のdata-i18nスウィープ(引数無しでt()を呼ぶ)には乗せず、直近の判定結果で再描画する。
+  if (typeof refreshNearbyPlaceDisplay === 'function') refreshNearbyPlaceDisplay();
 }
 
 // Prevent default touch scroll everywhere
@@ -1947,6 +1938,12 @@ function removeBuildingsByIds(removeIds) {
 }
 const landusePolygons = []; // {pts, lu, minX, maxX, minZ, maxZ} — stored during loadOSM for dynamic chunk generation
 const landuseGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
+// 【2026-08-21・IMPL_PROMPT_20260819_03_NEARBY_PLACE_NAMES.md Phase2】nameタグ付き実建物の
+// 軽量レコード({x,z,minX,maxX,minZ,maxZ,name,kind})。landusePolygonsと全く同じ空間ハッシュ
+// パターン(polyGridAdd/queryPolyGrid)を流用。タイル破棄はpart4.js dropAreaRecordsInTileが
+// landusePolygonsと同じやり方で行う。
+const namedPlacePoints = [];
+const namedPlaceGrid = new Map();
 const loadedChunks = new Set(); // "cx,cz" string keys of already-generated chunks
 const chunkMeshes = new Map();  // "cx,cz" → [THREE.Mesh, ...] for unloading
 const CHUNK_SIZE = 120;  // meters per chunk side

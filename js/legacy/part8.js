@@ -559,7 +559,12 @@ function processTileData(data, tileCount, tileList) {
     let fw = w, fd = d, fh = h;
     ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ
     if (MODE === 'edo') fh = applyEdoHeightCap(style, fh); // 江戸: 現代建物の実測高さそのままだと高層ビルになるため木造家屋相当に抑える
-    const realRec = { x: cx, z: cz, w: fw, d: fd, h: fh, style, real: true, rot: bRot };
+    // 【2026-08-21・IMPL_PROMPT_20260819_03_NEARBY_PLACE_NAMES.md Phase2】nameタグがあれば
+    // 近くの場所表示用に保持しておく(通信は増やさない。既存のOverpass応答から拾うだけ)。
+    // name:jaがあれば優先。kindはamenity/leisure/building(具体的なサブタグがあればそれ)から決める。
+    const _placeName = (tags['name:ja'] || tags.name || '').trim();
+    const _placeKind = tags.amenity || tags.leisure || (tags.building && tags.building !== 'yes' ? tags.building : 'building');
+    const realRec = { x: cx, z: cz, w: fw, d: fd, h: fh, style, real: true, rot: bRot, name: _placeName, kind: _placeKind };
     // 【2026-07-28・静止していても落ちる不具合の主因】以前はタイルから取れた実建物を
     // 距離に関係なく全部pendingBuildingsへ積んでいた。密集地(東京)では取得半径内に
     // 15万件以上あるのに、生成距離(BUILDING_GEN_DIST_REAL)の中に入れるのは2万件程度。
