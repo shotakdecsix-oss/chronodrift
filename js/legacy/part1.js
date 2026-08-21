@@ -27,7 +27,13 @@ const I18N = {
     modeEdo: '🏯 江戸',
     modeMarchen: '🍭 メルヘン',
     modeSpace: '🛸 宇宙',
-    perfBtnTitle: '設定(描写・海面・時間帯・キャラクター・視点)',
+    // 【2026-08-21・IMPL_PROMPT_20260819_04_SETTINGS_WORDING.md】指示書は⚙内が「描写/海面/
+    // 時間帯/キャラクター/視点回転」の5系統としていたが、着手前grepで実際には海面(潮位)調整
+    // スライダー自体がもう存在しないと判明した(2026-08-12の水面刷新[[project_isehara_game_water_design_rewrite]]
+    // で水位推定を全廃し地形直接ドレープ方式へ移行したため、手動調整の必要が無くなった)。
+    // このタイトルの「海面」もその名残の古い記述だったので、実態(描写/時間帯/視点/
+    // キャラクター/言語/環境音)に合わせて更新する。
+    perfBtnTitle: '設定(描写・時間帯・視点・キャラクター・言語・環境音)',
     helpBtnTitle: '操作ヘルプ',
     perfSectionTitle: '⚙ 描写範囲・負荷(変更すると再読み込みします)',
     perfLite: '🌱 軽量',
@@ -36,11 +42,16 @@ const I18N = {
     perfLiteSub: '軽量',
     perfStdSub: '標準',
     perfHighSub: '高品質',
-    perfDesc1: '軽量: 建物1.4km/低負荷(スマホ向け)<br>標準: 建物2.2km<br>高品質: 建物4.2km/先読み拡大(高性能PC向け・メモリ大)',
+    // 【2026-08-21・IMPL_PROMPT_20260819_04_SETTINGS_WORDING.md Phase1】距離の数値をいきなり
+    // 読ませるのではなく、まず「何が起きるか」を書く。距離は消さず、判断材料として()内に残す。
+    perfDesc1: '軽量: 遠くは見えないが、落ちにくい(建物1.4km・スマホ/古い端末向け)<br>標準: ふつうの見え方(建物2.2km・多くのスマホ向け)<br>高品質: 遠くの街まで見える。メモリを多く使う(建物4.2km・先読み拡大・高性能PC/新しいスマホ向け)',
     cleanupNowBtn: '🧹 今すぐ整理',
     cleanupDesc: '現在地周辺以外の道路・建物・公園/水面等のGPUメッシュを解放します(記録は残るので再訪すれば元通り。長時間プレイで重くなってきたら押してください)',
+    // 【2026-08-21・IMPL_PROMPT_20260819_04_SETTINGS_WORDING.md Phase2】🩺タイル状況は
+    // 「デバッグ」見出しの下(パネル最後尾)へ隔離。ラベル文言自体は変更しない。
     debugTileBtn: '🩺 タイル状況',
     debugTileDesc: 'デバッグ用: 周囲のOSMタイルごとの取得・生成状況を色分け表示します(灰=未取得 赤=取得中 青=地形待ち 橙=生成中 緑=完了)',
+    debugSectionTitle: '🩺 デバッグ',
     hardResetBtn: '🔄 データを全消去して再読込',
     hardResetDesc: '読み込み・生成が滞って直らない時用: 保持している地形・道路・線路・建物データとキャッシュを全て消去し、現在地のまま再読み込みします(今すぐ整理より強力ですが、再読み込みが発生します)',
     hardResetConfirm: '地形・道路・建物のデータとキャッシュを全て消去して再読み込みします。よろしいですか？',
@@ -151,7 +162,7 @@ const I18N = {
     modeEdo: '🏯 Edo',
     modeMarchen: '🍭 Fairytale',
     modeSpace: '🛸 Space',
-    perfBtnTitle: 'Settings (rendering, sea level, time of day, character, view)',
+    perfBtnTitle: 'Settings (rendering, time of day, view, character, language, sound)',
     helpBtnTitle: 'Controls help',
     perfSectionTitle: '⚙ Render distance & load (changing this reloads the page)',
     perfLite: '🌱 Light',
@@ -160,11 +171,12 @@ const I18N = {
     perfLiteSub: 'Light',
     perfStdSub: 'Standard',
     perfHighSub: 'High Quality',
-    perfDesc1: 'Light: buildings 1.4km / low load (for phones)<br>Standard: buildings 2.2km<br>High Quality: buildings 4.2km / wider prefetch (for powerful PCs, uses more memory)',
+    perfDesc1: 'Light: distant scenery won\'t render, but it won\'t stutter (buildings 1.4km, for phones/older devices)<br>Standard: the usual look (buildings 2.2km, for most phones)<br>High Quality: distant towns are visible; uses more memory (buildings 4.2km, wider prefetch, for powerful PCs/newer phones)',
     cleanupNowBtn: '🧹 Clean up now',
     cleanupDesc: 'Frees up GPU meshes for roads/buildings/parks/water away from your current location (records are kept, so revisiting restores them. Press this if things get heavy after a long play session)',
     debugTileBtn: '🩺 Tile status',
     debugTileDesc: 'Debug: color-codes the fetch/generation status of nearby OSM tiles (gray=not fetched, red=fetching, blue=waiting for terrain, orange=generating, green=done)',
+    debugSectionTitle: '🩺 Debug',
     hardResetBtn: '🔄 Clear all data & reload',
     hardResetDesc: 'Use when loading/generation is stuck and won\'t recover: clears all stored terrain/road/rail/building data and the cache, then reloads at your current location (stronger than Clean up now, but triggers a reload)',
     hardResetConfirm: 'This will clear all terrain, road, and building data and cache, then reload. Continue?',
