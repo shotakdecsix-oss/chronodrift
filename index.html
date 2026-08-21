@@ -244,6 +244,16 @@ body {
   color:var(--text); pointer-events:none; text-align:center;
   transition:opacity .4s;
 }
+/* 【2026-08-19・IMPL_PROMPT_20260819_02_GEN_PROGRESS_HUD.md】生成進捗HUD。#statusとは別要素
+   (マップ読み込み完了トースト等と表示時間帯が丸かぶりするため、重ならない位置に分離)。
+   表示/非表示はpart9.jsのupdateGenProgressHUD()がstyle.display/opacityを直接操作する
+   (#statusのshowToast()と同じ仕組み)。 */
+#genProgressHud {
+  position:fixed; bottom:calc(var(--safe-bottom) + 140px); left:50%; transform:translateX(-50%);
+  border-radius:999px; padding:9px 20px; font-size:13px; z-index:59;
+  color:var(--text); pointer-events:none; text-align:center;
+  transition:opacity .4s; display:none; opacity:0;
+}
 /* ヘルプモーダル(初回のみ自動表示。以後は?ボタンから) */
 #helpModal {
   position:fixed; inset:0; z-index:80; display:none;
@@ -424,7 +434,7 @@ body {
    #gpsDisplay(タップで開く座標・標高の詳細)は従来通り非表示のまま。 */
 body.uiHidden #hudRail, body.uiHidden #gpsDisplay,
 body.uiHidden #perfCtrl, body.uiHidden #minimap, body.uiHidden #credit,
-body.uiHidden #status, body.uiHidden #helpModal { display:none !important; }
+body.uiHidden #status, body.uiHidden #genProgressHud, body.uiHidden #helpModal { display:none !important; }
 body.uiHidden #uiToggleBtn { opacity:0.45; }
 </style>
 </head>
@@ -626,6 +636,7 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 </div>
 
 <div id="status" class="glass" data-i18n="statusInitial">🗺 伊勢原マップ読み込み中...</div>
+<div id="genProgressHud" class="glass"></div>
 <div id="debugTileLegend" class="glass" data-i18n-html="debugLegendHtml">🩺左から地形/道路線路/建物の3本<span style="background:#555555"></span>未取得<span style="background:#3388dd"></span>待ち<span style="background:#dd3333"></span>取得中<span style="background:#ffaa22"></span>生成中<span style="background:#33cc55"></span>完了<span style="background:#9b3fd4"></span>諦め(未着)</div>
 <div id="minimap" class="glass"><canvas id="minimapCanvas" width="200" height="200"></canvas></div>
 <div id="joystick" class="glass"><div id="joystickKnob"></div></div>

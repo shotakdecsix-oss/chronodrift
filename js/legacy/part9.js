@@ -164,7 +164,13 @@ function setDebugTileOverlay(on) {
   else { _debugTileFrame = 0; updateDebugTileOverlay(true); }
 }
 function updateDebugTileOverlay(force) {
-  if (!debugTileOverlayOn) return;
+  // 【2026-08-19・IMPL_PROMPT_20260819_02_GEN_PROGRESS_HUD.md】以前はここで
+  // `if (!debugTileOverlayOn) return;` していたため、タイルごとの状態判定(status)は
+  // 🩺デバッグオーバーレイをONにした時しか計算されていなかった。常用HUD(genProgressHud)は
+  // このstatusを毎回必要とするため、判定ループ自体は常時回すよう変更する。
+  // 🩺デバッグオーバーレイ専用の重い処理(doneByTileの全件走査、板ポリゴンの生成・着色、
+  // console.table等の診断ログ)は、下記の該当箇所を個別にdebugTileOverlayOnで囲うことで
+  // 従来通りOFF中はスキップされる(挙動・負荷とも変えない)。
   _debugTileFrame++;
   if (!force && _debugTileFrame % 30 !== 0) return; // ~0.5秒ごと(常時1フレームおきだと集計コストが無駄)
   const ptx = Math.floor(player.position.x / OSM_TILE_M), ptz = Math.floor(player.position.z / OSM_TILE_M);
@@ -192,7 +198,14 @@ function updateDebugTileOverlay(force) {
       if (arr) for (const b of arr) bump(dormantByTile, tileKeyOf(b.x, b.z));
     }
   }
-  for (const rec of buildingRecords) bump(doneByTile, tileKeyOf(rec.x, rec.z));
+  // 【2026-08-19・IMPL_PROMPT_20260819_02_GEN_PROGRESS_HUD.md】doneByTileはbuildingRecords全件
+  // (high設定で最大PERF.bMax=25000件)を走査するが、使い道は下のlogRows診断表のbuildDone列だけで、
+  // statusの判定(buildingArrivedはbuildingReadyTilesという別Setを見ている)には使われていない。
+  // 常用HUDのために毎回(オーバーレイOFF中も)このフルスキャンを回すのは無駄なので、
+  // 🩺デバッグオーバーレイがON中だけ集計する。
+  if (debugTileOverlayOn) {
+    for (const rec of buildingRecords) bump(doneByTile, tileKeyOf(rec.x, rec.z));
+  }
   // 【2026-07-19】roadReadyTiles は「道路データを受信・登録済み」なだけで、実際の3Dメッシュ化
   // (processRoadMeshQueue、フレーム分割)はまだこれからのことがある。特にタイル到着直後は
   // 数百〜数千本がpendingRoadMeshesに積まれた瞬間で、データはreadyでも画面にはまだ何も
@@ -203,6 +216,7 @@ function updateDebugTileOverlay(force) {
   for (const r of pendingRoadMeshes) bump(roadMeshPendingByTile, tileKeyOf((r.x1 + r.x2) / 2, (r.z1 + r.z2) / 2));
   const seen = new Set();
   const logRows = [];
+  const statusCounts = { unqueued: 0, fetching: 0, gaveUp: 0, waitTerrain: 0, buildingPending: 0, done: 0 };
   for (let dx = -R; dx <= R; dx++) for (let dz = -R; dz <= R; dz++) {
     const tx = ptx + dx, tz = ptz + dz;
     const key = tx + ',' + tz;
@@ -240,6 +254,12 @@ function updateDebugTileOverlay(force) {
     else if (!buildingArrived) status = 'buildingPending'; // 建物クエリ待ち(道路は確定済み)
     else if (roadMeshPending > 0 || pending > 0) status = 'buildingPending';
     else status = 'done';
+    statusCounts[status]++;
+    // 【2026-08-19・IMPL_PROMPT_20260819_02_GEN_PROGRESS_HUD.md】ここから下(板ポリゴンの生成・
+    // 着色、waitMs計測、診断ログ用logRows)は🩺デバッグオーバーレイ専用の可視化処理。
+    // 常用HUDが必要なのは上のstatusCounts集計だけなので、OFF中はここでスキップする
+    // (getGroundYの3×3サンプリングやTHREE.jsのメッシュ生成をタイル数×毎0.5秒で走らせずに済む)。
+    if (!debugTileOverlayOn) continue;
     // 【2026-07-21・ユーザー要望】道路生成が「地形は緑なのに赤いまま」滞留するパターンの
     // 診断用。fetching状態のタイルが初めてキューに入ってから何ms経過したかを見える化する
     // (キューの優先順位が悪くて後回しにされているのか、優先度は正しいのに取得自体に
@@ -282,6 +302,11 @@ function updateDebugTileOverlay(force) {
     // 誤読しやすかった(実態は復帰レート律速で正常な高止まり)。分けて出す。
     logRows.push({ tile: key, status, road: roadReady, roadMeshPending, waitMs, terrain: terrainReady, buildDone: done, buildQueued: pendingByTile.get(key) || 0, buildDormant: dormantByTile.get(key) || 0, fails: osmTileFailCount.get(key) || 0 });
   }
+  // 【2026-08-19・IMPL_PROMPT_20260819_02_GEN_PROGRESS_HUD.md】常用ユーザー向けの進捗表示。
+  // 新しい走査ループは追加せず、上のタイル状態判定ループに相乗りしたstatusCountsをそのまま渡す。
+  // 🩺デバッグオーバーレイのON/OFFに関わらず毎回呼ぶ(通常プレイ中も進捗を出したいため)。
+  updateGenProgressHUD(statusCounts, seen.size);
+  if (!debugTileOverlayOn) return; // ここから下は🩺デバッグオーバーレイ専用(後片付け・診断ログ)
   // 範囲外に出た平面は隠す(近くに戻ってくる可能性が高いので基本は使い回す)。
   // 【2026-07-28】ただし従来は一度作った平面を永久に保持していたため、経路シムのように
   // 何kmも一方向へ走り続けるとGroup(短冊3枚=Mesh3個)が訪問タイル数だけ際限なく
@@ -341,6 +366,77 @@ function updateDebugTileOverlay(force) {
       'revived/2s', _bgRevived, 'evicted/2s', _bgEvicted);
     _bgGenerated = 0; _bgRequeued = 0; _bgDormant = 0; _bgRevived = 0; _bgEvicted = 0;
   }
+}
+
+// ======= 生成進捗HUD(#genProgressHud) =======
+// 【2026-08-19・IMPL_PROMPT_20260819_02_GEN_PROGRESS_HUD.md】通常ユーザー向けに、周辺タイルの
+// 生成進捗を表示する。#status/showToast()はマップ読み込み完了トースト等と表示時間帯が丸かぶり
+// するため、専用の別要素(index.htmlの#genProgressHud)を使う。
+// n/mの{n}/{m}を含む文言があるため、data-i18nの汎用スウィープには乗せず、言語切替時は
+// applyI18n()から呼ばれるrefreshGenProgressHUD()で直近のcounts/totalを使って再描画する。
+let _genProgressLastCounts = null, _genProgressLastTotal = 0;
+let _genProgressLastKey = null, _genProgressLastN, _genProgressLastM, _genProgressLastLang = null;
+let _genProgressShown = false, _genProgressFadeTimer = null;
+function updateGenProgressHUD(counts, total) {
+  _genProgressLastCounts = counts; _genProgressLastTotal = total;
+  const el = document.getElementById('genProgressHud');
+  if (!el) return;
+  let key = null, n, m;
+  if (total > 0) {
+    const gaveUp = counts.gaveUp || 0;
+    const doneCount = counts.done || 0;
+    if (gaveUp >= 1) {
+      // gaveUpが最優先(1枚でもあれば他の状態より優先して警告を出す)。
+      key = 'genProgressGaveUp';
+    } else if (doneCount < total) {
+      if (performance.now() < 30000 && (counts.unqueued || 0) >= total * 0.9) {
+        // Renderのコールドスタート(起動30〜45秒)対策。part9.jsの_rush判定と同じ
+        // performance.now()<30000の慣用句を使う。
+        key = 'genProgressColdStart';
+      } else {
+        const cands = [
+          ['genProgressFetching', counts.fetching || 0],
+          ['genProgressWaitTerrain', counts.waitTerrain || 0],
+          ['genProgressBuildingPending', counts.buildingPending || 0],
+        ];
+        cands.sort((a, b) => b[1] - a[1]);
+        // 指示書がカバーしていない縁: コールドスタート枠(30秒)を過ぎてもunqueuedが大半のまま
+        // 滞留するケース(fetching/waitTerrain/buildingPendingがいずれも0)向けの汎用文言。
+        key = cands[0][1] > 0 ? cands[0][0] : 'genProgressGeneric';
+        n = doneCount; m = total;
+      }
+    }
+    // doneCount >= total (全部done)ならkey=nullのまま → 下でフェードアウト
+  }
+
+  if (key === null) {
+    if (_genProgressShown && !_genProgressFadeTimer) {
+      _genProgressFadeTimer = setTimeout(() => {
+        el.style.opacity = '0';
+        setTimeout(() => { el.style.display = 'none'; }, 400);
+        _genProgressFadeTimer = null;
+        _genProgressShown = false;
+        _genProgressLastKey = null;
+      }, 3000);
+    }
+    return;
+  }
+  if (_genProgressFadeTimer) { clearTimeout(_genProgressFadeTimer); _genProgressFadeTimer = null; }
+  // 文言が前回と変わった時だけtextContentを書き換える(毎フレームDOM書き換え禁止・指示書の勘所)。
+  // status(key)だけでなく、n/mの値や表示言語(langChanged)が変わった時も再描画が必要。
+  const langChanged = currentLang !== _genProgressLastLang;
+  const varsChanged = (n !== _genProgressLastN || m !== _genProgressLastM);
+  if (key === _genProgressLastKey && !langChanged && !varsChanged && _genProgressShown) return;
+  el.textContent = (n !== undefined) ? t(key, { n: n, m: m }) : t(key);
+  el.style.display = 'block';
+  el.style.opacity = '1';
+  _genProgressShown = true;
+  _genProgressLastKey = key; _genProgressLastLang = currentLang;
+  _genProgressLastN = n; _genProgressLastM = m;
+}
+// applyI18n()の言語切替時に、既存のrefreshXxxLabelパターンと同様に即座へ再描画させるためのフック。
+function refreshGenProgressHUD() {
+  if (_genProgressLastCounts) updateGenProgressHUD(_genProgressLastCounts, _genProgressLastTotal);
 }
 
 // ======= 常時メモリ計測(GPU/JSヒープの増加源の切り分け) =======

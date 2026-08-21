@@ -130,6 +130,15 @@ const I18N = {
     audioToggleOn: '🔊 ON',
     audioToggleOff: '🔇 OFF',
     audioDesc: '波・風・足音を合成音で再生します(音声ファイルは使いません)。ONにした直後は無音のことがありますが、画面を1回タップすると鳴り始めます',
+    // 【2026-08-19・IMPL_PROMPT_20260819_02_GEN_PROGRESS_HUD.md】生成進捗HUD(#genProgressHud)。
+    // #status/showToastとは別要素(マップ読み込み完了トースト等と表示時間帯が重なるため分離)。
+    genProgressColdStart: '⏳ サーバーを起こしています…',
+    genProgressFetching: '🛰 地図データを取得中… {n}/{m}',
+    genProgressWaitTerrain: '⛰ 地形を待っています… {n}/{m}',
+    genProgressBuildingPending: '🏢 建物を配置中… {n}/{m}',
+    genProgressGaveUp: '⚠ 一部の地図データを取得できませんでした(自動で再試行します)',
+    // 指示書がカバーしていない縁: コールドスタート枠を過ぎてもunqueuedが大半のまま滞留するケース用の汎用文言。
+    genProgressGeneric: '🛰 周辺を生成中… {n}/{m}',
   },
   en: {
     // ---- 静的UI(index.html) ----
@@ -248,6 +257,13 @@ const I18N = {
     audioToggleOn: '🔊 ON',
     audioToggleOff: '🔇 OFF',
     audioDesc: 'Plays synthesized waves/wind/footsteps (no audio files used). It may stay silent right after turning ON — tap the screen once to start it',
+    // 【2026-08-19・IMPL_PROMPT_20260819_02_GEN_PROGRESS_HUD.md】Generation progress HUD (#genProgressHud).
+    genProgressColdStart: '⏳ Waking up the server…',
+    genProgressFetching: '🛰 Fetching map data… {n}/{m}',
+    genProgressWaitTerrain: '⛰ Waiting for terrain… {n}/{m}',
+    genProgressBuildingPending: '🏢 Placing buildings… {n}/{m}',
+    genProgressGaveUp: '⚠ Some map data could not be fetched (retrying automatically)',
+    genProgressGeneric: '🛰 Generating the area… {n}/{m}',
   },
 };
 let currentLang = 'ja';
@@ -281,6 +297,9 @@ function applyI18n() {
   if (typeof updateLangButtons === 'function') updateLangButtons();
   if (typeof refreshMeijiCredit === 'function') refreshMeijiCredit();
   if (typeof refreshDeployInfo === 'function') refreshDeployInfo();
+  // 【2026-08-19・IMPL_PROMPT_20260819_02_GEN_PROGRESS_HUD.md】{n}/{m}を含む動的文言のため
+  // 上のdata-i18nスウィープ(引数無しでt()を呼ぶ)には乗せず、直近のcounts/totalで再描画する。
+  if (typeof refreshGenProgressHUD === 'function') refreshGenProgressHUD();
 }
 
 // Prevent default touch scroll everywhere
