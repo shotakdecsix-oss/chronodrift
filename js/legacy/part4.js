@@ -283,7 +283,7 @@ function queueWaterPolyRetry(pts, holes, minX, maxX, minZ, maxZ) {
 let _waterRetryScanFrame = 0;
 function scanPendingAreaWaterPolys() {
   _waterRetryScanFrame++;
-  if (_waterRetryScanFrame % 90 !== 0) return; // 他の低頻度スキャナ(scanGateWaitQueues等)と同じ周期
+  if (_waterRetryScanFrame % 90 !== 45) return; // 他の低頻度スキャナと同じ周期・位相45
   if (pendingAreaWaterPolys.length === 0) return;
   const keep = [];
   for (const e of pendingAreaWaterPolys) {
@@ -901,7 +901,7 @@ let _seaMeshDirty = true;      // rebuildCoastlineChainsの末尾でtrueにす�
 let _seaMeshScanFrame = 0;
 function scanSeaBed() {
   _seaMeshScanFrame++;
-  if (_seaMeshScanFrame % 180 !== 0) return;   // 3秒に1回程度
+  if (_seaMeshScanFrame % 180 !== 94) return;   // 3秒に1回程度・位相94(compactPoolsと分散)
   if (!_seaMeshDirty) return;
   _seaMeshDirty = false;
   const t0 = performance.now();
@@ -917,7 +917,7 @@ const pendingCoastlineTiles = new Map(); // key("tx,tz") -> {tx,tz}
 let _coastlineRetryFrame = 0;
 function scanPendingCoastlineTiles() {
   _coastlineRetryFrame++;
-  if (_coastlineRetryFrame % 90 !== 0) return; // scanPendingAreaWaterPolysと同じ周期
+  if (_coastlineRetryFrame % 90 !== 54) return; // scanPendingAreaWaterPolysと同じ周期・位相54
   if (pendingCoastlineTiles.size === 0) return;
   const seaY = seaLevelY();
   for (const [, t] of Array.from(pendingCoastlineTiles)) {
@@ -1162,7 +1162,7 @@ let _areaPolyUnloadFrame = 0;
 function unloadFarAreaPolys(force) {
   if (!worldPosSettled) return; // 開始位置が確定するまで距離を根拠に捨てない(part1.js worldPosSettled参照)
   _areaPolyUnloadFrame++;
-  if (!force && _areaPolyUnloadFrame % 90 !== 0) return; // 道路・建物と同様、~1.5秒ごとで十分
+  if (!force && _areaPolyUnloadFrame % 90 !== 63) return; // 道路・建物と同様、~1.5秒ごとで十分・位相63
   if (areaPolyMeshes.length === 0) return;
   const px = player.position.x, pz = player.position.z;
   const d2 = AREA_POLY_UNLOAD_DIST * AREA_POLY_UNLOAD_DIST;
@@ -1278,7 +1278,7 @@ function _areaTreesReady(poly) {
 let _areaTreeScanFrame = 0;
 function scanPendingAreaTrees() {
   _areaTreeScanFrame++;
-  if (_areaTreeScanFrame % 90 !== 0) return; // 隔離キューと同じ低頻度スキャン(約1.5秒ごと)
+  if (_areaTreeScanFrame % 90 !== 72) return; // 隔離キューと同じ低頻度スキャン(約1.5秒ごと)・位相72
   if (pendingAreaTrees.length === 0) return;
   const keep = [];
   for (const e of pendingAreaTrees) {

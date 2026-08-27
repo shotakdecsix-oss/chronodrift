@@ -1243,7 +1243,10 @@ let _roadUnloadFrame = 0;
 function unloadFarRoads(force) {
   if (!worldPosSettled) return; // 開始位置が確定するまで距離を根拠に捨てない(part1.js worldPosSettled参照)
   _roadUnloadFrame++;
-  if (!force && _roadUnloadFrame % 90 !== 0) return; // 建物と同様、毎フレームやる必要はない(~1.5秒ごと)
+  // 【2026-08-27・C修正(CODE_REVIEW_20260826_PERF_AND_CRASH.md)】以前は全部 %90===0 等で
+  // 揃っていたため、90/180/300フレームごとに保守処理が同一フレームへ集中し周期的なカクつきに
+  // なっていた(reviveStaleTilesだけ%300===7で位相をずらしてあったのと同じ発想を全体に適用)。
+  if (!force && _roadUnloadFrame % 90 !== 9) return; // 建物と同様、毎フレームやる必要はない(~1.5秒ごと・位相9)
   const px = player.position.x, pz = player.position.z;
   const d2 = ROAD_UNLOAD_DIST * ROAD_UNLOAD_DIST;
   const dMinor2 = MINOR_ROAD_MESH_DIST * MINOR_ROAD_MESH_DIST;
@@ -1309,7 +1312,7 @@ let _roadEvicted = 0; // [mem]ログ用(直近ウィンドウの累計)
 function evictFarRoads(force) {
   if (!worldPosSettled) return; // 開始位置が確定するまで距離を根拠に捨てない(part1.js worldPosSettled参照)
   _roadEvictFrame++;
-  if (!force && _roadEvictFrame % 300 !== 0) return; // ~5秒ごと(全件走査+グリッド再構築なので低頻度)
+  if (!force && _roadEvictFrame % 300 !== 150) return; // ~5秒ごと(全件走査+グリッド再構築なので低頻度・位相150)
   if (roadRecords.length < ROAD_RECORD_SOFT_MIN) return;
   const px = player.position.x, pz = player.position.z;
   const keep2 = ROAD_RECORD_KEEP_DIST * ROAD_RECORD_KEEP_DIST;
@@ -1508,7 +1511,7 @@ let _freedThisCycle = 0;
 function unloadFarBuildings(force) {
   if (!worldPosSettled) return; // 開始位置が確定するまで距離を根拠に捨てない(part1.js worldPosSettled参照)
   _buildingUnloadFrame++;
-  if (!force && _buildingUnloadFrame % 90 !== 0) return; // 毎フレームやる必要はない(~1.5秒ごと)
+  if (!force && _buildingUnloadFrame % 90 !== 0) return; // 毎フレームやる必要はない(~1.5秒ごと・位相0=基準)
   if (buildingRecords.length === 0) return;
   const px = player.position.x, pz = player.position.z;
   // 【2026-07-16】総数上限(PERF.bMax)付近では、実建物の消去距離をヒステリシス上限
@@ -1599,7 +1602,7 @@ let _dormantCheckFrame = 0;
 function reactivateNearbyDormantBuildings() {
   if (!worldPosSettled) return; // 開始位置が確定するまで距離を根拠に捨てない(part1.js worldPosSettled参照)
   _dormantCheckFrame++;
-  if (_dormantCheckFrame % 90 !== 0) return;
+  if (_dormantCheckFrame % 90 !== 18) return; // 位相18(他の低頻度スキャナと衝突回避)
   if (dormantCount === 0) return;
   // 総数上限(PERF.bMax)到達中は復帰させない(復帰→上限で即dormant戻しの空回り防止)
   if (buildingRecords.length >= PERF.bMax) return;
@@ -1692,7 +1695,7 @@ let _dormantEvictFrame = 0;
 let _dormantEvicted = 0; // [mem]ログ用(直近ウィンドウの累計)
 function evictFarDormant() {
   _dormantEvictFrame++;
-  if (_dormantEvictFrame % 90 !== 0) return; // unloadFarBuildingsと同じ周期
+  if (_dormantEvictFrame % 90 !== 27) return; // unloadFarBuildingsと同じ周期・位相27
   if (!worldPosSettled) return; // 開始位置が確定する前の距離判定でdormantを恒久削除しない
   if (dormantCount === 0) return;
   const px = player.position.x, pz = player.position.z;
@@ -1861,7 +1864,7 @@ function tileWaitAdd(key, b) {
 let _gateWaitScanFrame = 0;
 function scanGateWaitQueues() {
   _gateWaitScanFrame++;
-  if (_gateWaitScanFrame % 90 !== 0) return;
+  if (_gateWaitScanFrame % 90 !== 36) return; // 位相36
   if (chunkWaitBuildings.size === 0 && tileWaitBuildings.size === 0) return;
   const px = player.position.x, pz = player.position.z;
   const d2Real = BUILDING_GEN_DIST_REAL * BUILDING_GEN_DIST_REAL;

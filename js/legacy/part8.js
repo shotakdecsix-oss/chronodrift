@@ -1663,7 +1663,7 @@ let _curTileRush = false;
 let _curTileRushFrame = 0;
 function checkCurrentTileRush() {
   _curTileRushFrame++;
-  if (_curTileRushFrame % 90 !== 0) return;
+  if (_curTileRushFrame % 90 !== 81) return; // 位相81(C修正で他の低頻度スキャナと分散)
   const T = OSM_TILE_M;
   const tx = Math.floor(player.position.x / T), tz = Math.floor(player.position.z / T);
   // 【2026-07-21・修正5(b)】諦め(gaveUp)は「本当にデータが無い」ではなくインフラ障害等での

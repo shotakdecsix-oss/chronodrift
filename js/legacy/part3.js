@@ -843,7 +843,9 @@ const xwalkP = IS_REAL ? (() => {
   return p;
 })() : null;
 
-const railSegs = [];       // 現実モード: 線路セグメント(踏切検出・駅ホーム配置用)
+// 【2026-08-27・B-4修正(CODE_REVIEW_20260826_PERF_AND_CRASH.md)】railSegsは書き込み専用の
+// デッドデータだったため削除(読み出し箇所が皆無で、コメントにある踏切検出・駅ホーム配置は
+// 未実装のまま。線路セグメントごとにオブジェクトを積み続けるだけの無駄だった)。
 const nodeUse = new Map(); // 道路端点(1m格子)の使用回数。3以上=交差点 → 横断歩道
 
 // ======= 高速道路(東名など)の高架 =======
@@ -1297,11 +1299,6 @@ function addRoad(x1, z1, x2, z2, width, type='road', bridgeY=null, wayId=null) {
   const yOff = type === 'water' ? 0.05 :
     (ROAD_TYPE_YOFF[type] != null ? ROAD_TYPE_YOFF[type] : 0.35) + _fhash(Math.round(x1 * 4), Math.round(z1 * 4)) * 0.018;
 
-  if (isRailway && IS_REAL) {
-    // レールはテクスチャで表現済み(白帯オーバーレイ廃止)。駅ホーム用に記録
-    // 【2026-07-16】踏切の生成は廃止(ユーザー要望・メモリ/負荷削減。交差スキャンもスキップ)
-    railSegs.push({ x1, z1, x2, z2 });
-  }
   // 非現実モードの線路(白帯オーバーレイ)はrebuildRoadMeshが本体メッシュと同時に生成する
 
   // mesh/mat/yOff も記録しておく: NEAR高解像度地形が後から届いたとき、プレイヤー付近の

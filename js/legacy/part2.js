@@ -779,7 +779,7 @@ function compactPool(pool, px, pz, keep2) {
 let _poolCompactFrame = 0;
 function compactPools() {
   _poolCompactFrame++;
-  if (_poolCompactFrame % 180 !== 0) return; // ~3秒ごと
+  if (_poolCompactFrame % 180 !== 4) return; // ~3秒ごと(位相4・C修正で分散、CODE_REVIEW_20260826)
   if (typeof worldPosSettled !== 'undefined' && !worldPosSettled) return;
   const px = player.position.x, pz = player.position.z;
   const keep2 = PROP_KEEP_DIST * PROP_KEEP_DIST;

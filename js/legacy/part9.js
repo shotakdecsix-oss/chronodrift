@@ -533,7 +533,7 @@ function logGpuBytes() {
 
 function updateMemDiag() {
   logGpuBytes();
-  if (++_memDiagFrame % 120 !== 0) return; // ~2秒ごと
+  if (++_memDiagFrame % 120 !== 60) return; // ~2秒ごと・位相60(C修正で他の保守処理と分散)
   // 道路は「レコードは永久保持・meshだけ距離で解放」方式なので、総数とmesh保持数を分けて見る
   // (総数だけ伸びてmeshが伸びないならGPUは健全、meshが伸び続けるならアンロード漏れ)。
   let roadMesh = 0, motorwayMesh = 0;

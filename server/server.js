@@ -17,6 +17,9 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
+const { promisify } = require('util');
+const gzipAsync = promisify(zlib.gzip);
 const { execSync } = require('child_process');
 
 const PORT = Number(process.env.PORT || process.argv[2] || 8080);
@@ -1344,16 +1347,34 @@ async function handleApi(req, res, apiKey) {
   }
 }
 
-/* ---------- 静的ファイル配信 ---------- */
+/* ---------- 静的ファイル配信 ----------
+ * 【2026-08-27】D-1+D-2修正 (CODE_REVIEW_20260826_PERF_AND_CRASH.md):
+ * - 圧縮が一切かかっておらず毎回~1MBを生送信していた → gzip対応。
+ * - Cache-Control: no-cache なのに ETag/Last-Modified が無く条件付きリクエストが
+ *   できない(実質 no-store と同じ)だった → ETag/Last-Modifiedを付けて304対応。
+ * mtimeが変わらない限りファイル内容・gzip結果をプロセス内メモリにキャッシュする
+ * (対象ファイル数は限られているのでメモリ懸念は小さい)。
+ */
+const COMPRESSIBLE_MIME = new Set([
+  'text/html; charset=utf-8', 'text/javascript; charset=utf-8',
+  'text/css; charset=utf-8', 'application/json', 'image/svg+xml',
+  'text/plain; charset=utf-8',
+]);
+const _staticCache = new Map(); // filePath -> { mtimeMs, etag, lastModified, raw, gzip }
+
+function buildEtag(buf) {
+  return '"' + crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16) + '"';
+}
+
 async function handleStatic(req, res) {
   let urlPath = decodeURIComponent(req.url.split('?')[0]);
   if (urlPath === '/') urlPath = '/index.html';
   const filePath = path.normalize(path.join(ROOT, urlPath));
   if (filePath !== ROOT && !filePath.startsWith(ROOT + path.sep)) { res.writeHead(403); res.end('Forbidden'); return; }
 
-  let data;
+  let stat;
   try {
-    data = await fsp.readFile(filePath);
+    stat = await fsp.stat(filePath);
   } catch (_) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('404 Not Found');
@@ -1362,26 +1383,55 @@ async function handleStatic(req, res) {
 
   const ext = path.extname(filePath).toLowerCase();
   const mime = MIME[ext] || 'application/octet-stream';
+  const isIndex = path.basename(filePath) === 'index.html';
 
-  // index.html にはプロキシ用スクリプトを注入して配信 (ファイル自体は無変更)
-  if (path.basename(filePath) === 'index.html') {
-    let html = data.toString('utf8');
-    const injected = DEPLOY_INFO_SCRIPT + '\n' + INJECT;
-    if (/<head[^>]*>/i.test(html)) html = html.replace(/<head[^>]*>/i, (m) => m + '\n' + injected);
-    else html = injected + html;
-    res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
-    res.end(html);
+  let cached = _staticCache.get(filePath);
+  if (!cached || cached.mtimeMs !== stat.mtimeMs) {
+    let raw = await fsp.readFile(filePath);
+    // index.html にはプロキシ用スクリプトを注入して配信 (ディスク上のファイル自体は無変更)
+    if (isIndex) {
+      let html = raw.toString('utf8');
+      const injected = DEPLOY_INFO_SCRIPT + '\n' + INJECT;
+      if (/<head[^>]*>/i.test(html)) html = html.replace(/<head[^>]*>/i, (m) => m + '\n' + injected);
+      else html = injected + html;
+      raw = Buffer.from(html, 'utf8');
+    }
+    const etag = buildEtag(raw);
+    let gzip = null;
+    if (COMPRESSIBLE_MIME.has(mime)) {
+      try { gzip = await gzipAsync(raw, { level: 6 }); } catch (_) { gzip = null; }
+    }
+    cached = { mtimeMs: stat.mtimeMs, etag, lastModified: stat.mtime.toUTCString(), raw, gzip };
+    _staticCache.set(filePath, cached);
+  }
+
+  // 【2026-07-20由来】頻繁に修正・デプロイする開発中のゲームで、プレイヤーのブラウザが
+  // 古いJSをキャッシュしたまま「直したはずのバグが直っていない」という事故を避けるため
+  // Cache-Control は引き続き no-cache (=毎回サーバーに検証を投げる) のまま維持する。
+  // ETag/Last-Modifiedを付けたことで、内容が同じ場合はブラウザが304を受け取れるようになり
+  // 「毎回検証はするが中身が同じなら0バイト」を実現する。
+  const inm = req.headers['if-none-match'];
+  const ims = req.headers['if-modified-since'];
+  const notModified = (inm && inm === cached.etag) ||
+    (!inm && ims && new Date(ims).getTime() >= new Date(cached.lastModified).getTime());
+  if (notModified) {
+    res.writeHead(304, { 'ETag': cached.etag, 'Last-Modified': cached.lastModified, 'Cache-Control': 'no-cache' });
+    res.end();
     return;
   }
 
-  // 【2026-07-20】js/legacy/*.js等の静的ファイルにCache-Controlが一切付いておらず、
-  // ブラウザのヒューリスティックキャッシュに任せきりだった。頻繁に修正・デプロイする
-  // 開発中のゲームでこれをやると、サーバー側は最新でもプレイヤーのブラウザが古いJSを
-  // キャッシュしたまま「直したはずのバグが直っていない」という報告が起き得る
-  // (index.htmlだけ既にno-cacheだったが、実体のロジックはjs/legacy側にあるため無意味だった)。
-  // index.htmlと同じくno-cacheにして、更新のたびブラウザに確実に反映させる。
-  res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
-  res.end(data);
+  const headers = {
+    'Content-Type': mime, 'Cache-Control': 'no-cache',
+    'ETag': cached.etag, 'Last-Modified': cached.lastModified,
+  };
+  const acceptEncoding = req.headers['accept-encoding'] || '';
+  let body = cached.raw;
+  if (cached.gzip && acceptEncoding.includes('gzip')) {
+    headers['Content-Encoding'] = 'gzip';
+    body = cached.gzip;
+  }
+  res.writeHead(200, headers);
+  res.end(body);
 }
 
 /* ---------- サーバ ---------- */
