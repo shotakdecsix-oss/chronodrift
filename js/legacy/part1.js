@@ -749,6 +749,15 @@ function roadGridAdd(r) {
 // 上乗せする。実建物は従来通り厳密判定のまま(fitRealBuildingToRoadsが別途縮小するため、
 // ここを広げると健全な実建物まで巻き込んで消してしまう)。
 const PROC_CLEANUP_EXTRA_MARGIN = 8;
+// 【2026-08-27・A-1修正(CODE_REVIEW_20260826_PERF_AND_CRASH.md)】道路1セグメントごとに
+// removeBuildingsByIds(buildingRecords全走査+splice+3配列filter+空間グリッド3本の完全
+// 再構築)が個別に走っていた問題の対策。processTileData(part8.js)がタイル内の道路ループを
+// 回している間はこのSetをセットしておき、removeBuildingsOverlappingRoadは削除対象bidを
+// ここへ蓄積するだけに留める。ループ終了後にprocessTileDataが1回だけremoveBuildingsByIdsを
+// 呼ぶ(unloadFarBuildings/updateChunksと同じ「まとめてから1回」パターンをここにも適用)。
+// null(バッチ外)の間は従来通りその場でremoveBuildingsByIdsを呼ぶので、他の呼び出し経路
+// (将来追加されるものを含む)に影響しない。
+let _roadBuildingRemoveBatch = null;
 function removeBuildingsOverlappingRoad(r) {
   if (r.type === 'water') return;
   if (buildingRecords.length === 0) return;
@@ -799,7 +808,11 @@ function removeBuildingsOverlappingRoad(r) {
       }
     }
   }
-  removeBuildingsByIds(removeIds);
+  if (_roadBuildingRemoveBatch) {
+    for (const id of removeIds) _roadBuildingRemoveBatch.add(id);
+  } else {
+    removeBuildingsByIds(removeIds);
+  }
 }
 // 【2026-08-02】建物(removeBuildingsOverlappingRoad)と同じ理由で、木・下草も後から届いた
 // 道路・線路と重なっていれば取り除く必要がある(ユーザー報告: 線路のあるべき場所に手続き
@@ -1355,6 +1368,19 @@ function evictFarRoads(force) {
   // (5秒に1回・生存数万件のO(n)なので、部分削除より単純で確実)。
   roadGrid.clear();
   for (const r of roadRecords) roadGridAdd(r);
+  // 【2026-08-27・B-1修正(CODE_REVIEW_20260826_PERF_AND_CRASH.md)】bridgeSlopes/
+  // motorwaySlopes(part3.js)には削除・トリムのコードが1行も無く、floorHeightAt(part7.js、
+  // 毎フレーム呼ばれる)が両方を線形走査するため「走るほどFPSが低下し、長時間で落ちる」
+  // 原因になっていた。addRoad/addMotorway(part3.js)がslopeオブジェクトをrec.slopeにも
+  // 保持している(=roadRecordsの生存要素と同一参照)ことを利用し、roadGridと同じ
+  // 「生存分だけで作り直す」方式でここも同期する。
+  bridgeSlopes.length = 0;
+  motorwaySlopes.length = 0;
+  for (const r of roadRecords) {
+    if (!r.slope) continue;
+    if (r.type === 'motorway') motorwaySlopes.push(r.slope);
+    else bridgeSlopes.push(r.slope);
+  }
 }
 
 // 矩形範囲(ワールド座標)にかかる道路を、現在の地形に合わせてまとめて再構築する。

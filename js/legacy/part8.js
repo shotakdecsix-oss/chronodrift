@@ -387,6 +387,12 @@ function processTileData(data, tileCount, tileList) {
   processStationNodes(data.elements);
   // Roads
   const _roadMeshStart8 = pendingRoadMeshes.length; // このバッチで新規投入する分の開始位置(近傍優先ソート用)
+  // 【2026-08-27・A-1修正(CODE_REVIEW_20260826_PERF_AND_CRASH.md)】このタイルの道路ループが
+  // 終わるまでremoveBuildingsOverlappingRoad(part1.js)に削除bidをバッチへ蓄積させ、
+  // removeBuildingsByIds(全走査+空間グリッド3本の完全再構築)をタイル1つにつき1回にまとめる。
+  // 以前はセグメント1本ごとに走っていた(密集タイルで数百〜数千回)。
+  _roadBuildingRemoveBatch = new Set();
+  try {
   data.elements.forEach(el => {
     if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) return;
     if (seenOSMWays.has(el.id)) return; // 隣接タイル/初期ロードで処理済み
@@ -463,6 +469,10 @@ function processTileData(data, tileCount, tileList) {
       }
     }
   });
+  } finally {
+    removeBuildingsByIds(_roadBuildingRemoveBatch);
+    _roadBuildingRemoveBatch = null;
+  }
   // このバッチで新規に積んだ道路メッシュだけ、プレイヤー位置を中心とした近い順へ並べ替える
   // (part1.js sortNewEntriesByDistanceToPlayer参照)。
   sortNewEntriesByDistanceToPlayer(pendingRoadMeshes, _roadMeshStart8, r => ({ x: (r.x1 + r.x2) / 2, z: (r.z1 + r.z2) / 2 }));

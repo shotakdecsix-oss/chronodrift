@@ -746,6 +746,11 @@ const coastlineIslandStore = new Map(); // el.id -> 同上(閉じたリング=�
 let coastlineChains = null;      // [ [{x,z},...], ... ] way73本→chain8本(実測NY)
 let coastlineRings = null;       // 閉じたchain(島)だけ
 let coastlineSegs = null;        // {ax,az,bx,bz,minX,maxX,minZ,maxZ} のフラット配列
+// 【2026-08-27・A-3修正(CODE_REVIEW_20260826_PERF_AND_CRASH.md)】coastGeomAtがcoastlineSegs
+// 全件を線形走査しており、farNodeY(part5.js)経由でgetGroundYの内側から高頻度に呼ばれるため
+// 湾岸都市(segsが数万本)で数秒フリーズしていた。part1.jsのpolyGridAdd/queryPolyGrid
+// (landusePolygons等で既に使っている汎用空間ハッシュ)をここにも流用する。
+let coastlineSegGrid = new Map();
 let _coastlineChainsDirty = true;
 let coastlineVersion = 0; // 【2026-08-13・SEA_CLAMP_IN_FARNODEY.md】海岸線が更新されるたびに++。part5.js farNodeYの海面クランプキャッシュ世代
 const COAST_JOIN_EPS = 1.0;      // 端点が一致とみなす距離(m)
@@ -782,6 +787,9 @@ function rebuildCoastlineChains() {
       minX: Math.min(a.x, b.x), maxX: Math.max(a.x, b.x),
       minZ: Math.min(a.z, b.z), maxZ: Math.max(a.z, b.z) });
   }
+  // coastGeomAt用の空間ハッシュを作り直す(A-3修正、上のコメント参照)。
+  coastlineSegGrid = new Map();
+  for (const s of coastlineSegs) polyGridAdd(coastlineSegGrid, s);
   _coastlineChainsDirty = false;
   console.log('[coastline] chains=' + chains.length + ' rings=' + coastlineRings.length +
     ' segs=' + coastlineSegs.length);
@@ -858,10 +866,13 @@ function coastGeomAt(x, z) {
   if (!coastlineSegs || coastlineSegs.length === 0) return null;
   let inRing = false;
   for (const r of coastlineRings) if (pointInPolygon(x, z, r)) { inRing = true; break; }
+  // 【2026-08-27・A-3修正】coastlineSegs全件ではなく、SEA_BED_FAR四方のセルだけを
+  // 空間ハッシュ(coastlineSegGrid)から拾う。bbox早期リジェクトは不要になった
+  // (グリッド自体がその役目を果たす)が、セル境界をまたぐ区間を拾い漏れないよう
+  // queryPolyGrid側でminX/maxX/minZ/maxZベースの登録セルを網羅している。
+  const segs = queryPolyGrid(coastlineSegGrid, x - SEA_BED_FAR, x + SEA_BED_FAR, z - SEA_BED_FAR, z + SEA_BED_FAR);
   let best = Infinity, dot = 0;
-  for (const s of coastlineSegs) {
-    if (s.minX - x > SEA_BED_FAR || x - s.maxX > SEA_BED_FAR ||
-        s.minZ - z > SEA_BED_FAR || z - s.maxZ > SEA_BED_FAR) continue;
+  for (const s of segs) {
     const dx = s.bx - s.ax, dz = s.bz - s.az, len2 = dx * dx + dz * dz;
     let t = len2 > 0 ? ((x - s.ax) * dx + (z - s.az) * dz) / len2 : 0;
     if (t < 0) t = 0; else if (t > 1) t = 1;
