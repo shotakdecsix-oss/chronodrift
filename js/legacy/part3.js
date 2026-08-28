@@ -843,6 +843,37 @@ const xwalkP = IS_REAL ? (() => {
   return p;
 })() : null;
 
+// ======= 【2026-08-28・B-1 Phase2】トンネル坑口(坑門) =======
+// 長いトンネル(part8.js TUNNEL_SURFACE_MAX_M以上)と鉄道・高速のトンネルは3Dメッシュを作らない
+// ため、道路が山肌や街角でぶつ切りになる。そこが「トンネルの入口だから」だと画面上で分かるよう、
+// 坑口を1組(コンクリートの坑門+その手前の暗い開口部)だけ立てる。
+// インスタンスプールなので何箇所あっても2ドローコール。遠方の回収はcompactPools(part2.js)へ相乗り、
+// 地形更新時の追従はresnapPropsAndTreesInBounds(part1.js)へ登録済み。
+const TUNNEL_PORTAL_MAX = 120; // 坑口60箇所ぶん(1箇所=坑門1+開口1)
+const tunnelPortalFrameP = IS_REAL ? makePool(new THREE.BoxGeometry(1, 1, 1),
+  new THREE.MeshLambertMaterial({ color: 0x9a9890 }), TUNNEL_PORTAL_MAX, 'tunnelPortalFrameP') : null;
+// 開口部はMeshBasicMaterial(ライティングを受けない)。時間帯やライトに関係なく「暗い穴」に見せる。
+const tunnelPortalHoleP = IS_REAL ? makePool(new THREE.BoxGeometry(1, 1, 1),
+  new THREE.MeshBasicMaterial({ color: 0x05070a }), TUNNEL_PORTAL_MAX, 'tunnelPortalHoleP') : null;
+
+// (px,pz): 坑口ノードのワールド座標 / (ux,uz): トンネル内側(山側)へ向かう単位ベクトル
+// roadW: そのwayの描画上の道路幅 / isRail: 線路トンネルか
+// 坑門を開口より一回り大きく、かつ少し奥に置くことで、手前の暗い開口のまわりに縁が見える。
+function addTunnelPortal(px, pz, ux, uz, roadW, isRail) {
+  if (!tunnelPortalFrameP || !tunnelPortalHoleP) return; // 現実モード以外は坑口を作らない
+  const w = Math.max(4, Math.min(17, roadW + 2));
+  const h = Math.max(4.5, Math.min(7.5, w * 0.5 + 1.8));
+  const gy = getGroundY(px, pz);
+  const ry = Math.atan2(-uz, ux) + Math.PI / 2; // 局所X軸をトンネル横断方向へ(横断歩道xwalkと同じ式)
+  const fh = h + 1.6;
+  const fx = px + ux * 1.6, fz = pz + uz * 1.6;
+  const iF = poolAdd(tunnelPortalFrameP, fx, gy + fh / 2, fz, ry, w + 3.0, fh, 1.4);
+  trackResnapInstance(tunnelPortalFrameP, iF, fx, fz, fh / 2);
+  const hx = px + ux * 0.5, hz = pz + uz * 0.5;
+  const iH = poolAdd(tunnelPortalHoleP, hx, gy + h / 2, hz, ry, w, h, 0.8);
+  trackResnapInstance(tunnelPortalHoleP, iH, hx, hz, h / 2);
+}
+
 // 【2026-08-27・B-4修正(CODE_REVIEW_20260826_PERF_AND_CRASH.md)】railSegsは書き込み専用の
 // デッドデータだったため削除(読み出し箇所が皆無で、コメントにある踏切検出・駅ホーム配置は
 // 未実装のまま。線路セグメントごとにオブジェクトを積み続けるだけの無駄だった)。

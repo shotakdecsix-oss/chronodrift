@@ -968,6 +968,8 @@ function resnapPropsAndTreesInBounds(x0, x1, z0, z1) {
   _resnapPoolInBounds(poleP, x0, x1, z0, z1);
   _resnapPoolInBounds(lampP, x0, x1, z0, z1);
   _resnapPoolInBounds(xwalkP, x0, x1, z0, z1);
+  _resnapPoolInBounds(tunnelPortalFrameP, x0, x1, z0, z1); // 【2026-08-28・B-1 Phase2】坑口(part3.js)
+  _resnapPoolInBounds(tunnelPortalHoleP, x0, x1, z0, z1);
 }
 // 矩形範囲にかかる可能性のある道路だけを空間ハッシュから拾う(roadRecords全件走査を避ける)
 function queryRoadGrid(x0, x1, z0, z1, grid) {

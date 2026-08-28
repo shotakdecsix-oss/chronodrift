@@ -398,6 +398,32 @@ function processTileData(data, tileCount, tileList) {
   // removeBuildingsByIds(全走査+空間グリッド3本の完全再構築)をタイル1つにつき1回にまとめる。
   // 以前はセグメント1本ごとに走っていた(密集タイルで数百〜数千回)。
   _roadBuildingRemoveBatch = new Set();
+  // 【2026-08-28・B-1 Phase2】トンネル坑口の判定用の前段スキャン。
+  // 真の坑口の条件は2つ:
+  //   (1) その端点で終わるトンネルwayがこの1本だけ = 分割されたトンネル同士の継ぎ目ではない。
+  //       OSMのトンネルは複数wayに分割されていることが多く、これが無いとトンネルの途中に
+  //       坑口が並んでしまう。
+  //   (2) 同じ端点に地上のway(トンネルでない道路/線路)が接続している。
+  //       これはタイル境界の外にある継ぎ目(相手のトンネルwayがこの応答に入っていないため
+  //       (1)を素通りしてしまうケース)を除外する役割も兼ねる — そこには地上wayが無い。
+  // seenOSMWaysで弾かれたwayも含めて数える(トポロジの全体像が要るため)。
+  const _endKey = (p) => Math.round(p.x * 2) + ',' + Math.round(p.z * 2);
+  const _isTunnelTags = (t) => !!(t.tunnel && t.tunnel !== 'no' && t.tunnel !== 'building_passage');
+  let _tEndCnt = null, _sEndCnt = null;
+  if (data.elements.some(el => el.type === 'way' && el.tags && _isTunnelTags(el.tags) &&
+                               (el.tags.highway || el.tags.railway === 'rail'))) {
+    _tEndCnt = new Map(); _sEndCnt = new Map();
+    for (const el of data.elements) {
+      if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) continue;
+      const _t = el.tags || {};
+      if (!_t.highway && _t.railway !== 'rail') continue;
+      const _m = _isTunnelTags(_t) ? _tEndCnt : _sEndCnt;
+      for (const _g of [el.geometry[0], el.geometry[el.geometry.length - 1]]) {
+        const _k = _endKey(latLonToXZ(_g.lat, _g.lon));
+        _m.set(_k, (_m.get(_k) || 0) + 1);
+      }
+    }
+  }
   try {
   data.elements.forEach(el => {
     if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) return;
@@ -422,6 +448,30 @@ function processTileData(data, tileCount, tileList) {
       const _hwT = tags.highway;
       const _alwaysHide = tags.railway === 'rail' || _hwT === 'motorway' || _hwT === 'motorway_link';
       _tunnelInfo = { noMesh: _alwaysHide || _tLen >= TUNNEL_SURFACE_MAX_M, len: _tLen };
+      // 【2026-08-28・B-1 Phase2】メッシュを作らないトンネルの「地上と接する端点」にだけ坑口を立てる。
+      // 判定条件は上の前段スキャンのコメント参照。wayごとに1回(seenOSMWaysで重複処理は防がれている)。
+      if (_tunnelInfo.noMesh && _tEndCnt && (tags.highway || tags.railway === 'rail') &&
+          typeof addTunnelPortal === 'function') {
+        // 坑口の大きさ用の道路幅。addRoadのIS_REAL分岐が実際に描く幅に合わせる(part3.js参照)
+        const _hwP = tags.highway;
+        const _wP = tags.railway === 'rail' ? 5
+          : (_hwP === 'motorway' || _hwP === 'motorway_link') ? 16
+          : _hwP === 'trunk' ? 14 : _hwP === 'primary' ? 12
+          : _hwP === 'secondary' ? 9 : _hwP === 'tertiary' ? 6.5 : 4.2;
+        const _isRailP = tags.railway === 'rail';
+        const _n = el.geometry.length;
+        for (const [_ei, _ii] of [[0, 1], [_n - 1, _n - 2]]) {
+          const _pe = latLonToXZ(el.geometry[_ei].lat, el.geometry[_ei].lon);
+          const _k = _endKey(_pe);
+          if ((_tEndCnt.get(_k) || 0) !== 1) continue; // 分割トンネル同士の継ぎ目 → 坑口ではない
+          if ((_sEndCnt.get(_k) || 0) < 1) continue;   // 地上のwayが接続していない → 坑口ではない
+          const _pi = latLonToXZ(el.geometry[_ii].lat, el.geometry[_ii].lon);
+          const _dx = _pi.x - _pe.x, _dz = _pi.z - _pe.z;
+          const _dl = Math.hypot(_dx, _dz);
+          if (_dl < 0.5) continue;
+          addTunnelPortal(_pe.x, _pe.z, _dx / _dl, _dz / _dl, _wP, _isRailP);
+        }
+      }
     }
     if (tags.highway) {
       const hw = tags.highway;
