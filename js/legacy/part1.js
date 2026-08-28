@@ -718,13 +718,21 @@ const roadRecords = [];   // {x1,z1,x2,z2}
 // roadRecords へ追加するたび addRoadRecord 経由でここにも登録する。
 const ROAD_CELL = 40;
 const roadGrid = new Map();
+// 【2026-08-28・B-1(CODE_REVIEW_20260826_REALISM.md)】地表に3Dメッシュを描かないレコード
+// (トンネル)専用の空間ハッシュ。roadGridに混ぜてはいけない — roadGridはミニマップだけでなく
+// isOnRoad(part2.js、手続き生成の建物を置いてよいか)/fitRealBuildingToRoads(part2.js、実建物を
+// リボン幅ぶん縮める)/roadNear(part1.js、木を生やさない判定)/generateChunk(part8.js、住宅密度の
+// 推定)からも引かれており、「見えない道路」を実在の道路として扱うと、地下鉄の真上だけ家も木も
+// 生えない帯ができる。ミニマップ(part7.js drawMinimap)だけがこちらを追加で引く。
+const tunnelGrid = new Map();
 function roadGridAdd(r) {
+  const grid = r._noMesh ? tunnelGrid : roadGrid; // 見えないレコードは別グリッドへ
   const pad = (r.rw || 4) / 2 + 3;
   const gx0 = Math.floor((Math.min(r.x1, r.x2) - pad) / ROAD_CELL), gx1 = Math.floor((Math.max(r.x1, r.x2) + pad) / ROAD_CELL);
   const gz0 = Math.floor((Math.min(r.z1, r.z2) - pad) / ROAD_CELL), gz1 = Math.floor((Math.max(r.z1, r.z2) + pad) / ROAD_CELL);
   for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
-    const k = gx + ',' + gz; let arr = roadGrid.get(k);
-    if (!arr) { arr = []; roadGrid.set(k, arr); }
+    const k = gx + ',' + gz; let arr = grid.get(k);
+    if (!arr) { arr = []; grid.set(k, arr); }
     arr.push(r);
   }
 }
@@ -760,6 +768,7 @@ const PROC_CLEANUP_EXTRA_MARGIN = 8;
 let _roadBuildingRemoveBatch = null;
 function removeBuildingsOverlappingRoad(r) {
   if (r.type === 'water') return;
+  if (r._noMesh) return; // 【2026-08-28・B-1】地表に描かないレコード(トンネル)は建物を撤去しない(地下鉄の真上の建物が消えるのを防ぐ)
   if (buildingRecords.length === 0) return;
   const rhwReal = (r.rw || 5) / 2 + 0.5;
   const rhwProc = rhwReal + PROC_CLEANUP_EXTRA_MARGIN;
@@ -872,6 +881,7 @@ function _doRemoveVegetationOverlappingRoad(x1, z1, x2, z2, rhw) {
 const _vegCleanupQueue = [];
 function queueVegetationCleanup(r) {
   if (r.type === 'water') return; // removeBuildingsOverlappingRoadと同じ扱い(水面幅は実測ではない推定値のため)
+  if (r._noMesh) return; // 【2026-08-28・B-1】地表に描かないレコード(トンネル)は木・下草も撤去しない
   const rhw = (r.rw || 5) / 2 + 2; // 建物より広めの余裕(樹冠・下草の見た目の半径ぶん)
   _vegCleanupQueue.push({ x1: r.x1, z1: r.z1, x2: r.x2, z2: r.z2, rhw });
 }
@@ -909,6 +919,7 @@ function removeRoadRecordsByWid(widSet) {
   if (dropped > 0) {
     roadRecords.length = w;
     roadGrid.clear();
+    tunnelGrid.clear(); // 【2026-08-28・B-1】roadGridAddが振り分けるので、対になる方も一緒に作り直す
     for (const r of roadRecords) roadGridAdd(r);
   }
   return dropped;
@@ -959,12 +970,13 @@ function resnapPropsAndTreesInBounds(x0, x1, z0, z1) {
   _resnapPoolInBounds(xwalkP, x0, x1, z0, z1);
 }
 // 矩形範囲にかかる可能性のある道路だけを空間ハッシュから拾う(roadRecords全件走査を避ける)
-function queryRoadGrid(x0, x1, z0, z1) {
+function queryRoadGrid(x0, x1, z0, z1, grid) {
+  if (!grid) grid = roadGrid; // 【2026-08-28・B-1】既定は従来どおり。tunnelGridを渡すとトンネルだけを引ける
   const gx0 = Math.floor(x0 / ROAD_CELL), gx1 = Math.floor(x1 / ROAD_CELL);
   const gz0 = Math.floor(z0 / ROAD_CELL), gz1 = Math.floor(z1 / ROAD_CELL);
   const seen = new Set(), out = [];
   for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
-    const arr = roadGrid.get(gx + ',' + gz);
+    const arr = grid.get(gx + ',' + gz);
     if (!arr) continue;
     for (const r of arr) { if (!seen.has(r)) { seen.add(r); out.push(r); } }
   }
@@ -1132,6 +1144,11 @@ const pendingRoadMeshes = [];
 // 消えている」ことの直接証拠になる(IMPL_PROMPT_20260803_BRIDGE_WATER.md 5章の計器)。
 let _bridgeDirtyDropped = 0;
 function queueRoadMesh(r) {
+  // 【2026-08-28・B-1】そもそもメッシュを作らないレコード(トンネル)。呼び出し元は3箇所
+  // (addRoad / unloadFarRoads / rebuildRoadsInBounds)あり、特にunloadFarRoadsは
+  // 「if (!r.mesh || r._dirty) queueRoadMesh(r)」でメッシュを持たないレコードを1.5秒ごとに
+  // 永久に再投入し続けるため、呼び出し側ではなくここ1箇所で止める。
+  if (r._noMesh) return;
   if (r._q || r._dropped) return; // 二重投入防止 / 距離破棄済みレコード(evictFarRoads参照)は作らない
   r._q = true;
   pendingRoadMeshes.push(r);
@@ -1330,6 +1347,20 @@ function evictFarRoads(force) {
   const px = player.position.x, pz = player.position.z;
   const keep2 = ROAD_RECORD_KEEP_DIST * ROAD_RECORD_KEEP_DIST;
   const keepMtw2 = ROAD_RECORD_KEEP_DIST_MOTORWAY * ROAD_RECORD_KEEP_DIST_MOTORWAY;
+  // 【2026-08-27・B-3修正(CODE_REVIEW_20260826_PERF_AND_CRASH.md)】nodeUse(part3.js、
+  // 「同じ端点(1m格子)を3本以上の道路が使っていたら交差点とみなし横断歩道を1回だけ置く」
+  // ためだけの一時カウンタ)にclear/deleteが1行も無く、密集地を長時間走ると数十万〜百万
+  // エントリまで無言で増え続けていた。道路レコードと同じ~5秒周期・同じKEEP_DISTに便乗して
+  // 遠方のキーを間引く。KEEP_DISTはメッシュ保持距離よりはるかに外側なので、実際に描画
+  // されている交差点のカウンタが消えることはない。間引かれた交差点へ後で戻ってきても、
+  // その頃には道路レコード自体もタイル再取得で作り直されており、横断歩道も一緒に
+  // 再生成されるだけで実害はない。
+  for (const k of nodeUse.keys()) {
+    const comma = k.indexOf(',');
+    const nx = +k.slice(0, comma), nz = +k.slice(comma + 1);
+    const ddx = nx - px, ddz = nz - pz;
+    if (ddx * ddx + ddz * ddz > keep2) nodeUse.delete(k);
+  }
   let w = 0; // 生存分を前詰めするコンパクション(spliceの繰り返しを避ける)
   // 【2026-07-28】どのタイルが「全滅した」かを同じ1パスで数える。全滅したタイルだけは
   // 取得済みフラグを落として再取得可能に戻す(1本でも生き残っていると再取得で二重生成に
@@ -1367,6 +1398,7 @@ function evictFarRoads(force) {
   // roadGridは1レコードが複数セルに入るため個別削除が面倒かつ高コスト。生存分だけで作り直す
   // (5秒に1回・生存数万件のO(n)なので、部分削除より単純で確実)。
   roadGrid.clear();
+  tunnelGrid.clear(); // 【2026-08-28・B-1(REALISM)】roadGridAddが振り分けるので、対になる方も一緒に作り直す
   for (const r of roadRecords) roadGridAdd(r);
   // 【2026-08-27・B-1修正(CODE_REVIEW_20260826_PERF_AND_CRASH.md)】bridgeSlopes/
   // motorwaySlopes(part3.js)には削除・トリムのコードが1行も無く、floorHeightAt(part7.js、

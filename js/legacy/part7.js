@@ -902,6 +902,23 @@ function drawMinimap() {
     mctx.fill();
   }
 
+  // 【2026-08-28・B-1(CODE_REVIEW_20260826_REALISM.md)】3Dには描かないトンネル(tunnelGrid、
+  // part1.js)を、地図としての道路網の連続性を保つために破線・半透明で先に描く
+  // (実在の地上道路が上に重なるように、通常の道路ループより前に置く)。
+  mctx.save();
+  mctx.setLineDash([3, 3]);
+  mctx.globalAlpha = 0.45;
+  for (const r of queryRoadGrid(px - R, px + R, pz - R, pz + R, tunnelGrid)) {
+    if ((r.x1-px > R && r.x2-px > R) || (px-r.x1 > R && px-r.x2 > R) ||
+        (r.z1-pz > R && r.z2-pz > R) || (pz-r.z1 > R && pz-r.z2 > R)) continue;
+    const t = r.type || 'road';
+    mctx.strokeStyle = mmRoadColor[t] || '#505878';
+    mctx.lineWidth = Math.max(1, (mmRoadWidth[t] || 1) * 0.8);
+    const a = toMap(r.x1, r.z1), b = toMap(r.x2, r.z2);
+    mctx.beginPath(); mctx.moveTo(a.mx, a.my); mctx.lineTo(b.mx, b.my); mctx.stroke();
+  }
+  mctx.restore();
+
   for (const r of queryRoadGrid(px - R, px + R, pz - R, pz + R)) {
     if ((r.x1-px > R && r.x2-px > R) || (px-r.x1 > R && px-r.x2 > R) ||
         (r.z1-pz > R && r.z2-pz > R) || (pz-r.z1 > R && pz-r.z2 > R)) continue;

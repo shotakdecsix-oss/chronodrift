@@ -1245,15 +1245,27 @@ function makeRoadGeo(x1, z1, x2, z2, width, yOffset, bridgeInfo, roadType) {
 // el.idを渡す。手続き生成側の呼び出しは無いのでnull)。roadRecordにrec.widとして持たせ、
 // タイル境界を無視して「そのwayが生成した全セグメント」を一括削除できるようにする
 // ([[project_isehara_game_way_tile_attribution]]参照)。
-function addRoad(x1, z1, x2, z2, width, type='road', bridgeY=null, wayId=null) {
+// 【2026-08-28・B-1(CODE_REVIEW_20260826_REALISM.md)】tunnelInfo: トンネルwayなら
+// { noMesh: bool } が渡る(part8.js processTileDataが判定)。noMesh=trueなら3Dメッシュを
+// 一切作らず、roadRecordだけ作ってtunnelGrid(part1.js)に載せる — ミニマップ上では道路網が
+// つながったまま、3Dには実在しない道が出ない、という状態にするため。
+function addRoad(x1, z1, x2, z2, width, type='road', bridgeY=null, wayId=null, tunnelInfo=null) {
   const dx = x2-x1, dz = z2-z1;
   const totalLen = Math.sqrt(dx*dx+dz*dz);
   if (totalLen < 0.5) return;
 
+  const isTunnel = !!tunnelInfo;
+  const tunnelNoMesh = !!(tunnelInfo && tunnelInfo.noMesh);
+
   // 高速道路: 現実モードは高架化、他モードは従来どおり細い地上路として描く
   if (type === 'motorway') {
-    if (IS_REAL) { addMotorway(x1, z1, x2, z2, wayId); return; }
-    type = 'road';
+    // 【2026-08-28・B-1】地下の高速道路(首都高中央環状線の山手トンネル等)をaddMotorwayへ
+    // 渡すと、makeMotorwayGeoが路面を地面+MWY_H(7m)に置いて防音壁・桁つきの高架を建ててしまう
+    // (=渋谷〜池袋の地上に幅16m/高さ7mの高架が出現する)。トンネルは必ずこの分岐を回避する。
+    if (IS_REAL && !isTunnel) { addMotorway(x1, z1, x2, z2, wayId); return; }
+    // 非現実モードは従来どおり細い地上路へ格下げ。現実モードのトンネルはtype='motorway'のまま
+    // 通し、ミニマップで高速道路として正しい色・太さで描けるようにする(メッシュは作らない)。
+    if (!IS_REAL) type = 'road';
   }
 
   let w = width, isRailway = false;
@@ -1316,10 +1328,17 @@ function addRoad(x1, z1, x2, z2, width, type='road', bridgeY=null, wayId=null) {
     rec.slope = { x1, z1, y1: bh.yA, x2, z2, y2: bh.yB, nx: dx/totalLen, nz: dz/totalLen, len: totalLen, hw: w/2 };
     bridgeSlopes.push(rec.slope);
   }
+  // 【2026-08-28・B-1】addRoadRecord→roadGridAdd(part1.js)が_noMeshを見てtunnelGridへ
+  // 振り分けるので、印はaddRoadRecordより必ず前に付ける。
+  if (isTunnel) {
+    rec.tunnel = true;              // 将来の「電車でGO」等で地下区間を拾えるようにする印(新しい配列は作らない)
+    if (tunnelNoMesh) rec._noMesh = true; // 3Dメッシュを作らない = queueRoadMesh/建物撤去/植生除去/装飾をすべて素通り
+  }
   addRoadRecord(rec);
   queueRoadMesh(rec);
 
-  if (IS_REAL && !isRailway && type !== 'water') {
+  // 【2026-08-28・B-1】見えないレコードに横断歩道を敷かない(地下鉄の上にゼブラが出るのを防ぐ)
+  if (IS_REAL && !isRailway && type !== 'water' && !rec._noMesh) {
     // (2026-07-16: 踏切生成は廃止 — 交差スキャンごと削除)
     // 交差点検出 → 横断歩道。OSMの共有ノード=セグメント端点なので、
     // 同一端点(1m格子)を3本以上が使っていたら交差点とみなしゼブラを敷く
@@ -1341,5 +1360,6 @@ function addRoad(x1, z1, x2, z2, width, type='road', bridgeY=null, wayId=null) {
     }
   }
 
-  decorateRoad(x1, z1, x2, z2, type, w, rec);
+  // 【2026-08-28・B-1】見えないレコードにはガードレール・街灯・信号機を置かない
+  if (!rec._noMesh) decorateRoad(x1, z1, x2, z2, type, w, rec);
 }

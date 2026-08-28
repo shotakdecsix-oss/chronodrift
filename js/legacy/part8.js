@@ -364,6 +364,12 @@ function processStationNodes(elements) {
 
 // 舗装/未舗装の判別用(OSM surfaceタグ)。タグが無い場合はhighway種別からの推定にフォールバックする。
 const UNPAVED_SURFACES = new Set(['unpaved','dirt','earth','ground','gravel','fine_gravel','grass','sand','mud','pebblestone','compacted','woodchips','clay','grass_paver']);
+// 【2026-08-28・B-1(CODE_REVIEW_20260826_REALISM.md)】tunnel=yes のwayをどこまで地表に描くか。
+// 一律に描かないと山岳トンネルの場所で道がぶつ切りになるため、短いもの(アンダーパス・覆道・
+// 道路下の暗渠)は従来どおり地表に描き、長いものだけメッシュを作らない。実機で「途切れが気に
+// なる」なら、この1つの定数を大きくするだけで調整できる(500程度まで上げてよい)。
+// 鉄道・高速道路のトンネルは長さに関係なく常に非表示(下記 _alwaysHide)。
+const TUNNEL_SURFACE_MAX_M = 150;
 
 function processTileData(data, tileCount, tileList) {
   if (!data || !data.elements) return;
@@ -397,6 +403,26 @@ function processTileData(data, tileCount, tileList) {
     if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) return;
     if (seenOSMWays.has(el.id)) return; // 隣接タイル/初期ロードで処理済み
     const tags = el.tags || {};
+    // 【2026-08-28・B-1(CODE_REVIEW_20260826_REALISM.md)】tunnel の判定はway単位で1回だけ行い、
+    // 下の道路/線路/水路の各ループへ同じ結果を渡す。
+    //  - tunnel=building_passage は「建物を貫く通路」で地下ではないため対象外(地表に描いてよい)。
+    //  - 長さは受信済みジオメトリから算出する。タイル境界でwayが切れている場合は過小評価に
+    //    なりうるが、鉄道・高速道路は長さに関係なく非表示なので実害の大きいケースは拾える。
+    const _isTunnel = !!(tags.tunnel && tags.tunnel !== 'no' && tags.tunnel !== 'building_passage');
+    let _tunnelInfo = null;
+    if (_isTunnel) {
+      let _tLen = 0;
+      for (let ti = 1; ti < el.geometry.length; ti++) {
+        const _p0 = latLonToXZ(el.geometry[ti-1].lat, el.geometry[ti-1].lon);
+        const _p1 = latLonToXZ(el.geometry[ti].lat, el.geometry[ti].lon);
+        _tLen += Math.hypot(_p1.x - _p0.x, _p1.z - _p0.z);
+      }
+      // 鉄道(地下鉄・地下区間)と高速道路(地下の首都高等)は長さを問わず常に非表示。
+      // 高速道路はaddMotorway経由で「地面+7mの高架」として建ってしまうため特に害が大きい。
+      const _hwT = tags.highway;
+      const _alwaysHide = tags.railway === 'rail' || _hwT === 'motorway' || _hwT === 'motorway_link';
+      _tunnelInfo = { noMesh: _alwaysHide || _tLen >= TUNNEL_SURFACE_MAX_M, len: _tLen };
+    }
     if (tags.highway) {
       const hw = tags.highway;
       const width = hw==='trunk'||hw==='primary' ? 8 : hw==='secondary' ? 6 : hw==='tertiary'||hw==='residential' ? 4 : 2.5;
@@ -450,14 +476,14 @@ function processTileData(data, tileCount, tileList) {
             wayPts: bridgePts, wayCum: bridgeCum, wayTotalLen: bridgeTotalLen
           };
         }
-        addRoad(a.x, a.z, b.x, b.z, width, type, bridgeY, el.id);
+        addRoad(a.x, a.z, b.x, b.z, width, type, bridgeY, el.id, _tunnelInfo);
       }
     }
     if (!USES_MEIJI_LANDUSE && tags.railway === 'rail') {
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
-        addRoad(a.x, a.z, b.x, b.z, 4, 'railway', null, el.id);
+        addRoad(a.x, a.z, b.x, b.z, 4, 'railway', null, el.id, _tunnelInfo);
       }
     }
     if (tags.waterway && tags.waterway !== 'riverbank') {
@@ -465,7 +491,7 @@ function processTileData(data, tileCount, tileList) {
       for (let i = 0; i < el.geometry.length-1; i++) {
         const a = latLonToXZ(el.geometry[i].lat, el.geometry[i].lon);
         const b = latLonToXZ(el.geometry[i+1].lat, el.geometry[i+1].lon);
-        addRoad(a.x, a.z, b.x, b.z, ww, 'water', null, el.id);
+        addRoad(a.x, a.z, b.x, b.z, ww, 'water', null, el.id, _tunnelInfo);
       }
     }
   });
@@ -1011,6 +1037,27 @@ async function fetchOverpassSlotWaitMs() {
 // (processOSMTileQueue)から渡される。trueならbatchSizeを1に固定し、このジョブが
 // far優先度(tilePriority='far'はbatch.length>1の時だけ付く)になるのを防ぐ。
 async function fetchOSMTileBatch(opts) {
+  // 【2026-08-27・E-1】関数本体(この後の全処理)をtry/finallyで包み、どの行で例外が
+  // 飛んでもosmTileActiveCount/osmTileActiveFarCountの枠を必ず解放する。以前は準備処理
+  // (下の内側のtry開始行より前、道路/建物バッチの分類・タイムアウト計算など)で例外が
+  // 起きると、finally節に一切到達せず、呼び出し元processOSMTileQueueが積んだ
+  // osmTileActiveCountの加算分が永久に戻らず、その1枠が実質使用不能になったまま
+  // 残ってしまっていた(2枠しかない設計のため、これが2回起きると新規タイル取得が
+  // 完全停止する)。
+  let _mainSlotReleased = false;
+  const _releaseMainSlot = () => {
+    if (_mainSlotReleased) return;
+    _mainSlotReleased = true;
+    osmTileActiveCount--;
+  };
+  let _farSlotAcquired = false;
+  let _farSlotReleased = false;
+  const _releaseFarSlot = () => {
+    if (_farSlotReleased || !_farSlotAcquired) return;
+    _farSlotReleased = true;
+    osmTileActiveFarCount--;
+  };
+  try {
   const _soloOnly = !!(opts && opts.soloOnly);
   // プレイヤーに近いタイルを優先(以前はキュー投入順で、進行方向の
   // タイルが後回しになり目の前で道路が途切れたまま待たされていた)
@@ -1252,7 +1299,7 @@ async function fetchOSMTileBatch(opts) {
   // 名乗る/その逆)ため、分離ジョブのバッチは近傍圏内かどうかで区切る。blockingも同様に
   // 区切る(足元をソロで返す上の判断を、後続タイルの混入で無効化しないため)。
   const _isNearSplit = (t) => Math.max(Math.abs(t.tx - _pTileX), Math.abs(t.tz - _pTileZ)) <= NEAR_SPLIT_TIER_R;
-  const _headNearSplit = _isNearSplit(nextTile);
+  const _headNearSplit = nextTile ? _isNearSplit(nextTile) : false;
   let eligibleRun = 0;
   for (const t of osmTileQueue) {
     if (t.kind !== nextTile.kind) break;
@@ -1310,7 +1357,7 @@ async function fetchOSMTileBatch(opts) {
   // (processOSMTileQueueの予約枠チェック用)。ここは最初のawaitより前(同期区間)なので、
   // 呼び出し元のwhileループが次にosmTileActiveFarCountを参照する時には必ず反映済み。
   // finally節で必ず対になる--を行う(成功・失敗どちらでも、このワーカーが終わるたびに)。
-  if (tilePriority === 'far') osmTileActiveFarCount++;
+  if (tilePriority === 'far') { osmTileActiveFarCount++; _farSlotAcquired = true; }
   let failed = false;
   // 【重要】以前は Promise.race([fetch(...), timeoutPromise]) で「50秒で見切る」だけだった。
   // これはtimeoutPromise側が先に解決してcatchに落ちるだけで、負けた方のfetch自体は
@@ -1431,7 +1478,7 @@ async function fetchOSMTileBatch(opts) {
           }
         }
         clearTimeout(timeoutId);
-        osmTileActiveCount--;
+        _releaseMainSlot();
         processOSMTileQueue(); // キャッシュヒットは待ち時間なしで即次のタイルへ
         return;
       }
@@ -1648,7 +1695,7 @@ async function fetchOSMTileBatch(opts) {
     clearTimeout(timeoutId); // 成功時に残ったタイマー自体の掃除(abort()は既に完了済みのfetchには無害)
     _activeFetchStarts.delete(_fetchStartKey); // 診断計器の後片付け(成功・失敗いずれでも必ず消す)
     _activeFetchAborts.delete(_fetchStartKey);
-    if (tilePriority === 'far') osmTileActiveFarCount--; // 上で++した分を必ず対で戻す
+    _releaseFarSlot(); // 上で++した分を必ず対で戻す(二重解放防止フラグ入り)
   }
   // 【2026-07-17・Fable5診断】以前は失敗時、待ち時間(最大30秒)をこのワーカーが
   // concurrency枠(OSM_TILE_CONCURRENCY=3)を握ったままsleepしていたため、密集地で
@@ -1659,8 +1706,15 @@ async function fetchOSMTileBatch(opts) {
   if (!failed) {
     await new Promise(r => setTimeout(r, 200));
   }
-  osmTileActiveCount--;
+  _releaseMainSlot();
   processOSMTileQueue(); // この枠が空いたので、キューに残りがあれば次を拾う(backoff中のみなら内部でbreakする)
+  } finally {
+    // 【2026-08-27・E-1】上のtryのどこで例外が飛んでも、ここで必ず両方の枠を解放する。
+    // 正常経路では既にどちらのヘルパーも呼ばれ済み(二重解放防止フラグでここは
+    // 実質no-opになる)。
+    _releaseMainSlot();
+    _releaseFarSlot();
+  }
 }
 
 // 【2026-07-16】現在地タイルの「描写完了」監視。約1.5秒ごとに、(1)現在地タイルの

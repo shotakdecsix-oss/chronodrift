@@ -161,7 +161,16 @@ function _debugTilePlaneGroup(key) {
 function setDebugTileOverlay(on) {
   debugTileOverlayOn = on;
   if (!on) { for (const m of debugTilePlanes.values()) m.visible = false; }
-  else { _debugTileFrame = 0; updateDebugTileOverlay(true); }
+  else {
+    _debugTileFrame = 0;
+    updateDebugTileOverlay(true);
+    // 【2026-08-27・B-5修正(CODE_REVIEW_20260826_PERF_AND_CRASH.md)】installGlByteTrackerは
+    // 元は起動時に無条件で呼ばれ、gl.bufferData/gl.deleteBufferを常時パッチしていた。
+    // 🩺オーバーレイをONにした時だけ設置する(installGlByteTracker内のgl.__byteTracked
+    // ガードにより複数回呼んでも二重パッチしない)。Chromeでは軽いとコメントにある通りだが、
+    // 実機iOS Safariでの挙動は未検証のため、既定では入れない。
+    installGlByteTracker();
+  }
 }
 function updateDebugTileOverlay(force) {
   if (!debugTileOverlayOn) return;
@@ -428,7 +437,8 @@ function installGlByteTracker() {
     };
   } catch (e) { console.warn('[gpuBytes] GLトラッカーを設置できませんでした', e); }
 }
-installGlByteTracker();
+// 【2026-08-27・B-5修正】起動時の無条件呼び出しを撤去。setDebugTileOverlay(true)から
+// 呼ばれる(🩺ONの時だけ設置する)。
 
 // 【2026-07-28】クラッシュの「種類」を確定させるための2つの仕掛け。
 // (1) WebGLコンテキストロストの検知。GPUプロセス側でメモリ不足やドライバのリセットが
@@ -474,6 +484,9 @@ window.killGL = () => {
 };
 
 function logGpuBytes() {
+  // 【2026-08-27・B-5修正】scene.traverse(シーン全オブジェクト走査)を伴う重い計測なので、
+  // 🩺デバッグオーバーレイOFF中は完全にスキップする(以前は🩺と無関係に常時稼働していた)。
+  if (!debugTileOverlayOn) return;
   if (++_gpuBytesFrame % 600 !== 0) return; // ~10秒ごと
   const seenGeo = new Set(), seenTex = new Set();
   let geoBytes = 0, texBytes = 0, meshCount = 0;
