@@ -86,6 +86,10 @@ function farNodeY(i, j) {
 }
 // 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER_v2.md 修正A-1】farNodeYの`|| 0`と同じ理由で、
 // 欠測を区別できるノードクエリを別途用意する(part4.jsの水面プロファイル計算専用)。
+// 【2026-11-10】海側のノード(海岸線の判定で海。farNodeYが海面のすぐ下へ下げている)。遠景地形を水の色で塗るのに使う。
+// 海面ポリゴンは読み込み済みタイルの範囲にしか無いため、その外側では下げた地形が緑(霧で淡く)の帯に見えていた。
+function farNodeIsSea(i, j) { const e = _seaNodeCache.get(i + '|' + j); return !!(e && e.g && e.g.sea); }
+const _farSeaRGB = (() => { const c = new THREE.Color(MODE_CONF.water); return [c.r, c.g, c.b]; })();
 function farNodeYOrNull(i, j) {
   if (typeof terrainYOrNull !== 'function') return null;
   return terrainYOrNull(i * FAR_STEP, j * FAR_STEP);
@@ -119,7 +123,7 @@ function updateFarMesh(force) {
       const h = farNodeY(i0 + jx, j0 + jz); // クエリと同じノード関数を使用
       pos.setZ(idx, h);
       if (h > terrainMaxH) terrainMaxH = h; // 色の正規化用の最大高さも同じループで更新(space/edo/marchenモード)
-      const c = terrainColorRGB(h);
+      const c = farNodeIsSea(i0 + jx, j0 + jz) ? _farSeaRGB : terrainColorRGB(h);
       col.setXYZ(idx, c[0], c[1], c[2]);
     }
   }

@@ -1198,6 +1198,7 @@ function dropAreaRecordsInTile(tx, tz, tileM) {
 // オブジェクトを持たない軽量な記録)やareaPolyGridへの登録自体は変えない — entry.meshの
 // null⇔Meshの切り替えのみ(道路のr.meshと同じパターン)。
 const AREA_POLY_UNLOAD_DIST = PERF.roadUnload; // 道路と同程度の距離まで保持
+const SEA_POLY_UNLOAD_DIST = Math.max(AREA_POLY_UNLOAD_DIST, 5000); // 海面だけは遠くまで(unloadFarAreaPolys)
 let _areaPolyUnloadFrame = 0;
 // force=true: 90フレーム周期を待たず即座に判定する(「今すぐ整理」ボタン用)
 function unloadFarAreaPolys(force) {
@@ -1207,6 +1208,9 @@ function unloadFarAreaPolys(force) {
   if (areaPolyMeshes.length === 0) return;
   const px = player.position.x, pz = player.position.z;
   const d2 = AREA_POLY_UNLOAD_DIST * AREA_POLY_UNLOAD_DIST;
+  // 【2026-11-10】海面は遠くまで見えるので長めに保持する(平らで軽い)。保持距離の外は遠景地形を水の色で塗る
+  // (part5.js updateFarMesh)。以前は道路と同じ距離で消え、その先に海面下へ下げた地形が淡い帯として見えていた
+  const seaD2 = SEA_POLY_UNLOAD_DIST * SEA_POLY_UNLOAD_DIST;
   for (const entry of areaPolyMeshes) {
     // bboxへの最短距離(プレイヤーがbbox内なら0)。巨大な公園・大河川の中にいるのに
     // 「中心が遠い」という理由で解放されてしまわないようにする。
@@ -1214,11 +1218,12 @@ function unloadFarAreaPolys(force) {
     const nz = Math.max(entry.minZ, Math.min(pz, entry.maxZ));
     const dx = px - nx, dz = pz - nz;
     const dd = dx * dx + dz * dz;
+    const lim2 = entry.areaKind === 'sea' ? seaD2 : d2;
     if (!entry.mesh) {
-      if (dd <= d2) _instantiateAreaPolyMesh(entry); // 再接近 → 記録から再構築
+      if (dd <= lim2) _instantiateAreaPolyMesh(entry); // 再接近 → 記録から再構築
       continue;
     }
-    if (dd <= d2) continue; // まだ範囲内
+    if (dd <= lim2) continue; // まだ範囲内
     scene.remove(entry.mesh);
     entry.mesh.geometry.dispose(); // マテリアルは共有(lawnMat等)なので破棄しない
     entry.mesh = null;
@@ -1261,6 +1266,7 @@ function evictFarAreaPolys(force) {
     if (dx * dx + dz * dz <= keep2) { areaPolyMeshes[w++] = e; continue; }
     // ここに来る時点でunloadFarAreaPolysが既にメッシュを解放しているはずだが、念のため
     if (e.mesh) { scene.remove(e.mesh); e.mesh.geometry.dispose(); e.mesh = null; }
+    e.dropped = true; // ベクタータイルの海面(_vtSeaEntries)は、これを見て再取得時に作り直す
     areaPolyRefund(e.areaKind); // 予算を返す(再取得でまた確保される)
     _areaPolyEvicted++;
   }
