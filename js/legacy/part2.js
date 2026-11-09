@@ -108,6 +108,7 @@ const FACADE_CACHE_MAX = PERF_PRESET === 'lite' ? 220 : Infinity;
 // 上限キャップに頼らず、使われなくなったテクスチャは常時バックグラウンドで解放される
 // (ユーザー体験には出ない。既存の90フレームごとの遠方建物アンロード処理に相乗り)。
 function facadeMat(kind, color, variant) {
+  if (MODE === 'real') return facadeMatReal(kind, color); // 現実モードは共有アトラス+シェーダー(下のfacadeMatReal)
   const key = kind + '_' + color + '_' + variant;
   const hit = facadeCache.get(key);
   if (hit) { hit.userData.refCount = (hit.userData.refCount || 0) + 1; return hit; }
@@ -321,6 +322,224 @@ function facadeMat(kind, color, variant) {
 // 防いだ上で、ここでも「万一のすり抜け」に備えて負カウントを検出したら警告を出すだけで
 // disposeはしない(実機HUDで_facadeReleaseWarnCountが0のままなら修正が効いている証拠)。
 let _facadeReleaseWarnCount = 0;
+// ======= 現実モードの外壁: 共有アトラス+シェーダー =======
+// 外壁テクスチャは種類ごとに1組だけ作り、壁色はマテリアルの色としてシェーダーで掛ける
+// (以前は壁色ごとにcanvasテクスチャを作っていたため、テクスチャ数が数百〜千枚に増えていた)。
+// アトラスは横4列(0=正面の標準階 1=正面の1階[玄関・ロビー・店構え] 2=裏面 3=妻側)×縦2段(デザイン違い)。
+// 補助テクスチャ(emissiveMapの枠を流用): R=窓ガラス G=壁色を掛ける部分 B=夜は常に点く灯り。
+// 面の役割は箱ジオメトリの属性aFace(役割, 列数, 階数)で渡す。+z面=正面(addBuildingで道路側へ向ける)。
+const FACADE_U = { uLitRatio: { value: 0 }, uSkyRefl: { value: new THREE.Color(0, 0, 0) }, emiNow: 0 };
+const _FACADE_ANISO = (() => { try { return Math.min(4, renderer.capabilities.getMaxAnisotropy()); } catch (e) { return 1; } })();
+const _facadeAtlas = new Map();
+function _setBoxFaceAttr(g, cx, cz, fl) {
+  const a = new Float32Array(24 * 3);
+  const set = (f, role, cols) => { for (let i = 0; i < 4; i++) { const k = (f * 4 + i) * 3; a[k] = role; a[k + 1] = cols; a[k + 2] = fl; } };
+  set(0, 2, cz); set(1, 3, cz); set(2, 4, 1); set(3, 4, 1); set(4, 0, cx); set(5, 1, cx); // +x,-x,+y,-y,+z,-z
+  g.setAttribute('aFace', new THREE.BufferAttribute(a, 3));
+}
+function _drawFacadeTile(kind, c, v, g, a) {
+  const S = 128;
+  let sd = 1234567 + c * 7919 + v * 104729 + kind.charCodeAt(0) * 31;
+  const rnd = () => ((sd = (sd * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const gray = (f) => { const q = Math.max(0, Math.min(255, Math.round(240 * f))); return 'rgb(' + q + ',' + q + ',' + q + ')'; };
+  const tint = (x, y, w, h, f) => { g.fillStyle = gray(f); g.fillRect(x, y, w, h); };
+  const raw = (x, y, w, h, css, mode) => { // mode 0=色そのまま 1=窓(夜は抽選で点灯) 2=常夜灯
+    g.fillStyle = css; g.fillRect(x, y, w, h);
+    a.fillStyle = mode === 1 ? 'rgb(255,0,0)' : mode === 2 ? 'rgb(255,0,255)' : 'rgb(0,0,0)';
+    a.fillRect(x, y, w, h);
+  };
+  const shade = (y0, y1, f0) => { const gr = g.createLinearGradient(0, y0, 0, y1); gr.addColorStop(0, gray(f0)); gr.addColorStop(1, gray(1)); g.fillStyle = gr; g.fillRect(0, y0, S, y1 - y0); };
+  const win = (x, y, w, h, opt) => {
+    opt = opt || {};
+    tint(x - 2, y - 2, w + 4, h + 4, opt.frame || 0.62);
+    raw(x, y, w, h, opt.glass || '#2b3542', 1);
+    if (opt.sash !== false) raw(x + w / 2 - 0.75, y, 1.5, h, '#c4c9ce', 0);
+    if (opt.sill !== false) tint(x - 2, y + h + 2, w + 4, 3, 0.74);
+  };
+  for (let i = 0; i < 22; i++) tint((rnd() * S) | 0, (rnd() * S) | 0, 2 + (rnd() * 5 | 0), 2 + (rnd() * 4 | 0), 0.96 + rnd() * 0.06);
+  if (kind === 'house') {
+    shade(0, 12, 0.8); // 軒・上階の床の影
+    if (c === 0) { if (v === 0) win(38, 36, 52, 48); else { win(18, 40, 36, 40); win(74, 40, 36, 40); } }
+    else if (c === 1) { // 玄関
+      tint(62, 26, 44, 6, 0.66);
+      raw(70, 34, 28, 92, '#6b4f36', 0); raw(73, 38, 22, 84, '#7a5b3e', 0); raw(90, 78, 2, 8, '#d8c890', 0);
+      if (v === 0) win(16, 44, 36, 34); else win(18, 40, 40, 44, { glass: '#3a4650' });
+    } else if (c === 2) { // 裏面: 浴室などの小窓と換気口
+      win(48, 36, 30, 26, { glass: '#9aa6ae', sash: false });
+      if (v === 1) win(88, 40, 22, 22, { glass: '#9aa6ae', sash: false });
+      tint(20, 44, 10, 10, 0.7);
+    } else { // 妻側
+      if (v === 0) win(52, 42, 24, 30, { sash: false });
+      raw(6, 0, 3, S, '#8f9498', 0); // 竪樋
+    }
+  } else if (kind === 'shop') {
+    shade(0, 12, 0.8);
+    if (c === 0) { if (v === 0) win(30, 34, 68, 50); else { win(14, 38, 42, 44); win(72, 38, 42, 44); } }
+    else if (c === 1) { // 店構え(看板は立体の帯が別に付く)
+      tint(0, 24, S, 4, 0.6);
+      raw(6, 30, 116, 94, '#33404c', 1);
+      raw(44, 30, 2, 94, '#b8bec4', 0); raw(84, 30, 2, 94, '#b8bec4', 0); raw(6, 76, 116, 2, '#b8bec4', 0);
+    } else if (c === 2) win(50, 40, 28, 24, { glass: '#9aa6ae', sash: false });
+    else if (v === 1) win(52, 42, 24, 28, { sash: false });
+  } else if (kind === 'apt') {
+    if (c === 0) { // ベランダ側
+      tint(0, 0, S, 5, 0.72); shade(5, 18, 0.8);
+      win(20, 22, 88, 64, { frame: 0.7 });
+      raw(0, 26, 4, 60, '#d6dad6', 0); // 隔て板
+      if (v === 0) { tint(0, 84, S, 40, 0.9); tint(0, 84, S, 3, 0.7); } // コンクリートの腰壁
+      else { tint(0, 104, S, 20, 0.9); raw(0, 86, S, 2, '#7d848a', 0); for (let x0 = 3; x0 < S; x0 += 7) raw(x0, 88, 1.5, 16, '#7d848a', 0); } // 手すり
+    } else if (c === 1) { // エントランス
+      tint(16, 20, 96, 9, 0.6);
+      win(30, 34, 68, 88, { frame: 0.5, glass: '#34404c' });
+      tint(102, 44, 16, 12, 0.78); // 館名板
+    } else if (c === 2) { // 共用廊下側
+      tint(0, 0, S, 5, 0.72);
+      tint(0, 5, S, 66, 0.7); // 奥まった廊下の壁
+      raw(60, 7, 8, 4, '#f4f0dc', 2); // 廊下灯
+      raw(76, 24, 26, 47, '#5f656d', 0); // 玄関ドア(鉄)
+      win(20, 30, 34, 26, { glass: '#3a4652', frame: 0.6 });
+      for (let x0 = 22; x0 < 54; x0 += 5) raw(x0, 30, 1.5, 26, '#8a9096', 0); // 面格子
+      tint(0, 71, S, 53, 0.92); tint(0, 71, S, 3, 0.72); // 廊下の腰壁
+    } else { // 妻側
+      tint(42, 0, 2, S, 0.9); tint(86, 0, 2, S, 0.9);
+      if (v === 1) win(54, 40, 22, 30, { sash: false });
+    }
+  } else if (kind === 'office') {
+    if (c === 1) { // 1階ロビー
+      tint(0, 0, S, 8, 0.62);
+      raw(6, 14, 116, 110, '#2c3846', 1);
+      raw(44, 14, 2, 110, '#b0b8c0', 0); raw(84, 14, 2, 110, '#b0b8c0', 0);
+    } else if (c === 3 && v === 1) { // 窓の無い妻壁
+      tint(0, 0, S, 6, 0.62); tint(40, 0, 2, S, 0.9); tint(86, 0, 2, S, 0.9);
+    } else {
+      tint(0, 0, S, 6, 0.62); shade(6, 18, 0.82);
+      if (v === 0 || c === 3) win(c === 3 ? 22 : 8, 22, c === 3 ? 84 : 112, 70, { frame: 0.55 });
+      else { win(14, 28, 44, 62, { frame: 0.55 }); win(70, 28, 44, 62, { frame: 0.55 }); }
+      tint(0, 98, S, 30, 0.86); // スパンドレル
+    }
+  } else { // ind(工場・倉庫)
+    for (let x0 = 0; x0 < S; x0 += 6) tint(x0, 10, 2, S - 10, 0.9); // 折板の縦筋
+    tint(0, S - 8, S, 8, 0.72);
+    if (c === 0) win(18, 18, 92, 14, { glass: '#3a4652', frame: 0.6 });
+    else if (c === 1) {
+      tint(26, 40, 76, 88, 0.62);
+      for (let y0 = 44; y0 < S; y0 += 5) tint(27, y0, 74, 1, 0.52); // シャッター
+      raw(108, 72, 12, 56, '#5e646c', 0);
+    } else if (c === 2) win(52, 30, 24, 16, { glass: '#3a4652', sash: false });
+    else if (v === 1) win(54, 28, 20, 14, { glass: '#3a4652', sash: false });
+  }
+}
+function _facadeAtlasFor(kind) {
+  let at = _facadeAtlas.get(kind);
+  if (at) return at;
+  const T = 128;
+  const cv = document.createElement('canvas'); cv.width = T * 4; cv.height = T * 2;
+  const av = document.createElement('canvas'); av.width = T * 4; av.height = T * 2;
+  const g = cv.getContext('2d'), a = av.getContext('2d');
+  g.fillStyle = 'rgb(240,240,240)'; g.fillRect(0, 0, cv.width, cv.height);
+  a.fillStyle = 'rgb(0,255,0)'; a.fillRect(0, 0, av.width, av.height);
+  for (let v = 0; v < 2; v++) for (let c = 0; c < 4; c++) {
+    g.save(); a.save();
+    g.translate(c * T, (1 - v) * T); a.translate(c * T, (1 - v) * T); // flipYでv=0が下段になる
+    _drawFacadeTile(kind, c, v, g, a);
+    g.restore(); a.restore();
+  }
+  const mk = (canvas) => { const t = new THREE.CanvasTexture(canvas); t.anisotropy = _FACADE_ANISO; return t; };
+  at = { map: mk(cv), aux: mk(av) };
+  _facadeAtlas.set(kind, at);
+  return at;
+}
+const FACADE_VS_DECL = 'attribute vec3 aFace;\nvarying vec3 vFace;\nvarying vec3 vObjPos;\nvarying vec3 vViewDirV;\nvarying vec3 vNrmV;\n';
+const FACADE_VS_UV = 'vFace = aFace;\nvObjPos = vec3(modelMatrix[3][0], modelMatrix[3][1], modelMatrix[3][2]);\n';
+const FACADE_VS_PROJ = 'vViewDirV = -mvPosition.xyz;\nvNrmV = transformedNormal;\n';
+const FACADE_FS_DECL = `varying vec3 vFace;
+varying vec3 vObjPos;
+varying vec3 vViewDirV;
+varying vec3 vNrmV;
+uniform float uLitRatio;
+uniform vec3 uSkyRefl;
+uniform float uDoorOnce;
+float fHash(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+`;
+const FACADE_FS_MAP = `
+vec4 aux = vec4(0.0, 1.0, 0.0, 0.0);
+vec2 fCell = floor(vUv);
+vec2 fIn = fract(vUv);
+float fRole = vFace.x;
+#if __VERSION__ >= 300 || defined(GL_OES_standard_derivatives)
+vec2 fDx = dFdx(vUv) * vec2(0.25, 0.5);
+vec2 fDy = dFdy(vUv) * vec2(0.25, 0.5);
+#endif
+if (fRole < 3.5) {
+  float fVar = step(0.5, fHash(vObjPos.xz * 0.731 + 7.7));
+  float fTc = 3.0;
+  if (fRole < 0.5) {
+    fTc = fCell.y < 0.5 ? 1.0 : 0.0;
+    if (fCell.y < 0.5 && uDoorOnce > 0.5) fTc = abs(fCell.x - floor(vFace.y * 0.5)) < 0.5 ? 1.0 : 0.0;
+  } else if (fRole < 1.5) {
+    fTc = 2.0;
+  }
+  vec2 fAuv = (vec2(fTc, fVar) + fIn) * vec2(0.25, 0.5);
+  vec4 texelColor;
+#if __VERSION__ >= 300
+  texelColor = textureGrad(map, fAuv, fDx, fDy);
+  aux = textureGrad(emissiveMap, fAuv, fDx, fDy);
+#elif defined(GL_EXT_shader_texture_lod) && defined(GL_OES_standard_derivatives)
+  texelColor = texture2DGradEXT(map, fAuv, fDx, fDy);
+  aux = texture2DGradEXT(emissiveMap, fAuv, fDx, fDy);
+#else
+  texelColor = texture2D(map, fAuv);
+  aux = texture2D(emissiveMap, fAuv);
+#endif
+  diffuseColor.rgb = mix(texelColor.rgb, texelColor.rgb * diffuse, aux.g);
+  if (fCell.y < 0.5) diffuseColor.rgb *= mix(0.55, 1.0, step(0.06, fIn.y)) * mix(0.86, 1.0, smoothstep(0.06, 0.3, fIn.y));
+  diffuseColor.rgb *= 1.0 - 0.08 * smoothstep(vFace.z - 0.12, vFace.z, vUv.y);
+} else {
+  diffuseColor.rgb = mix(diffuse * 0.85, vec3(0.6, 0.6, 0.58), 0.65);
+}
+`;
+const FACADE_FS_EMI = `
+{
+  float fWin = aux.r;
+  float fH1 = fHash(fCell * vec2(1.7, 3.1) + vObjPos.xz * 0.0131 + vec2(fRole * 17.0, fRole * 3.0));
+  float fH2 = fHash(fCell * vec2(5.3, 1.9) + vObjPos.zx * 0.0293 + vec2(fRole * 7.0, 1.0));
+  float fOn = max(step(fH1, uLitRatio), step(0.5, aux.b) * step(0.001, uLitRatio)) * fWin;
+  vec3 fCol = mix(vec3(1.0, 0.76, 0.46), vec3(0.8, 0.88, 1.0), step(0.65, fH2)) * (0.5 + 0.5 * fract(fH2 * 7.13));
+  totalEmissiveRadiance *= fCol * fOn;
+  float fFres = pow(1.0 - clamp(dot(normalize(vViewDirV), normalize(vNrmV)), 0.0, 1.0), 3.0);
+  totalEmissiveRadiance += fWin * uSkyRefl * (0.15 + 0.6 * fFres);
+}
+`;
+// thisはマテリアル(onBeforeCompileはメソッドとして呼ばれる)。全外壁マテリアルで同じ関数を共有するので
+// シェーダープログラムも1つにまとまる(three.jsはこの関数の文字列でプログラムをキャッシュする)
+function _facadeOnBeforeCompile(shader) {
+  shader.uniforms.uLitRatio = FACADE_U.uLitRatio;
+  shader.uniforms.uSkyRefl = FACADE_U.uSkyRefl;
+  shader.uniforms.uDoorOnce = { value: this.userData && this.userData.doorOnce ? 1 : 0 };
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', '#include <common>\n' + FACADE_VS_DECL)
+    .replace('#include <uv_vertex>', '#include <uv_vertex>\n' + FACADE_VS_UV)
+    .replace('#include <project_vertex>', '#include <project_vertex>\n' + FACADE_VS_PROJ);
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', '#include <common>\n' + FACADE_FS_DECL)
+    .replace('#include <map_fragment>', FACADE_FS_MAP)
+    .replace('#include <emissivemap_fragment>', FACADE_FS_EMI);
+}
+function facadeMatReal(kind, color) {
+  const key = 'R_' + kind + '_' + color;
+  const hit = facadeCache.get(key);
+  if (hit) { hit.userData.refCount = (hit.userData.refCount || 0) + 1; return hit; }
+  const at = _facadeAtlasFor(kind);
+  const m = new THREE.MeshLambertMaterial({ color, map: at.map, emissive: 0xffffff, emissiveMap: at.aux, emissiveIntensity: FACADE_U.emiNow });
+  m.extensions = { derivatives: true, shaderTextureLOD: true };
+  m.onBeforeCompile = _facadeOnBeforeCompile;
+  m.userData.cacheKey = key; m.userData.refCount = 1; m.userData.baseEmi = 0.85;
+  m.userData.sharedMaps = true; m.userData.facadeV2 = true;
+  m.userData.doorOnce = (kind === 'house' || kind === 'apt');
+  facadeCache.set(key, m);
+  return m;
+}
+applyTimeOfDay(); // FACADE_Uの初期値(窓の点灯率・空の映り込み)をいまの時刻で入れる
 function releaseFacadeMat(mat) {
   if (!mat || !mat.userData || mat.userData.cacheKey == null) return;
   if (mat.userData.refCount == null || mat.userData.refCount <= 0) {
@@ -336,6 +555,7 @@ function releaseFacadeMat(mat) {
   // 【重要】ここはこのmaterial自体を実際に破棄する分岐(=refCount0到達時)でしか
   // 実行されないので、facadeCacheに残っている他の生存中エントリ(=まだ表示中の建物が
   // 使っている共有material)のCanvasには一切触れない。
+  if (mat.userData.sharedMaps) { mat.dispose(); return; } // 共有アトラスは解放しない
   if (mat.map) { if (mat.map.image) { mat.map.image.width = 0; mat.map.image.height = 0; } mat.map.dispose(); }
   if (mat.emissiveMap) { if (mat.emissiveMap.image) { mat.emissiveMap.image.width = 0; mat.emissiveMap.image.height = 0; } mat.emissiveMap.dispose(); }
   mat.dispose();
@@ -378,6 +598,7 @@ function sharedFacadeBoxGeo(colsX, colsZ, floors) {
   if (!g) {
     g = new THREE.BoxGeometry(1, 1, 1);
     setBoxFacadeUVs(g, cx, cz, fl);
+    _setBoxFaceAttr(g, cx, cz, fl);
     g.userData.shared = true; // アンロード時にdisposeしない印
     _facadeBoxCache.set(key, g);
   }

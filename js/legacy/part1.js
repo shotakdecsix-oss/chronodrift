@@ -703,7 +703,16 @@ function applyTimeOfDay() {
     // 現実モードの3.0より大きく下げ、色味(windowC)・base強度(part2.js facadeMat)と
     // 合わせてろうそく風の弱い暖色の点灯にする。
     const winGlow = winLit * (USES_MEIJI_LANDUSE ? 1.1 : 2.2); // 3.0では窓が白飛びしていた
+    // 現実モードの外壁(facadeV2)は窓ごとの点灯をシェーダーで抽選する。夕方は点灯する窓の割合が
+    // 増えていく形にし、1枚ごとの明るさは一定にする。昼はガラスに空の色を映す
+    const v2Emi = 0.85 * 2.2 * _smooth01(winLit * 4);
+    if (typeof FACADE_U !== 'undefined') {
+      FACADE_U.uLitRatio.value = 0.55 * winLit;
+      FACADE_U.emiNow = v2Emi;
+      FACADE_U.uSkyRefl.value.copy(WORLD_FOG.color).multiplyScalar(0.45 * (1 - night));
+    }
     facadeCache.forEach((mat) => {
+      if (mat.userData && mat.userData.facadeV2) { mat.emissiveIntensity = v2Emi; return; }
       const base = mat.userData && mat.userData.baseEmi != null ? mat.userData.baseEmi : 0.85;
       mat.emissiveIntensity = base * winGlow;
     });

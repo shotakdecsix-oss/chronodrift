@@ -287,9 +287,40 @@ function _roofRise(minWD, cprof, rnd) {
   const ratio = pr[0] + (pr[1] - pr[0]) * rnd();
   return Math.min(4.2, Math.max(1.0, minWD * 0.5 * ratio));
 }
+// 正面(ローカル+z)を最寄りの道路へ向けるための90°回転数(0〜3)。線路・水路・高速道路は対象外
+const FRONT_TYPES = new Set(['default', 'house', 'shop', 'apartment', 'office', 'industrial']);
+const _FRONT_SKIP = new Set(['railway', 'water', 'motorway']);
+function _frontTurns(x, z, w, d, rot) {
+  const R = Math.max(w, d) / 2 + 30;
+  let best = Infinity, bx = 0, bz = 0;
+  for (const r of queryRoadGrid(x - R, x + R, z - R, z + R)) {
+    if (_FRONT_SKIP.has(r.type)) continue;
+    const dx = r.x2 - r.x1, dz = r.z2 - r.z1, L2 = dx * dx + dz * dz;
+    let t = L2 > 0 ? ((x - r.x1) * dx + (z - r.z1) * dz) / L2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const px = r.x1 + dx * t - x, pz = r.z1 + dz * t - z, dd = px * px + pz * pz;
+    if (dd < best) { best = dd; bx = px; bz = pz; }
+  }
+  if (best === Infinity) return 0;
+  const sn = Math.sin(rot), cs = Math.cos(rot);
+  const fz = bx * sn + bz * cs, fx = bx * cs - bz * sn; // ローカル+z、+x方向の成分
+  if (Math.abs(fz) >= Math.abs(fx)) return fz >= 0 ? 0 : 2;
+  return fx > 0 ? 1 : 3;
+}
+// 正面1階の玄関の区画のローカルx(シェーダー側の floor(cols*0.5) と同じ規則)
+function _doorLocalX(w, tw) {
+  const cols = _quantUVStep(Math.max(1, Math.round(w / tw)));
+  return -w / 2 + (Math.floor(cols * 0.5) + 0.5) * (w / cols);
+}
 function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
   const _origH = h; // 遠方アンロード時、再生成できるよう元のhを覚えておく(下でhを斜面ぶん延長するため)
   const rnd = _bldRng(x, z); // この建物の見た目用の決定的乱数
+  // 正面(ローカル+z)を最寄りの道路へ向ける。箱は90°単位で回してw/dを入れ替えれば同じ形なので、
+  // 外壁の面の役割(正面=玄関・店構え・ベランダ、裏=廊下、妻側)と玄関庇・店の看板が道路側に来る
+  if (FRONT_TYPES.has((style && style.type) || 'default')) {
+    const k = _frontTurns(x, z, w, d, rot || 0);
+    if (k) { rot = (rot || 0) + k * Math.PI / 2; if (k & 1) { const t0 = w; w = d; d = t0; } }
+  }
   // 4隅+中心の地形高さを見て、最低点を基礎にし最高点まで胴体を延長。
   // (中心1点だけだと斜面で山側が埋まり、谷側が浮いていた)
   const hs = [
@@ -372,6 +403,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
     // 【2026-07-18】スタジアムはオフィス街のような窓タイル張りだと不自然なので無地壁にする
     (isMushroom || type === 'shrine' || type === 'temple' || type === 'church' || type === 'stadium') ? null :
     type === 'industrial' ? 'ind' :
+    (MODE === 'real' && type === 'shop' && floors <= 3) ? 'shop' :
     (floors <= 2 && (type === 'house' || type === 'default' || type === 'shop')) ? 'house' :
     (type === 'house' || type === 'apartment') ? 'apt' : 'office';
   // バリアントは2種(4種に増やしたらテクスチャメモリ超過で東京駅クラッシュ→縮小。part2.js参照)
@@ -389,14 +421,15 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
   // GPUメモリはバイト数ではなくWebGLバッファの【本数】で決まっていた(1本あたり約64KBの
   // 最小確保単位が効く)ため、本数を減らすことが唯一効く対策になる。詳細はpart2.js
   // sharedFacadeBoxGeo のコメント参照。
-  const tw = kind === 'ind' ? 8 : 3.6; // 窓タイル1枚の実幅
+  const tw = kind === 'ind' ? 8 : (kind === 'house' || kind === 'shop') ? 4.5 : 3.6; // 窓タイル1枚の実幅
+  const _oneTile = kind === 'house' && MODE !== 'real'; // 現実モード以外の住宅は1面に絵1枚(江戸の町家など)
   const geo = isMushroom
     ? new THREE.CylinderGeometry(minWD * 0.42, minWD * 0.5, h, 10)
     : isStadiumBody ? UNIT_CYL_SMOOTH
     : kind ? sharedFacadeBoxGeo( // 側面に窓タイルを並べ、天面/底面は無地領域へ
-        kind === 'house' ? 1 : Math.max(1, Math.round(w / tw)),
-        kind === 'house' ? 1 : Math.max(1, Math.round(d / tw)),
-        kind === 'house' ? 1 : floors)
+        _oneTile ? 1 : Math.max(1, Math.round(w / tw)),
+        _oneTile ? 1 : Math.max(1, Math.round(d / tw)),
+        _oneTile ? 1 : floors)
     : UNIT_BOX;
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(x, gy + h/2, z);
@@ -643,13 +676,13 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
                                       : _roofRise(minWD, cprof, rnd), 1.0, rM);
       // 玄関庇(住宅のみ)
       if (type === 'house' && detailOK() && rnd() < 0.5)
-        dm(UNIT_BOX, roofSurfMat(roofC, null), x + w * 0.22, gy + 2.35, z + d / 2 + 0.5, 2.2, 0.16, 1.1);
+        dm(UNIT_BOX, roofSurfMat(roofC, null), MODE === 'real' ? x + _doorLocalX(w, tw) : x + w * 0.22, gy + 2.35, z + d / 2 + 0.5, 2.2, 0.16, 1.1);
     }
   }
   } // end of else(type !== 'landmark') 【2026-07-18】
 
   // エントランス(中高層ビルの1階の玄関ガラス)
-  if ((kind === 'office' || kind === 'apt') && h >= 9 && MODE !== 'edo' && !IS_MEIJI &&
+  if ((kind === 'office' || kind === 'apt') && h >= 9 && MODE !== 'edo' && MODE !== 'real' && !IS_MEIJI &&
       detailOK() && rnd() < 0.5) {
     dm(UNIT_PLANE, ENTRANCE_MAT, x, gy + 1.4, z + d / 2 + 0.06, 3.0, 2.8, 1);
   }
@@ -663,7 +696,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
       poolAdd(lampP, x + Math.min(w, 8) * 0.35, gy + 2.2, z + d / 2 + 0.4, 0, 0.9, 1.2, 0.9, 0xff8830);
     } else {
       const bandMats = MODE === 'space' ? NEON_MATS : MODE === 'marchen' ? CANDY_BAND_MATS : SIGN_BAND_MATS;
-      dm(UNIT_PLANE, STOREFRONT_MAT, x, gy + 1.1, z + d / 2 + 0.06, Math.min(w * 0.85, 10), 1.6, 1);
+      if (MODE !== 'real') dm(UNIT_PLANE, STOREFRONT_MAT, x, gy + 1.1, z + d / 2 + 0.06, Math.min(w * 0.85, 10), 1.6, 1); // 現実モードは外壁の店構えタイルで描く
       dm(UNIT_BOX, bandMats[(rnd() * bandMats.length) | 0],
                  x, gy + 2.4, z + d / 2 + 0.2, Math.min(w, 12) * 0.95, 0.7, 0.25);
     }
