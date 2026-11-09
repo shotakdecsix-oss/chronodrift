@@ -13,11 +13,11 @@
 function _fhash(a, b) { let h = (a * 374761393 + b * 668265263) | 0; h = (h ^ (h >> 13)) * 1274126177 | 0; return ((h ^ (h >> 16)) >>> 0) / 4294967296; }
 
 // weights({key: 重み, ...})から1つキーを重み付き抽選する。タグ欠損時のフォールバック等に使用。
-function pickWeighted(weights) {
+function pickWeighted(weights, rng) {
   const keys = Object.keys(weights);
   const total = keys.reduce((s, k) => s + (weights[k] || 0), 0);
   if (total <= 0) return null;
-  let r = Math.random() * total;
+  let r = (rng || Math.random)() * total;
   for (const k of keys) {
     r -= weights[k] || 0;
     if (r <= 0) return k;

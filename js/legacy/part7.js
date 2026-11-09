@@ -93,7 +93,8 @@ function nearestNamedPlaceWithin(x, z, r) {
   return best ? { name: best.name, dist: Math.sqrt(bestD2) } : null;
 }
 function checkNearbyPlace(force) {
-  if (!nearbyPlaceEl || !initialWorldLoaded) return;
+  // initialWorldLoadedはpart8.jsで宣言される。起動時(part7末尾のapplyI18n)はまだ存在しないのでtypeofで見る
+  if (!nearbyPlaceEl || typeof initialWorldLoaded === 'undefined' || !initialWorldLoaded) return;
   _nearbyPlaceFrame++;
   if (!force && _nearbyPlaceFrame % 30 !== 0) return; // ~0.5秒ごと(通信を伴わないローカル判定のみ)
   const px = player.position.x, pz = player.position.z;
@@ -252,10 +253,34 @@ function renderJumpHistory() {
   });
 }
 
+// Leafletは地図パネルを初めて開いた時に読み込む(以前は起動時に同期読み込みしていた)
+let _leafletLoading = null;
+function _ensureLeaflet() {
+  if (typeof L !== 'undefined') return Promise.resolve();
+  if (!_leafletLoading) {
+    _leafletLoading = new Promise((resolve, reject) => {
+      const sc = document.createElement('script');
+      sc.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      sc.onload = () => resolve();
+      sc.onerror = () => { _leafletLoading = null; reject(new Error('leaflet load failed')); };
+      document.head.appendChild(sc);
+    });
+  }
+  return _leafletLoading;
+}
 function openMapJump() {
   mapOverlay.classList.add('active');
   mapHintEl.textContent = t('mapHintDefault');
   renderJumpHistory(); // 開くたびに最新の履歴を反映(他タブでの追加等にも追従)
+  if (typeof L === 'undefined') {
+    _ensureLeaflet()
+      .then(() => { if (mapOverlay.classList.contains('active')) _showLeafletMap(); })
+      .catch(() => { mapHintEl.textContent = t('mapLoadFailed'); });
+    return;
+  }
+  _showLeafletMap();
+}
+function _showLeafletMap() {
   const { lat, lon } = xzToLatLon(player.position.x, player.position.z);
 
   if (!leafletMap) {

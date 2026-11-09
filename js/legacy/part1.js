@@ -50,6 +50,8 @@ const I18N = {
     // 【2026-08-21・IMPL_PROMPT_20260819_04_SETTINGS_WORDING.md Phase2】🩺タイル状況は
     // 「デバッグ」見出しの下(パネル最後尾)へ隔離。ラベル文言自体は変更しない。
     debugTileBtn: '🩺 タイル状況',
+    perfHudBtn: '⏱ 性能表示',
+    mapLoadFailed: '地図を読み込めませんでした。通信状況を確認して、もう一度開いてください',
     debugTileDesc: 'デバッグ用: 周囲のOSMタイルごとの取得・生成状況を色分け表示します(灰=未取得 赤=取得中 青=地形待ち 橙=生成中 緑=完了)',
     debugSectionTitle: '🩺 デバッグ',
     hardResetBtn: '🔄 データを全消去して再読込',
@@ -175,6 +177,8 @@ const I18N = {
     cleanupNowBtn: '🧹 Clean up now',
     cleanupDesc: 'Frees up GPU meshes for roads/buildings/parks/water away from your current location (records are kept, so revisiting restores them. Press this if things get heavy after a long play session)',
     debugTileBtn: '🩺 Tile status',
+    perfHudBtn: '⏱ Performance',
+    mapLoadFailed: 'Could not load the map. Check your connection and open it again.',
     debugTileDesc: 'Debug: color-codes the fetch/generation status of nearby OSM tiles (gray=not fetched, red=fetching, blue=waiting for terrain, orange=generating, green=done)',
     debugSectionTitle: '🩺 Debug',
     hardResetBtn: '🔄 Clear all data & reload',
@@ -570,12 +574,28 @@ let starMesh = null;
 })();
 
 // ======= LIGHTS =======
-const ambientLight = new THREE.AmbientLight(MODE_CONF.ambient, MODE_CONF.ambInt);
+// 環境光は半球光。上向きの面(屋根・地面)は空の色、下向きの面は地面の照り返し色で照らし、
+// 壁はその中間になる。影の無い本作では、これで面の向きによる明暗差がつく。
+// 変数名ambientLightは互換のため据え置き(色と強さは_setHemiで地面側と連動して設定する)。
+const HEMI_SKY_K = 1.12, HEMI_GROUND_K = 0.68;
+const _HEMI_GROUND_TINT = new THREE.Color(0x8a7a62); // 地面の照り返しを少し土色に寄せる
+const ambientLight = new THREE.HemisphereLight(MODE_CONF.ambient, MODE_CONF.ambient, MODE_CONF.ambInt);
+function _setHemi(hex, intensity) {
+  ambientLight.color.setHex(hex).multiplyScalar(HEMI_SKY_K);
+  ambientLight.groundColor.setHex(hex).lerp(_HEMI_GROUND_TINT, 0.35).multiplyScalar(HEMI_GROUND_K);
+  ambientLight.intensity = intensity;
+}
+_setHemi(MODE_CONF.ambient, MODE_CONF.ambInt);
 scene.add(ambientLight);
 const moonLight = new THREE.DirectionalLight(MODE_CONF.moon, 1.8);
 moonLight.position.set(-500, 1000, -300);
 moonLight.castShadow = false; // 影は全体でrenderer.shadowMap.enabled=false(上記)なのでshadow.*設定は無意味 — CODE_REVIEW_20260717 P2で削除
 scene.add(moonLight);
+// 月明かり。moonLightは昼の太陽を受け持ち、夜は地平線の下で消える(applyTimeOfDay)。
+// 以前は同じ光源を夜に地面の下へ回していたため、光が下から当たって屋根や地面に届いていなかった。
+const nightMoonLight = new THREE.DirectionalLight(0xb9c4ff, 0);
+nightMoonLight.position.set(300, 900, -400);
+scene.add(nightMoonLight);
 
 // Warm torch point lights — 地形読み込み後に地表高さへ再配置する(part6.js establishRegionBase 参照)
 const torchColors = [0xff6a00, 0xff8c40, 0xffaa60];
@@ -619,6 +639,7 @@ try {
   const savedT = localStorage.getItem('iseharaTimeOverride');
   if (savedT && TIME_OVERRIDE_H[savedT] != null) _timeOverrideH = TIME_OVERRIDE_H[savedT];
 } catch (e) {}
+function _smooth01(x) { x = x < 0 ? 0 : x > 1 ? 1 : x; return x * x * (3 - 2 * x); }
 function setTimeOverride(h) { _timeOverrideH = h; applyTimeOfDay(); }
 function applyTimeOfDay() {
   if (MODE === 'space') return; // 宇宙は常に宇宙
@@ -648,13 +669,17 @@ function applyTimeOfDay() {
     skyTex.needsUpdate = true;
   }
   WORLD_FOG.color.setHex(_lerpHex(a.fog, b.fog, t));
-  ambientLight.color.setHex(_lerpHex(a.amb, b.amb, t));
-  ambientLight.intensity = a.ambInt + (b.ambInt - a.ambInt) * t;
-  moonLight.color.setHex(_lerpHex(a.sun, b.sun, t));
-  moonLight.intensity = a.sunInt + (b.sunInt - a.sunInt) * t;
-  // 太陽/月の位置(6時=東の地平, 12時=天頂, 18時=西の地平, 夜=地平下)
+  _setHemi(_lerpHex(a.amb, b.amb, t), a.ambInt + (b.ambInt - a.ambInt) * t);
+  // 太陽の位置(6時=東の地平, 12時=天頂, 18時=西の地平)。地平線の下では低い角度のまま
+  // 光量だけを落とし、入れ替わりに月を空の高い位置から当てる(光が下から差さないように)。
   const ang = (h - 6) / 12 * Math.PI, sy = Math.sin(ang);
-  moonLight.position.set(Math.cos(ang) * 900, sy * 1000 + (sy < 0 ? -150 : 200), 300);
+  const sunVis = _smooth01((sy + 0.2) / 0.2);     // 地平線(sy=0)で1、sy=-0.2(約5:15/18:45)で0
+  const moonVis = _smooth01((-sy - 0.05) / 0.25);
+  moonLight.color.setHex(_lerpHex(a.sun, b.sun, t));
+  moonLight.intensity = (a.sunInt + (b.sunInt - a.sunInt) * t) * sunVis;
+  moonLight.position.set(Math.cos(ang) * 900, Math.max(sy * 1000 + 200, 150), 300);
+  nightMoonLight.intensity = 0.55 * moonVis;
+  nightMoonLight.position.set(-Math.cos(ang) * 600, 900, -400);
   const night = a.star + (b.star - a.star) * t; // 1=夜, 0=昼(星の見え方用)
   if (starMesh) starMesh.material.opacity = night;
   // 松明は夜だけ灯す(昼間に暖色の点光源が浮くのを防ぐ)
@@ -677,7 +702,7 @@ function applyTimeOfDay() {
     // 電灯のように窓が煌々と光ることはなかった(ユーザーへの回答参照)。倍率自体も
     // 現実モードの3.0より大きく下げ、色味(windowC)・base強度(part2.js facadeMat)と
     // 合わせてろうそく風の弱い暖色の点灯にする。
-    const winGlow = winLit * (USES_MEIJI_LANDUSE ? 1.1 : 3.0);
+    const winGlow = winLit * (USES_MEIJI_LANDUSE ? 1.1 : 2.2); // 3.0では窓が白飛びしていた
     facadeCache.forEach((mat) => {
       const base = mat.userData && mat.userData.baseEmi != null ? mat.userData.baseEmi : 0.85;
       mat.emissiveIntensity = base * winGlow;

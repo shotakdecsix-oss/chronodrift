@@ -111,8 +111,8 @@ const WALL_TINTS = [
   [1.08, 1.04, 0.98], // 明るめ・暖色(テラコッタ寄り)
   [0.90, 0.96, 1.12], // 青みがかったガラス風(寒色でコントラスト)
 ];
-function tintWall(c) {
-  const t = WALL_TINTS[(Math.random() * WALL_TINTS.length) | 0];
+function tintWall(c, rng) {
+  const t = WALL_TINTS[((rng || Math.random)() * WALL_TINTS.length) | 0];
   const r = Math.min(255, Math.round(((c >> 16) & 255) * t[0]));
   const g = Math.min(255, Math.round(((c >> 8) & 255) * t[1]));
   const b = Math.min(255, Math.round((c & 255) * t[2]));
@@ -269,8 +269,27 @@ const _YARD_FLATTEN_Q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector
 // 任意引数。実OSM建物のtags.name(part8.js)を持つ場合だけ渡され、下部でnamedPlacePoints
 // (part1.js)へ軽量レコードとして登録する。手続き生成の建物は呼ばず(undefinedのまま)、
 // 従来通り登録されない。
+// 建物の見た目(壁色・屋根・付属物)を位置から決定的に決める乱数(mulberry32)。
+// Math.randomだと、同じ場所に戻るたびに色や屋根の形が変わっていた。
+function _bldRng(x, z) {
+  let s = (Math.imul(Math.round(x * 10) | 0, 73856093) ^ Math.imul(Math.round(z * 10) | 0, 19349663)) >>> 0;
+  return function () {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+// 勾配屋根の高さ。勾配(高さ÷半スパン)は国別プロファイルのroofPitchRange、無ければ従来相当の範囲
+function _roofRise(minWD, cprof, rnd) {
+  const pr = (cprof && cprof.roofPitchRange) || [0.6, 0.85];
+  const ratio = pr[0] + (pr[1] - pr[0]) * rnd();
+  return Math.min(4.2, Math.max(1.0, minWD * 0.5 * ratio));
+}
 function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
   const _origH = h; // 遠方アンロード時、再生成できるよう元のhを覚えておく(下でhを斜面ぶん延長するため)
+  const rnd = _bldRng(x, z); // この建物の見た目用の決定的乱数
   // 4隅+中心の地形高さを見て、最低点を基礎にし最高点まで胴体を延長。
   // (中心1点だけだと斜面で山側が埋まり、谷側が浮いていた)
   const hs = [
@@ -314,19 +333,19 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
   let isMushroom = false;
   let wallC;
   if (MODE === 'edo' && type !== 'shrine' && type !== 'temple') {
-    wallC = EDO_WALLS[(Math.random() * EDO_WALLS.length) | 0]; // 木造・土壁
+    wallC = EDO_WALLS[(rnd() * EDO_WALLS.length) | 0]; // 木造・土壁
   } else if (MODE === 'marchen') {
-    isMushroom = maxWD < 11 && Math.random() < 0.3; // 小さい家はたまにキノコ
-    wallC = isMushroom ? 0xf0e8d8 : PASTEL_WALLS[(Math.random() * PASTEL_WALLS.length) | 0];
+    isMushroom = maxWD < 11 && rnd() < 0.3; // 小さい家はたまにキノコ
+    wallC = isMushroom ? 0xf0e8d8 : PASTEL_WALLS[(rnd() * PASTEL_WALLS.length) | 0];
   } else if (MODE === 'space') {
-    wallC = SPACE_WALLS[(Math.random() * SPACE_WALLS.length) | 0]; // 金属
+    wallC = SPACE_WALLS[(rnd() * SPACE_WALLS.length) | 0]; // 金属
   } else if (style && style.wallPalette) {
     // 【2026-07-20】office/apartment/industrial等は種別ごとに小さな壁色パレットを持つ
     // (part2.js OFFICE_WALL_PALETTE等)。単一のstyle.colorだけを使うと、同種別の建物が
     // 街中どこでも全く同じ色になり(NY等の都心で「灰色で画一的」の主因)、tintWallの
     // 明暗差だけでは色調自体は変わらなかった。棟ごとに抽選してから明暗をばらつかせる。
     const wp = style.wallPalette;
-    wallC = wp[(Math.random() * wp.length) | 0];
+    wallC = wp[(rnd() * wp.length) | 0];
   } else if (style && style.color != null) {
     wallC = style.color;
   } else if (MODE === 'real') {
@@ -338,14 +357,14 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
     // だったが、壁色は未対応だった)。背の高い建物は国を問わず既定の広めパレットへ逃がす。
     const useCprofPalette = cprof && cprof.wallPalette && h < LOT_PADDING_MAX_H;
     const wp = useCprofPalette ? cprof.wallPalette : DEFAULT_WALLS_REAL;
-    wallC = wp[(Math.random() * wp.length) | 0];
+    wallC = wp[(rnd() * wp.length) | 0];
   } else {
-    wallC = DEFAULT_WALLS[(Math.random() * DEFAULT_WALLS.length) | 0];
+    wallC = DEFAULT_WALLS[(rnd() * DEFAULT_WALLS.length) | 0];
   }
   // 現実モード: 神社仏閣・教会以外は建物ごとに色味をばらす(style.color固定のオフィス街が
   // 全部同じ色になる違和感への対策。tintWall参照)
   if (MODE === 'real' && type !== 'shrine' && type !== 'temple' && type !== 'church') {
-    wallC = tintWall(wallC);
+    wallC = tintWall(wallC, rnd);
   }
 
   // ---- ファサード種別(手続きテクスチャ。神社仏閣・教会・キノコは従来の無地) ----
@@ -357,7 +376,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
     (type === 'house' || type === 'apartment') ? 'apt' : 'office';
   // バリアントは2種(4種に増やしたらテクスチャメモリ超過で東京駅クラッシュ→縮小。part2.js参照)
   const mat = kind
-    ? facadeMat(kind, wallC, (Math.random() * 2) | 0)
+    ? facadeMat(kind, wallC, (rnd() * 2) | 0)
     : lambertMat(wallC, (style && style.emissive) || (MODE === 'space' ? 0x0a1420 : 0));
 
   // 【2026-07-20】スタジアム・競技場・野球場・ドームは本体がただの四角い箱のままだと
@@ -398,7 +417,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
   // (LOT_PADDING_MAX_Hは関数冒頭・壁色パレットのガードと共通化済み)
   if (isReal && cprof && cprof.lotPaddingRange && h < LOT_PADDING_MAX_H && lotPaddingBudget > 0 && detailOK()) {
     const [padMin, padMax] = cprof.lotPaddingRange;
-    const pad = padMin + Math.random() * (padMax - padMin);
+    const pad = padMin + rnd() * (padMax - padMin);
     if (pad > 0.05) {
       const hw = w / 2 + pad, hd = d / 2 + pad;
       const padPts = [
@@ -420,14 +439,14 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
   // 出す)」という既存挙動を尊重して変えず、defaultは元が単色紫一色だった分の劣化がない
   // よう常にランダム化する。
   let roofC = MODE === 'edo' ? 0x3a4450 /* 瓦 */ : (style && style.roofColor) ? style.roofColor : 0x5030a0;
-  if (MODE === 'real' && type === 'house' && Math.random() < 0.6) {
+  if (MODE === 'real' && type === 'house' && rnd() < 0.6) {
     const rp = (cprof && cprof.roofPalette) || ROOF_COLS;
-    roofC = rp[(Math.random() * rp.length) | 0]; // 住宅は屋根色もばらす
+    roofC = rp[(rnd() * rp.length) | 0]; // 住宅は屋根色もばらす
   } else if (MODE === 'real' && type === 'default' && !(style && style.roofColor)) {
     // roof:colourタグが実測値として付いている場合はそちらを尊重し(上のroofC初期値のまま)、
     // タグが無く紫固定にフォールバックするケースだけをランダム化する
     const rp = (cprof && cprof.roofPalette) || ROOF_COLS;
-    roofC = rp[(Math.random() * rp.length) | 0]; // 種別不明の建物も紫固定色ではなく国別パレットからばらす
+    roofC = rp[(rnd() * rp.length) | 0]; // 種別不明の建物も紫固定色ではなく国別パレットからばらす
   }
   const rm = roofSurfMat(roofC, null);
   // 屋根材(茅葺き/瓦葺き)は本来「時代」ではなく「農家の集落か、町場の町家か」で決まる
@@ -460,16 +479,16 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
     pitched(HIP_GEO, Math.max(2.6, h * 0.85), minWD * 0.55, roofSurfMat(0x8a7050, 'thatch'));
   } else if (rtype === '_edo') {
     // 瓦: 切妻と寄棟を混在(瓦テクスチャ+深い軒)
-    pitched(Math.random() < 0.5 ? GABLE_GEO : HIP_GEO,
+    pitched(rnd() < 0.5 ? GABLE_GEO : HIP_GEO,
             Math.min(3.2, Math.max(1.4, minWD * 0.42)), 1.8, roofSurfMat(0x3a4450, 'tile'));
   } else if (rtype === '_marchen') {
     if (isMushroom) { // キノコの傘
       dm(UNIT_SPH, lambertMat(0xff5060), x, gy + h + minWD * 0.12, z,
                  minWD * 1.6, minWD * 0.88, minWD * 1.6);
     } else { // しま模様のとんがり屋根+たまに煙突
-      dm(UNIT_CONE8, roofSurfMat(PASTEL_ROOFS[(Math.random() * PASTEL_ROOFS.length) | 0], 'stripe'),
+      dm(UNIT_CONE8, roofSurfMat(PASTEL_ROOFS[(rnd() * PASTEL_ROOFS.length) | 0], 'stripe'),
                  x, gy + h + h * 0.42, z, maxWD * 1.36, h * 0.85, maxWD * 1.36);
-      if (detailOK() && Math.random() < 0.3)
+      if (detailOK() && rnd() < 0.3)
         dm(UNIT_BOX, lambertMat(0xb06050), x + w * 0.22, gy + h + 0.9, z, 0.8, 1.8, 0.8);
     }
   } else if (rtype === '_space') {
@@ -480,9 +499,9 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
     const domeBaseY = gy + h * 0.55; // ドームの根元を建物高さの半分あたりに沈め、ドームが主役に見えるようにする
     const dome = dm(UNIT_DOME, SPACE_GLASS, x, domeBaseY, z, domeR, domeR, domeR);
     dome.renderOrder = 3;
-    dm(UNIT_BOX, NEON_MATS[(Math.random() * NEON_MATS.length) | 0],
+    dm(UNIT_BOX, NEON_MATS[(rnd() * NEON_MATS.length) | 0],
                x, domeBaseY + 0.05, z, domeR * 1.85, 0.22, domeR * 1.85);
-    if (detailOK() && Math.random() < 0.3)
+    if (detailOK() && rnd() < 0.3)
       dm(UNIT_CYL, lambertMat(0x223344, 0x2266ff), x, domeBaseY + domeR * 0.85, z, 0.12, 3.2, 0.12);
   } else if (rtype === 'shrine') {
     // Pagoda-style double roof
@@ -541,7 +560,10 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
     // 重み付き抽選し、無ければ従来通り高さ・種別からの推定/ランダムのまま(挙動・負荷とも変化なし)。
     const roofShape = style && style.roofShape;
     const shapeFlat = roofShape === 'flat';
-    const countryPick = (!roofShape && cprof && cprof.roofShapeWeights) ? pickWeighted(cprof.roofShapeWeights) : null;
+    // roofPickMaxH: 中高層・集合住宅・オフィス・工場は国別の抽選を使わず、下の高さと種別からの推定に任せる
+    const _pickOK = !(cprof && cprof.roofPickMaxH != null &&
+      (_origH >= cprof.roofPickMaxH || type === 'apartment' || type === 'office' || type === 'industrial'));
+    const countryPick = (!roofShape && cprof && cprof.roofShapeWeights && _pickOK) ? pickWeighted(cprof.roofShapeWeights, rnd) : null;
     const flatThreshold = (cprof && cprof.flatRoofHeightThreshold != null) ? cprof.flatRoofHeightThreshold : 10;
     const isFlat = shapeFlat || (countryPick ? countryPick === 'flat' :
       (!roofShape && (h >= flatThreshold || (type === 'apartment' && h >= 7) || (type === 'industrial' && h >= 8))));
@@ -549,18 +571,26 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
       // 陸屋根+パラペット+屋上設備(貯水槽・室外機・アンテナ)
       dm(PARAPET_GEO, lambertMat(shadeHex(wallC, 0.8)), x, gy + h, z, w + 0.3, 0.9, d + 0.3);
       if (detailOK()) {
-        if (Math.random() < 0.6)
-          dm(UNIT_CYL, TANK_MAT, x + w * 0.22, gy + h + 1.2, z + d * 0.18, 2.2, 2.4, 2.2);
-        if (Math.random() < 0.7)
-          dm(UNIT_BOX, AC_MAT, x - w * 0.2, gy + h + 0.5, z - d * 0.15, 1.8, 1.0, 1.2, Math.random() * 3);
-        if (Math.random() < 0.35)
-          dm(UNIT_CYL, lambertMat(0x888888), x - w * 0.05, gy + h + 2, z + d * 0.2, 0.1, 4, 0.1);
+        // 屋上設備の位置は建物ごとに変える(以前はどの屋上も同じ相対位置だった)。端からmだけ内側に収める
+        const rx = (m) => x + (rnd() - 0.5) * Math.max(0, w - 2 * m);
+        const rz = (m) => z + (rnd() - 0.5) * Math.max(0, d - 2 * m);
+        if ((kind === 'apt' || kind === 'office') && _origH >= 12 && w >= 9 && d >= 9 && rnd() < 0.6) {
+          // 塔屋(階段室・機械室)。日本の中高層ビルの屋上で一番目立つ要素
+          const pw = Math.min(5, w * 0.3), pd = Math.min(4, d * 0.3);
+          dm(UNIT_BOX, lambertMat(shadeHex(wallC, 0.92)), rx(pw / 2 + 1), gy + h + 1.5, rz(pd / 2 + 1), pw, 3.0, pd);
+        }
+        if (rnd() < 0.6)
+          dm(UNIT_CYL, TANK_MAT, rx(2.2), gy + h + 1.2, rz(2.2), 2.2, 2.4, 2.2);
+        if (rnd() < 0.7)
+          dm(UNIT_BOX, AC_MAT, rx(1.6), gy + h + 0.5, rz(1.6), 1.8, 1.0, 1.2, rnd() * 3);
+        if (rnd() < 0.35)
+          dm(UNIT_CYL, lambertMat(0x888888), rx(1), gy + h + 2, rz(1), 0.1, 4, 0.1);
       }
       // 【2026-07-16】工業系のレパートリー拡充(従来は全棟「煙突付き工場」で単調だった)。
       // 4種を抽選: 煙突工場35% / 倉庫・物流センター30% / タンク併設プラント20% / のこぎり屋根工場15%。
       // どのパーツもparts経由なので回転建物にも正しく追従する(座標は回転前の軸平行系で指定)。
       if (type === 'industrial') {
-        const iv = Math.random();
+        const iv = rnd();
         if (iv < 0.35) {
           // 煙突工場(従来): 白/赤の縞、屋根より確実に高い
           const chH = h * 0.9 + 4;
@@ -573,7 +603,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
           dm(UNIT_CYL, lambertMat(0xb8bcc0), x + w * 0.05, gy + h + 1.1, z + d * 0.02, 1.0, 2.2, 1.0);
         } else if (iv < 0.85) {
           // プラント: 銀色の縦型タンク(サイロ)を敷地側縁に2〜3基
-          const nSilo = 2 + (Math.random() * 2 | 0);
+          const nSilo = 2 + (rnd() * 2 | 0);
           const sh = h * 0.8 + 3;
           for (let si = 0; si < nSilo; si++) {
             const sx = x + w * 0.38, sz = z - d * 0.35 + si * Math.min(6, d * 0.35);
@@ -595,13 +625,14 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
       // roof:materialが瓦系ならテクスチャも瓦にする。プロファイルが無ければ住宅は既定で瓦。
       let geoR;
       if (roofShape === 'gabled' || roofShape === 'gable') geoR = GABLE_GEO;
-      else if (roofShape === 'hipped' || roofShape === 'hip' || roofShape === 'pyramidal') geoR = HIP_GEO;
+      else if (roofShape === 'pyramidal') geoR = PYRAMID_GEO;
+      else if (roofShape === 'hipped' || roofShape === 'hip') geoR = HIP_GEO;
       else if (roofShape === 'skillion' || roofShape === 'lean_to' || roofShape === 'pitched') geoR = SHED_GEO;
       else if (countryPick === 'gable') geoR = GABLE_GEO;
-      else if (countryPick === 'hip') geoR = HIP_GEO;
+      else if (countryPick === 'hip') geoR = (maxWD < minWD * 1.3 && rnd() < 0.5) ? PYRAMID_GEO : HIP_GEO;
       else if (countryPick === 'shed') geoR = SHED_GEO;
       else {
-        const r = Math.random();
+        const r = rnd();
         geoR = type === 'industrial' ? SHED_GEO : r < 0.5 ? GABLE_GEO : r < 0.85 ? HIP_GEO : SHED_GEO;
       }
       const roofMat = style && style.roofMaterial;
@@ -609,9 +640,9 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
       const defaultTileBias = cprof ? (cprof.roofMaterialBias === 'tile') : (MODE === 'real' && type === 'house');
       const rM = roofSurfMat(roofC, (isTileMat || defaultTileBias) ? 'tile' : null);
       pitched(geoR, geoR === SHED_GEO ? Math.max(0.8, minWD * 0.18)
-                                      : Math.min(4.2, Math.max(1.5, minWD * 0.38)), 1.0, rM);
+                                      : _roofRise(minWD, cprof, rnd), 1.0, rM);
       // 玄関庇(住宅のみ)
-      if (type === 'house' && detailOK() && Math.random() < 0.5)
+      if (type === 'house' && detailOK() && rnd() < 0.5)
         dm(UNIT_BOX, roofSurfMat(roofC, null), x + w * 0.22, gy + 2.35, z + d / 2 + 0.5, 2.2, 0.16, 1.1);
     }
   }
@@ -619,7 +650,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
 
   // エントランス(中高層ビルの1階の玄関ガラス)
   if ((kind === 'office' || kind === 'apt') && h >= 9 && MODE !== 'edo' && !IS_MEIJI &&
-      detailOK() && Math.random() < 0.5) {
+      detailOK() && rnd() < 0.5) {
     dm(UNIT_PLANE, ENTRANCE_MAT, x, gy + 1.4, z + d / 2 + 0.06, 3.0, 2.8, 1);
   }
 
@@ -633,7 +664,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
     } else {
       const bandMats = MODE === 'space' ? NEON_MATS : MODE === 'marchen' ? CANDY_BAND_MATS : SIGN_BAND_MATS;
       dm(UNIT_PLANE, STOREFRONT_MAT, x, gy + 1.1, z + d / 2 + 0.06, Math.min(w * 0.85, 10), 1.6, 1);
-      dm(UNIT_BOX, bandMats[(Math.random() * bandMats.length) | 0],
+      dm(UNIT_BOX, bandMats[(rnd() * bandMats.length) | 0],
                  x, gy + 2.4, z + d / 2 + 0.2, Math.min(w, 12) * 0.95, 0.7, 0.25);
     }
   } else if (type === 'school') {
@@ -649,7 +680,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
     parts.push(addDecorLight(0xff4400, 1.5, 30, x, gy+h*0.8, z));
   } else if (type === 'temple') {
     parts.push(addDecorLight(0xffaa00, 1.2, 25, x, gy+h*0.8, z));
-  } else if (MODE !== 'real' && Math.random() < 0.06) {
+  } else if (MODE !== 'real' && rnd() < 0.06) {
     // 「魔法のオーラ」演出(半透明の紫球体+紫ライト)。ファンタジー系モード専用。
     // 【2026-07-16】現実モードでは「建物を包む謎の紫球体」として違和感が強いため無効化。
     dm(UNIT_SPH, glowMat, x, gy + h * 0.6, z, maxWD * 1.6, maxWD * 1.6, maxWD * 1.6);

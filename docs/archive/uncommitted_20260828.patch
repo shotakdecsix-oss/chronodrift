@@ -1,0 +1,578 @@
+diff --git a/js/legacy/part1.js b/js/legacy/part1.js
+index 06b9ab1..fc1e65c 100644
+--- a/js/legacy/part1.js
++++ b/js/legacy/part1.js
+@@ -477,6 +477,12 @@ renderer.setSize(window.innerWidth, window.innerHeight);
+ renderer.shadowMap.enabled = false;
+ renderer.toneMapping = THREE.ACESFilmicToneMapping;
+ renderer.toneMappingExposure = 0.9;
++// 【2026-08-28・V-3(IMPROVEMENT_BACKLOG.md)】異方性フィルタリングの最大値。路面テクスチャ
++// (realRoadTex: 歩道・縁石・路側線・中央線・バラスト・枕木)は歩行中ほぼ常に浅い視線角で
++// 見るため、これが無いと数メートル先からミップマップで灰色に潰れ、描き込みが視界の大半で
++// 見えていなかった。GPU的にはサンプリングコストのみでメモリ増加は無い。
++// getMaxAnisotropyは内部でgl.getParameterを引くので、起動時に1回だけ問い合わせて共有する。
++const MAX_ANISO = (() => { try { return renderer.capabilities.getMaxAnisotropy(); } catch (e) { return 1; } })();
+ 
+ const scene = new THREE.Scene();
+ // フォグ: 高密度モード(明治以外)は生成半径を狭めた分だけ濃くして、ポップインを隠す。
+@@ -580,7 +586,12 @@ scene.add(moonLight);
+ // Warm torch point lights — 地形読み込み後に地表高さへ再配置する(part6.js establishRegionBase 参照)
+ const torchColors = [0xff6a00, 0xff8c40, 0xffaa60];
+ const torchLights = [];
+-for (let i = 0; i < 6; i++) {
++// 【2026-08-28・V-4(IMPROVEMENT_BACKLOG.md)】以前はMODEのガードが無く、現実モードでも
++// 原点±1000mにオレンジの点光源が6個生成されていた(夜は intensity 1.2)。現実の街に
++// 光源の無い場所からオレンジの光が6箇所漏れる原因だったので、幻想モード限定にする。
++// ついでにLambertマテリアルのPointLight 6個ぶんのフラグメント負荷も現実モードから消える。
++const TORCH_MODES = (MODE === 'edo' || MODE === 'marchen');
++for (let i = 0; TORCH_MODES && i < 6; i++) {
+   const pt = new THREE.PointLight(torchColors[i%3], 1.2, 300);
+   pt.position.set(Math.random()*2000-1000, 4, Math.random()*2000-1000);
+   scene.add(pt);
+@@ -1013,7 +1024,60 @@ function queryPolyGrid(grid, x0, x1, z0, z1) {
+   }
+   return out;
+ }
+-// 座標(x,z)が属するlanduse区画の種別(residential/commercial/industrial/retail等)を返す
++// ======= 巨大ポリゴン用のzスラブ索引(内外判定・境界距離をまとめて厳密に高速化) =======
++// 【2026-08-28・G-1(総合レビューA-1)】polyGridは「ポリゴンのbboxがセルに掛かるか」で
++// しか絞れない。海面ポリゴン(part4.js _commitWaterPoly)や大河川はbboxが数km四方に
++// なるため、海岸から8km内陸のチャンクでも必ずnearAvoidに残り続ける。その状態で
++// generateChunkのinAvoidが pointInPolygon(O(頂点数)) と境界距離判定(O(頂点数)) を
++// 候補点ごとに最大2周していたので、1チャンク(候補点約250)あたり25万〜100万回の
++// 辺演算になっていた(長時間プレイでの生成遅延の主因の一つ)。
++// 対策は古典的なslab decomposition: 辺をあらかじめz方向の帯(行)に振り分けておくと、
++// ある点の内外判定に効く辺は「その点のz行に属する辺」だけになる。**近似ではなく厳密**で、
++// 結果は従来の pointInPolygon || 境界距離 と完全に一致する(part8.js側で等価性テスト済み)。
++// 30m間引きの8kmポリゴンなら1行あたり平均4辺程度まで落ちる(約100分の1)。
++const AVOID_SLAB_H = 64;          // スラブ1行の高さ(m)
++const AVOID_SLAB_MAX_ROWS = 4096; // 異常に長いポリゴンでも行配列が暴れないようにする上限
++function buildPolySlab(p) {
++  const pts = p.pts, span = p.maxZ - p.minZ;
++  const n = Math.max(1, Math.min(AVOID_SLAB_MAX_ROWS, Math.ceil(span / AVOID_SLAB_H)));
++  const h = span > 0 ? span / n : 1;
++  const rows = new Array(n).fill(null);
++  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
++    const za = pts[j].z, zb = pts[i].z;
++    let k0 = Math.floor(((za < zb ? za : zb) - p.minZ) / h);
++    let k1 = Math.floor(((za > zb ? za : zb) - p.minZ) / h);
++    if (k1 < 0 || k0 >= n) continue;
++    if (k0 < 0) k0 = 0;
++    if (k1 >= n) k1 = n - 1;
++    for (let k = k0; k <= k1; k++) (rows[k] || (rows[k] = [])).push(i);
++  }
++  return { h, n, rows, pts };
++}
++// 点(x,z)がポリゴンpの内部にあるか、または境界からmargin以内にあるか。
++// 索引はp._slabに遅延生成してキャッシュする(p.ptsが差し替わったら作り直す)。
++function pointInOrNearPolygon(x, z, p, margin) {
++  if (!p._slab || p._slab.pts !== p.pts) p._slab = buildPolySlab(p);
++  const s = p._slab, pts = p.pts, h = s.h, n = s.n, m2 = margin * margin;
++  // 内外判定(パリティ)に効くのはこの行の辺だけ。境界距離はmargin分だけ上下の行も見る
++  // (辺の最近接点がmargin以内なら、その辺のz範囲は必ず[z-margin,z+margin]と交わるため厳密)。
++  const kMid = Math.floor((z - p.minZ) / h);
++  let k0 = Math.floor((z - margin - p.minZ) / h), k1 = Math.floor((z + margin - p.minZ) / h);
++  if (k0 < 0) k0 = 0;
++  if (k1 >= n) k1 = n - 1;
++  let inside = false;
++  for (let k = k0; k <= k1; k++) {
++    const arr = s.rows[k];
++    if (!arr) continue;
++    const parityRow = (k === kMid);
++    for (let a = 0; a < arr.length; a++) {
++      const i = arr[a], j = i === 0 ? pts.length - 1 : i - 1;
++      const xi = pts[i].x, zi = pts[i].z, xj = pts[j].x, zj = pts[j].z;
++      if (distSqPointToSeg(x, z, xj, zj, xi, zi) < m2) return true;
++      if (parityRow && ((zi > z) !== (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi) + xi)) inside = !inside;
++    }
++  }
++  return inside;
++}// 座標(x,z)が属するlanduse区画の種別(residential/commercial/industrial/retail等)を返す
+ // (無ければnull)。generateChunk内のluTypeAtと同じ考え方だが、building=yesだけでタグ
+ // (サブタイプ)が無い大きな建物を住宅(マンション)/商業(オフィス)のどちらに寄せるか
+ // (part3.js classifyResidential)でも使う汎用版。
+diff --git a/js/legacy/part2.js b/js/legacy/part2.js
+index 62ade67..eb7f828 100644
+--- a/js/legacy/part2.js
++++ b/js/legacy/part2.js
+@@ -294,8 +294,10 @@ function facadeMat(kind, color, variant) {
+ 
+   const tex = new THREE.CanvasTexture(cv);
+   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
++  tex.anisotropy = MAX_ANISO; // 【2026-08-28・V-3(IMPROVEMENT_BACKLOG.md)】
+   const etex = new THREE.CanvasTexture(ec);
+   etex.wrapS = etex.wrapT = THREE.RepeatWrapping;
++  etex.anisotropy = MAX_ANISO; // 【2026-08-28・V-3】
+   // 【2026-07-25】江戸・明治は行灯・蝋燭程度の弱い明かりが史実に近いため大幅に下げる
+   // (旧: edo 0.9 / meiji 0.55。現実モードの電灯的な明るさと差別化する)。
+   const emi = MODE === 'space' ? 1.2 : MODE === 'edo' ? 0.32 : IS_MEIJI ? 0.28 : 0.85;
+@@ -467,6 +469,7 @@ function roofTex(kindT) {
+   }
+   const t = new THREE.CanvasTexture(c);
+   t.wrapS = t.wrapT = THREE.RepeatWrapping;
++  t.anisotropy = MAX_ANISO; // 【2026-08-28・V-3】瓦の段が近くでぼやけるのを防ぐ
+   ROOF_TEXS[kindT] = t;
+   return t;
+ }
+diff --git a/js/legacy/part3.js b/js/legacy/part3.js
+index dc0eec4..95aeb34 100644
+--- a/js/legacy/part3.js
++++ b/js/legacy/part3.js
+@@ -3,12 +3,23 @@
+  * ファイル(3/9)。part2.js の続き。詳細は part1.js 冒頭のコメント参照。
+  */
+ // ======= 建物の高さ・マンション判定(タグが曖昧でも大きさ・高さで見た目を識別可能にする) =======
+-// building:height(実測m)を最優先、無ければbuilding:levels*3、どちらも無ければ既存通りランダム。
++// height(実測m)を最優先、無ければbuilding:height、無ければbuilding:levels*3、
++// どれも無ければ既存通りランダム。
++// 【2026-08-28・D-1】OSMで建物の実測高さを表す**標準タグは`height`**で、`building:height`は
++// 少数派の別綴り。従来は後者しか見ていなかったため、実測高さが付いている建物の大半で
++// そのデータを捨てて「階数×3+乱数」の推定に落ちていた(=狭小住宅が9〜11mになり
++// マンション扱いに昇格する原因の一つ。V-1参照)。地図データ忠実性の大原則からも、
++// 実測タグがあるならそれを使う。
+ function resolveBuildingHeight(tags) {
+-  const hTag = parseFloat(tags['building:height']);
+-  if (Number.isFinite(hTag) && hTag > 0) return hTag;
++  // "12" / "12.5" / "12 m" のような表記があるためparseFloatで先頭の数値を取る。
++  // 桁間違いのタグ(height=10000等)で天を突く棒が建たないよう上限で弾く。
++  const okH = (v) => Number.isFinite(v) && v > 0 && v < 1000;
++  const hTag = parseFloat(tags.height);
++  if (okH(hTag)) return hTag;
++  const hTag2 = parseFloat(tags['building:height']);
++  if (okH(hTag2)) return hTag2;
+   const levels = parseInt(tags['building:levels']);
+-  if (Number.isFinite(levels) && levels > 0) return Math.max(levels * 3, 3);
++  if (Number.isFinite(levels) && levels > 0 && levels < 200) return Math.max(levels * 3, 3);
+   return null; // タグから決められない → 呼び出し元の既存ランダム式にフォールバック
+ }
+ const APT_HEIGHT_M = 10;      // これ以上の高さは一戸建てタグでもマンション扱いにする
+@@ -87,11 +98,23 @@ const SIZE_FLOOR = {
+   industrial: { w: 20, d: 16, h: 8  },
+   office:     { w: 15, d: 12, h: 12 },
+ };
+-function applySizeFloor(style, w, d, h) {
++// 【2026-08-28・V-1(総合レビューC-1)】opts で「実測値は底上げしない」を指定できるようにした。
++// 従来は実測フットプリント6×5mの狭小住宅がマンション扱いに昇格しただけで15×12mへ強制拡大され、
++// 隣家に食い込み、街全体が同じ寸法の箱の反復に見える主因になっていた。フットプリントは
++// OSMから測れている「わかっているデータ」なので、推定で上書きしてはいけない
++// (地図データ忠実性の大原則)。高さも実測タグ由来なら据え置く。
++// opts省略時は従来と完全に同じ挙動(手続き生成の建物はこちら)。
++function applySizeFloor(style, w, d, h, opts) {
+   if (!style) return { w, d, h };
+   const f = SIZE_FLOOR[style.type];
+   if (!f) return { w, d, h };
+-  return { w: Math.max(w, f.w), d: Math.max(d, f.d), h: Math.max(h, f.h) };
++  const keepFootprint = !!(opts && opts.measuredFootprint);
++  const keepHeight    = !!(opts && opts.measuredHeight);
++  return {
++    w: keepFootprint ? w : Math.max(w, f.w),
++    d: keepFootprint ? d : Math.max(d, f.d),
++    h: keepHeight    ? h : Math.max(h, f.h),
++  };
+ }
+ 
+ // 【2026-07-16】現実モードの壁色バリエーション。同じ国プロファイル・同じstyle.colorでも
+@@ -818,6 +841,7 @@ function realRoadTex(kind) {
+   }
+   const t = new THREE.CanvasTexture(c);
+   t.wrapT = THREE.RepeatWrapping;
++  t.anisotropy = MAX_ANISO; // 【2026-08-28・V-3】浅い視線角で路面の描き込みが潰れるのを防ぐ
+   _roadTexCache[kind] = t;
+   return t;
+ }
+@@ -957,7 +981,9 @@ const motorwaySlopes = [];
+ // 一律にmaxを取る(=このway区間全体を水平に近いまま底上げする。急な折れを作らない)。
+ function _motorwayWaterLift(x1, z1, x2, z2) {
+   if (typeof waterSurfaceYAt !== 'function') return null;
+-  const clearance = BRIDGE_CLEARANCE_ABOVE_WATER_M * ELEV_SCALE;
++  // 【2026-08-28・V-13】ELEV_SCALEは単位の取り違えだったので外す(bridgeSegmentY参照)。
++  // 高速道路の桁は既にMWY_H(=7)上がっているので、この底上げが効く場面自体が稀。
++  const clearance = BRIDGE_CLEARANCE_FALLBACK_M;
+   let need = -Infinity;
+   for (const p of [[x1, z1], [x2, z2]]) {
+     const wy = waterSurfaceYAt(p[0], p[1]);
+@@ -1033,6 +1059,7 @@ function meijiTex(base, stripe, stripeH, repeat) {
+   if (stripe) { g.fillStyle = stripe; g.fillRect(0, 0, 32, stripeH); g.fillRect(0, 16, 32, stripeH); }
+   const tex = new THREE.CanvasTexture(c);
+   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
++  tex.anisotropy = MAX_ANISO; // 【2026-08-28・V-3】
+   tex.repeat.set(1 / repeat, 1 / repeat);
+   return tex;
+ }
+@@ -1090,8 +1117,30 @@ const BRIDGE_MIN_CLEARANCE_M = 1.5; // 実標高0mからの最低クリアラン
+ // 水位クリアランスを満たすよう滑らかに(smoothstepで)立ち上げる。端から
+ // BRIDGE_RAMP_FRAC(15%)の範囲は立ち上がりの助走区間とし、ちょうど端(f=0/1)では
+ // 底上げ量が必ずゼロになる(=地面道路の高さと完全に一致する)ようにする。
+-const BRIDGE_CLEARANCE_ABOVE_WATER_M = 2.0; // 水面から橋桁下端までの最低クリアランス(実m)
+-const BRIDGE_RAMP_FRAC = 0.15; // 橋の両端から何割の区間を立ち上がりの助走に使うか
++// 【2026-08-28・V-13(IMPROVEMENT_BACKLOG.md)】「橋の高さが高すぎる。特に狭い川で不自然」
++// というユーザー報告への修正。原因が3つ重なっていた。
++//  (1) 単位バグ: 桁下クリアランスは「実m」であり、getGroundY/waterSurfaceYAt が返す
++//      ゲーム高さと 1:1 で足し合わせる量。以前は ELEV_SCALE(=2.0、実標高→ゲーム高さの
++//      誇張係数)を掛けていたが、これは単位の取り違えだった。プレイヤーの背丈(1.8)・
++//      建物の高さ・道路幅はすべて1:1なので、掛けると桁が意図の2倍(4.0)になり、水面自体の
++//      浮き(+0.5、part4.js _commitWaterPoly)と合わせて地面から4.5=プレイヤー2.5人分の
++//      高さになっていた。→ 掛けるのをやめた(この関数と下の_motorwayWaterLift/makeRoadGeo)。
++//  (2) 川幅を見ていなかった: 定数だったので幅3mの用水路も相模川も同じ桁高だった。
++//      → 実測の水面幅から段階的に決める(bridgeClearanceFor)。
++//  (3) 立ち上がりがway長の割合(15%)だったので、短い橋ほど急勾配になっていた。
++//      → 絶対距離(BRIDGE_RAMP_M)にして勾配に天井を設ける。
++// なお本作の川・池は地形に直接ドレープする方式(DESIGN_20260804_WATER.md)で河床を掘り
++// 下げていないため、水面は岸とほぼ同じ高さにある。よって現実の橋ほどの桁下は不要。
++const BRIDGE_CLEARANCE_FALLBACK_M = 0.9; // 幅が測れなかった場合の中庸値(実m)
++function bridgeClearanceFor(waterSpanM) {
++  if (!(waterSpanM > 0)) return BRIDGE_CLEARANCE_FALLBACK_M;
++  if (waterSpanM <= 6)  return 0.4;  // 用水路・小川: ほぼ路面と連続
++  if (waterSpanM <= 20) return 0.9;  // 中小河川
++  if (waterSpanM <= 60) return 1.6;
++  return 2.2;                        // 相模川クラスの大河川
++}
++const BRIDGE_RAMP_M = 30;      // 立ち上がりの助走距離(m)。way長の割合ではなく絶対距離
++const BRIDGE_RAMP_FRAC_MAX = 0.35; // ただしway長に対する割合の上限(短い橋で端まで食わない)
+ // 【2026-08-03・診断計器・v2で意味を変更】橋(bridge=yesのway)なのに、20m間隔の密サンプルで
+ // way全体を通じて一度も水面が検出されなかった回数。谷・線路またぎ等の水以外の橋なら
+ // 正常だが、相模川周辺のwayでこれが多発するなら「水面ポリゴンがまだ届いていない
+@@ -1121,14 +1170,25 @@ function bridgeSegmentY(bridgeInfo) {
+   // 実標高0m(海面調整スライダーの影響を受けない固定基準)のゲーム高さ。SEA_Yの式から
+   // seaLevelM部分だけ外し、常に0m基準にしたもの。
+   const trueSeaY = -elevBase * ELEV_SCALE;
+-  const floor = trueSeaY + BRIDGE_MIN_CLEARANCE_M * ELEV_SCALE;
++  // 【2026-08-28・V-13】BRIDGE_MIN_CLEARANCE_Mも「実length, m」= ゲーム高さと1:1なので
++  // ELEV_SCALEは掛けない(trueSeaY側は実標高0mの変換なので掛けるのが正しい)。
++  const floor = trueSeaY + BRIDGE_MIN_CLEARANCE_M;
+   // yA0/yB0は「地面道路と接続する固定端」の基準線(水位由来の底上げは加えない)。
+   const yA0 = Math.max(getGroundY(bridgeInfo.ax, bridgeInfo.az), floor);
+   const yB0 = Math.max(getGroundY(bridgeInfo.bx, bridgeInfo.bz), floor);
+   let Wmax = null, s0 = null, s1 = null;
++  // 【2026-08-28・V-13】(2)幅の実測用。底上げ判定(s0/s1)はWATER_QUERY_MARGIN(=20m)込みの
++  // 既定マージンで行うが(水没を再発させたくないため既存の安全側の挙動を維持)、幅の実測だけは
++  // マージン0で問い合わせる。既定のままだと幅6mの川が両側+20mで46m幅として測れてしまう。
++  let spanS0 = null, spanS1 = null, sampleStep = 20;
++  let rampFrac = BRIDGE_RAMP_FRAC_MAX;
+   if (typeof waterSurfaceYAt === 'function' && bridgeInfo.wayPts && bridgeInfo.wayTotalLen > 0.01) {
+     const pts = bridgeInfo.wayPts, cum = bridgeInfo.wayCum, totalLen = bridgeInfo.wayTotalLen;
+-    const STEP = 20; // 20m間隔で密にサンプル
++    // 【2026-08-28・V-13】(3)固定20mだと狭い川はサンプルに当たる/当たらないが運任せになり、
++    // 似た橋なのに満額の段差と完全に平らが混在していた。way長に応じて細かくする。
++    const STEP = Math.max(2, Math.min(20, totalLen / 12));
++    sampleStep = STEP;
++    rampFrac = Math.min(BRIDGE_RAMP_FRAC_MAX, BRIDGE_RAMP_M / Math.max(1, totalLen));
+     const nSteps = Math.max(1, Math.ceil(totalLen / STEP));
+     let segIdx = 0;
+     for (let k = 0; k <= nSteps; k++) {
+@@ -1144,19 +1204,42 @@ function bridgeSegmentY(bridgeInfo) {
+         const sf = s / totalLen;
+         if (s0 === null) s0 = sf;
+         s1 = sf;
++        // 【2026-08-28・V-13】幅の実測はマージン0で。既定マージンで当たった点だけを
++        // 対象にするので、追加コストは水に掛かるサンプル分だけ。
++        if (waterSurfaceYAt(px, pz, 0) != null) {
++          if (spanS0 === null) spanS0 = sf;
++          spanS1 = sf;
++        }
+       }
+     }
+   }
+   if (Wmax === null) _bridgeMidNoWater++; // 【診断計器】このway全体で一度も水面が検出されなかった回数
++  // 【2026-08-28・V-13】実測した水面幅から桁下クリアランスを決める。1サンプルしか当たら
++  // なかった場合でも0にならないよう、サンプル間隔ぶんを幅として与える。
++  const _waterSpanM = (spanS0 === null) ? 0
++    : (spanS1 - spanS0) * (bridgeInfo.wayTotalLen || 0) + sampleStep;
++  const _bridgeClearance = bridgeClearanceFor(_waterSpanM);
++  // 【2026-08-28・V-13】端(f=0/1)では必ず地面道路と同じ高さに戻し、接続点の段差をゼロにする。
++  // この関数の元々の設計意図(上のコメント参照)はそうだったのに、WATER_QUERY_MARGIN(20m)が
++  // 両側に効くせいで短い橋では s0≈0 / s1≈1 になり、助走区間が消えて橋全体が満額の高さになり、
++  // 両端に段差ができていた。実測した水面区間[spanS0,spanS1]は必ず満額のまま覆うので水没しない。
++  // 幅が測れなかった場合(spanS0がnull=マージン0のサンプルに一度も当たらなかった)は、
++  // 水没の再発を避けるため従来どおりマージン込みの区間を満額で覆う(段差は許容する)。
++  if (s0 !== null && spanS0 !== null && spanS1 !== null) {
++    const wantS0 = Math.min(rampFrac, spanS0);
++    const wantS1 = Math.max(1 - rampFrac, spanS1);
++    if (wantS0 > s0) s0 = wantS0;
++    if (wantS1 < s1) s1 = wantS1;
++  }
+   const heightAt = (f) => {
+     const base = yA0 + (yB0 - yA0) * f;
+     if (Wmax === null) return base; // way全体で水面が一度も検出されなかった(=水のかかっていない普通の橋)
+-    const needed = Wmax + BRIDGE_CLEARANCE_ABOVE_WATER_M * ELEV_SCALE;
++    const needed = Wmax + _bridgeClearance;
+     if (needed <= base) return base;
+     if (f >= s0 && f <= s1) return needed; // 水に掛かる区間は一律満額(1点の判定漏れが効かない)
+     let edgeT;
+-    if (f < s0) edgeT = 1 - Math.min(1, (s0 - f) / BRIDGE_RAMP_FRAC);
+-    else edgeT = 1 - Math.min(1, (f - s1) / BRIDGE_RAMP_FRAC);
++    if (f < s0) edgeT = 1 - Math.min(1, (s0 - f) / rampFrac);
++    else edgeT = 1 - Math.min(1, (f - s1) / rampFrac);
+     if (edgeT < 0) edgeT = 0;
+     const ease = edgeT * edgeT * (3 - 2 * edgeT); // smoothstep
+     return base + (needed - base) * ease;
+@@ -1243,7 +1326,9 @@ function makeRoadGeo(x1, z1, x2, z2, width, yOffset, bridgeInfo, roadType) {
+         if (waterFloorActive) {
+           const wy = waterSurfaceYAt(vx, vz);
+           if (wy != null) {
+-            const needed = wy + BRIDGE_CLEARANCE_ABOVE_WATER_M * ELEV_SCALE;
++            // 【2026-08-28・V-13】ELEV_SCALEは単位の取り違えだったので外す。ここはbridge
++            // タグの無い道路が水に掛かった時の安全網なので、幅は測らず中庸値を使う。
++            const needed = wy + BRIDGE_CLEARANCE_FALLBACK_M;
+             if (needed > vy) vy = needed;
+           }
+         }
+diff --git a/js/legacy/part4.js b/js/legacy/part4.js
+index 2c226a5..53ca952 100644
+--- a/js/legacy/part4.js
++++ b/js/legacy/part4.js
+@@ -86,12 +86,22 @@ const stationRecords = [];
+ // 地面や線路と干渉しうる立体物は一切置かないことで根本的に解消する。
+ 
+ function addStation(x, z, name) {
+-  const gy = getGroundY(x, z); // 地表基準にしないと高地の駅ランドマークが埋まる
+-  const parts = []; // このパーツをまとめて後からY方向に平行移動する(rebuildStationHeight)
+-  const refX = x, refZ = z; // rebuild時に地形高さを再サンプリングする基準点
+-  const labelY = gy + 20; // 駅名看板は地表から少し浮かせて視認性を確保
++  // NEAR高解像度地形が後から届いた時にY方向へまとめて追従できるよう記録しておく
++  // (道路・建物と同じ仕組み。以前は駅だけこれが無く、FAR基準で建った駅が浮いたまま残った)
++  // 【2026-08-28・S-1】看板の生成を_buildStationLabelに分離し、記録(=座標と駅名だけの
++  // 軽い記述子)とGPU資源を別扱いにする。遠ざかったらGPU資源だけ解放して記録は残す
++  // (建物のdormantBuildingsと同じ考え方)。
++  const rec = { refX: x, refZ: z, name, gy: getGroundY(x, z), parts: [], label: null, dormant: false };
++  stationRecords.push(rec);
++  _buildStationLabel(rec);
++}
+ 
+-  // Name label (canvas texture billboard)
++// 駅名看板(canvasテクスチャのビルボード)を実際に作ってsceneへ入れる。
++// 初回生成と、遠ざかって解放したあとの再接近時(unloadFarStations)の両方から呼ばれる。
++function _buildStationLabel(rec) {
++  const gy = getGroundY(rec.refX, rec.refZ); // 地表基準にしないと高地の駅ランドマークが埋まる
++  rec.gy = gy;
++  const labelY = gy + 20; // 駅名看板は地表から少し浮かせて視認性を確保
+   const cvs = document.createElement('canvas');
+   cvs.width = 512; cvs.height = 96;
+   const ctx2d = cvs.getContext('2d');
+@@ -104,24 +114,76 @@ function addStation(x, z, name) {
+   ctx2d.font = 'bold 52px sans-serif';
+   ctx2d.textAlign = 'center';
+   ctx2d.textBaseline = 'middle';
+-  ctx2d.fillText(name, 256, 48);
++  ctx2d.fillText(rec.name, 256, 48);
+   const tex = new THREE.CanvasTexture(cvs);
+   const labelMesh = new THREE.Mesh(
+     new THREE.PlaneGeometry(40, 8),
+     new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide, depthTest: false })
+   );
+-  labelMesh.position.set(x, labelY, z);
++  labelMesh.position.set(rec.refX, labelY, rec.refZ);
+   scene.add(labelMesh);
+-  parts.push(labelMesh);
+-  stationLabels.push({ type: 'label', mesh: labelMesh, x, z });
++  rec.parts = [labelMesh];
++  rec.label = { type: 'label', mesh: labelMesh, x: rec.refX, z: rec.refZ };
++  stationLabels.push(rec.label); // 毎フレームのビルボード追従対象(part9.js)
++  rec.dormant = false;
++}
+ 
+-  // NEAR高解像度地形が後から届いた時にY方向へまとめて追従できるよう記録しておく
+-  // (道路・建物と同じ仕組み。以前は駅だけこれが無く、FAR基準で建った駅が浮いたまま残った)
+-  stationRecords.push({ refX, refZ, gy: getGroundY(refX, refZ), parts });
++// ======= 駅ラベルの距離アンロード =======
++// 【2026-08-28・S-1(総合レビューB-1 / 性能レビューB-2)】
++// 駅1つにつき 512×96 canvas + CanvasTexture + PlaneGeometry + MeshBasicMaterial を
++// 作りっぱなしで、scene.removeもdispose()も一切存在しなかった。stationLabelsも
++// stationRecordsも永久に増え続けるため、都市部を走り回ると実測で70〜400MB/時のペースで
++// 資源を食う(長時間プレイでのクラッシュの有力候補)。しかも毎フレーム全件を走査していた
++// (animate()から呼ばれる保守処理で間引きが無いのはここだけだった=S-3)。
++// 建物・道路と同じ方式に揃える: 遠くなったらGPU資源だけ解放し、座標と駅名の記述子は
++// 残しておいて再接近で作り直す。タイルの再取得に依存しないので、一度消えた駅名が
++// 二度と戻らない事故が起きない(evictFarAreaPolysで踏んだ轍を避ける)。
++const STATION_UNLOAD_DIST = Math.max(4000, ROAD_UNLOAD_DIST * 1.6);
++const STATION_REVIVE_DIST = STATION_UNLOAD_DIST * 0.85; // 境界での作り直し往復を防ぐヒステリシス
++const STATION_REVIVE_PER_PASS = 4; // 1回のパスで作り直す上限(canvas生成のスパイクを避ける)
++let _stationUnloadFrame = 0;
++let _stationEvicted = 0; // [mem]ログ用
++function unloadFarStations(force) {
++  if (!worldPosSettled) return; // 開始位置が確定するまで距離を根拠に捨てない
++  _stationUnloadFrame++;
++  // 位相33 — 他の保守処理(道路9・建物等)と同じフレームに集中させない(C修正と同じ方針)
++  if (!force && _stationUnloadFrame % 90 !== 33) return;
++  const px = player.position.x, pz = player.position.z;
++  const far2 = STATION_UNLOAD_DIST * STATION_UNLOAD_DIST;
++  const near2 = STATION_REVIVE_DIST * STATION_REVIVE_DIST;
++  let revived = 0;
++  for (const rec of stationRecords) {
++    const dx = rec.refX - px, dz = rec.refZ - pz;
++    const d2 = dx * dx + dz * dz;
++    if (!rec.dormant) {
++      if (d2 > far2) { _disposeStationLabel(rec); _stationEvicted++; }
++    } else if (d2 < near2 && revived < STATION_REVIVE_PER_PASS) {
++      _buildStationLabel(rec); revived++;
++    }
++  }
++}
++function _disposeStationLabel(rec) {
++  for (const m of rec.parts) {
++    if (!m) continue;
++    scene.remove(m);
++    if (m.geometry) m.geometry.dispose();
++    if (m.material) {
++      if (m.material.map) m.material.map.dispose(); // CanvasTexture(512×96)の実体はここ
++      m.material.dispose();
++    }
++  }
++  rec.parts.length = 0;
++  if (rec.label) {
++    const i = stationLabels.indexOf(rec.label);
++    if (i >= 0) stationLabels.splice(i, 1);
++    rec.label = null;
++  }
++  rec.dormant = true;
+ }
+ 
+ // 1駅ぶんを現在の地形に合わせてY方向へ平行移動する(rebuildBuildingHeightと同じ考え方)
+ function rebuildStationHeight(rec) {
++  if (rec.dormant) return; // GPU資源を解放済み。作り直す時に最新の地形高さで建てるので不要
+   const newGy = getGroundY(rec.refX, rec.refZ);
+   const delta = newGy - rec.gy;
+   if (Math.abs(delta) < 0.05) return; // 誤差レベルは無視
+@@ -321,6 +383,7 @@ const farmMat = (() => {
+   g.fillStyle = fc[1]; g.fillRect(0, 12, 32, 8);
+   const tex = new THREE.CanvasTexture(c);
+   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
++  tex.anisotropy = MAX_ANISO; // 【2026-08-28・V-3】
+   tex.repeat.set(1 / 9, 1 / 9);
+   return new THREE.MeshLambertMaterial({ map: tex, side: THREE.DoubleSide });
+ })();
+@@ -464,9 +527,14 @@ function _nearPolygonBoundary(px, pz, pts, margin) {
+ // 底上げする」より実害が大きいため、輪郭から`WATER_QUERY_MARGIN`だけ外側も「水がある」
+ // とみなす。
+ const WATER_QUERY_MARGIN = 20; // 水域ポリゴン輪郭からのマージン(m)。橋の見逃しより誤検出の方が実害が小さいため寄せる
+-function waterSurfaceYAt(x, z) {
++// 【2026-08-28・V-13(IMPROVEMENT_BACKLOG.md)】marginOverride: 既定はWATER_QUERY_MARGIN(20m)。
++// 橋の桁高計算(part3.js bridgeSegmentY)が「水面の実測幅」を測る用途だけ 0 を渡す
++// — 既定の20mは両側に効くので、幅6mの川が46m幅として測れてしまい、狭い川にも大河川と
++// 同じ桁下クリアランスが与えられていた。底上げすべき区間の判定は従来どおり既定マージンで
++// 行う(水没の再発を避けるため既存の安全側の挙動は変えない)。
++function waterSurfaceYAt(x, z, marginOverride) {
+   let best = null;
+-  const m = WATER_QUERY_MARGIN;
++  const m = (marginOverride != null) ? marginOverride : WATER_QUERY_MARGIN;
+   for (const e of queryPolyGrid(areaPolyGrid, x - m, x + m, z - m, z + m)) {
+     // 【2026-08-12・RIVER_DRAPES_ON_TERRAIN.md】waterProfileはもう存在しない(削除済み)。
+     // ここを直し忘れると橋が全部水面を見失う。
+diff --git a/js/legacy/part6.js b/js/legacy/part6.js
+index abe069a..0f4a084 100644
+--- a/js/legacy/part6.js
++++ b/js/legacy/part6.js
+@@ -404,6 +404,7 @@ function initDistantSea() {
+   }
+   const tex = new THREE.CanvasTexture(c);
+   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
++  tex.anisotropy = MAX_ANISO; // 【2026-08-28・V-3】
+   tex.repeat.set(260, 260);
+   const geo = new THREE.PlaneGeometry(60000, 60000);
+   const mat = new THREE.MeshBasicMaterial({ map: tex, fog: false });
+diff --git a/js/legacy/part7.js b/js/legacy/part7.js
+index d65d9fe..4e78909 100644
+--- a/js/legacy/part7.js
++++ b/js/legacy/part7.js
+@@ -1148,6 +1148,7 @@ if (cleanupNowBtn) {
+     unloadFarBuildings(true);
+     unloadFarRoads(true);
+     unloadFarAreaPolys(true);
++    unloadFarStations(true); // 【2026-08-28・S-1】遠方の駅名看板(part4.js)
+     osmTileFailCount.clear(); // タイル再試行カウンタ(距離に関係ないブックキーピング)もリセット
+     const after = renderer.info.memory.geometries;
+     showToast(t('cleanupDoneToast', { before, after }));
+diff --git a/js/legacy/part8.js b/js/legacy/part8.js
+index 6fd948e..60487e4 100644
+--- a/js/legacy/part8.js
++++ b/js/legacy/part8.js
+@@ -624,7 +624,13 @@ function processTileData(data, tileCount, tileList) {
+     // 国プロファイルの階数フォールバック・最低階数floor。
+     const cprofH8 = localDensityProfileAt(cprofH8Base, cx, cz);
+     const [lvMin8, lvMax8] = (cprofH8 && cprofH8.levelsRange) || [1, 3];
+-    const levels = parseInt(tags['building:levels']) || (lvMin8 + Math.floor(Math.random() * (lvMax8 - lvMin8 + 1)));
++    // 【2026-08-28・V-1】階数タグが無い建物にプロファイルの上限階数(日本はプロファイル不在で
++    // [1,3])をそのまま抽選すると、実測6×5m(30㎡)の狭小住宅が3階建て=9〜11mになり、
++    // APT_HEIGHT_M(10m)を越えてマンションへ昇格してしまう。フットプリントは実測データなので、
++    // 「低層地域(lvMin<=2)で30〜60㎡未満の小さい建物」に限って抽選上限を2階に絞る。
++    // 香港・NY等の高層プロファイル(lvMin8が大きい)は従来どおり=ペンシルビルは潰さない。
++    const _lvMax8c = ((w * d) < 60 && lvMin8 <= 2) ? Math.max(lvMin8, 2) : lvMax8;
++    const levels = parseInt(tags['building:levels']) || (lvMin8 + Math.floor(Math.random() * (_lvMax8c - lvMin8 + 1)));
+     let h = resolvedH != null ? resolvedH : Math.max(levels*3,3)+Math.random()*2;
+     h = applyLandmarkMinHeight(style, h); // 学校・病院・役場・神社仏閣は最低限の高さを確保
+     const _landmarkType8 = style && (style.type === 'shrine' || style.type === 'temple' || style.type === 'church');
+@@ -643,7 +649,11 @@ function processTileData(data, tileCount, tileList) {
+     }
+     style = classifyResidential(style, w, d, h, cx, cz);
+     let fw = w, fd = d, fh = h;
+-    ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h)); // マンション・工場は最低サイズを底上げ
++    // 【2026-08-28・V-1】実測建物なのでフットプリント(w,d)は絶対に底上げしない。
++    // 高さも実測タグ(height / building:height / building:levels)由来なら据え置き、
++    // 推定値のときだけマンション・工場の最低サイズで底上げする。
++    ({ w: fw, d: fd, h: fh } = applySizeFloor(style, w, d, h,
++      { measuredFootprint: true, measuredHeight: resolvedH != null }));
+     if (MODE === 'edo') fh = applyEdoHeightCap(style, fh); // 江戸: 現代建物の実測高さそのままだと高層ビルになるため木造家屋相当に抑える
+     // 【2026-08-21・IMPL_PROMPT_20260819_03_NEARBY_PLACE_NAMES.md Phase2】nameタグがあれば
+     // 近くの場所表示用に保持しておく(通信は増やさない。既存のOverpass応答から拾うだけ)。
+@@ -1933,21 +1943,15 @@ function generateChunk(chunkX, chunkZ) {
+   // nearAvoidに入らない(チャンクぎりぎり外の公園を見落とす)。
+   const AVOID_MARGIN = 6;
+   const nearAvoid = queryPolyGrid(avoidGrid, x0 - AVOID_MARGIN, x1 + AVOID_MARGIN, z0 - AVOID_MARGIN, z1 + AVOID_MARGIN);
+-  // 点(x,z)がポリゴンの各辺からmargin以内かどうか(内部判定はpointInPolygon側で別途行う。
+-  // ここは「外側だが際どく近い」場合を拾うための境界距離チェック)。
+-  const _nearPolyBoundary = (x, z, pts, margin) => {
+-    const m2 = margin * margin;
+-    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+-      if (distSqPointToSeg(x, z, pts[j].x, pts[j].z, pts[i].x, pts[i].z) < m2) return true;
+-    }
+-    return false;
+-  };
+   const inAvoid = (x, z) => nearAvoid.some(p => {
+-    // バウンディングボックス(+余白)の粗いふるい落としで、ほとんどの候補点は
+-    // 高コストな境界距離計算に入らず即falseになる。
++    // バウンディングボックス(+余白)の粗いふるい落とし。小さいポリゴンはここでほぼ落ちる。
+     if (x < p.minX - AVOID_MARGIN || x > p.maxX + AVOID_MARGIN ||
+         z < p.minZ - AVOID_MARGIN || z > p.maxZ + AVOID_MARGIN) return false;
+-    return pointInPolygon(x, z, p.pts) || _nearPolyBoundary(x, z, p.pts, AVOID_MARGIN);
++    // 【2026-08-28・G-1】旧実装は pointInPolygon(全頂点) || _nearPolyBoundary(全頂点) で、
++    // bboxが数km四方の海面・大河川ポリゴンはこのbboxふるいを一切通り抜けてしまうため
++    // (伊勢原は相模湾のbboxの内側)、候補点ごとに全頂点を最大2周していた。
++    // part1.jsのzスラブ索引版に置換。判定結果は厳密に同じで、走査する辺だけが絞られる。
++    return pointInOrNearPolygon(x, z, p, AVOID_MARGIN);
+   });
+   const nearLanduse = queryPolyGrid(landuseGrid, x0 - 30, x1 + 30, z0 - 30, z1 + 30);
+   const inLanduse = (x, z) => nearLanduse.some(p =>
+diff --git a/js/legacy/part9.js b/js/legacy/part9.js
+index fba0779..32bc343 100644
+--- a/js/legacy/part9.js
++++ b/js/legacy/part9.js
+@@ -582,6 +582,9 @@ function updateMemDiag() {
+     coll: collisionBoxes.length, mmB: minimapBuildings.length,
+     ways: (typeof seenOSMWays !== 'undefined' ? seenOSMWays.size : -1),
+     stn: (typeof stationLabels !== 'undefined' ? stationLabels.length : -1),
++    // 【2026-08-28・S-1】stnはGPU資源を持っている看板の数(距離アンロードで頭打ちになるはず)。
++    // stnRecは座標+駅名だけの軽い記述子で、こちらは訪問した駅の総数として増え続けてよい。
++    stnRec: (typeof stationRecords !== 'undefined' ? stationRecords.length : -1),
+     roadG: roadGrid.size,
+     dbgPlanes: debugTilePlanes.size, tileQ: osmTileQueue.length, heapMB, heapTotMB, heapLimMB,
+   };
+@@ -593,8 +596,9 @@ function updateMemDiag() {
+   // 展開しないと読めない(実機ログ提供時に「…」で潰れた)。1行の文字列で出す。
+   const sgnN = (v) => (v > 0 ? '+' + v : String(v));
+   console.log('[mem] ' + Object.keys(now).map(k => k + ' ' + now[k] + (d ? '(' + sgnN(d[k]) + ')' : '')).join(' ')
+-    + ' | evicted/win dorm ' + _dormantEvicted + ' road ' + _roadEvicted + ' areaPoly ' + _areaPolyEvicted);
+-  _dormantEvicted = 0; _roadEvicted = 0; _areaPolyEvicted = 0;
++    + ' | evicted/win dorm ' + _dormantEvicted + ' road ' + _roadEvicted + ' areaPoly ' + _areaPolyEvicted
++    + ' stn ' + _stationEvicted);
++  _dormantEvicted = 0; _roadEvicted = 0; _areaPolyEvicted = 0; _stationEvicted = 0;
+   if (debugTileOverlayOn) {
+     const el = _memHud();
+     el.style.display = 'block';
+@@ -1215,6 +1219,7 @@ function animate() {
+   // 道路・線路も同様に、遠方のものはGPUメッシュだけ解放する(記録データは残す)
+   unloadFarRoads();
+   evictFarRoads(); // 遠方の道路レコード自体を捨てる(part1.js、roadRecordsの無制限増加対策)
++  unloadFarStations(); // 【2026-08-28・S-1】遠方の駅名看板(canvas+CanvasTexture)を解放する(part4.js)
+   // 公園・水面・田畑・キャンパスの面メッシュも同じ方式(遠方GPU解放/再接近で再構築)。
+   // 【2026-07-17】以前はこれだけ一度作ったら二度と解放されなかった(CODE_REVIEW_20260717 P8)。
+   unloadFarAreaPolys();

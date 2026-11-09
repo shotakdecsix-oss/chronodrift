@@ -64,6 +64,9 @@ const HOUSE_PALETTE = [ // 手続き生成住宅の色バリエーション(現�
 const OFFICE_WALL_PALETTE = [0x76869c, 0x6a8098, 0x7a9088, 0x9a8868, 0x8a7050, 0xa8aeb4, 0x5c6870];
 const APARTMENT_WALL_PALETTE = [0x8290ab, 0x8a5a4c, 0x9c8060, 0xb0a090, 0xc8bc9c, 0x707890];
 const INDUSTRIAL_WALL_PALETTE = [0x808890, 0x8c9098, 0x707870, 0x9c9488];
+// 商店・住宅も棟ごとに色を抽選する(以前は全棟が単色: 商店=蛍光オレンジ、住宅=ベージュ)。現実モードのみ
+const SHOP_WALL_PALETTE = [0xe8e2d6, 0xd9cfbf, 0xc84a3c, 0x3f6fae, 0x4e8f5a, 0xe2b544, 0xb8b0a4, 0xf0a060];
+const HOUSE_WALL_PALETTE = [0xd4b070, 0xe8e2d4, 0xd8ccb4, 0xc8c2b8, 0xe0d0b0, 0xb4a48c, 0x9c9a96, 0x7a7c80];
 // モード別の壁・屋根・発光パレット(lambertMatキャッシュを通すのでマテリアルは増殖しない)
 const EDO_WALLS    = [0xcfc0a0, 0x8a6a4a, 0xe8e0d0, 0x7a5a3a];
 const PASTEL_WALLS = [0xffc0cb, 0xb0e0ff, 0xfff0a0, 0xc8ffc0, 0xe0c0ff, 0xffd8b0];
@@ -422,6 +425,16 @@ const SHED_GEO = (() => { // 片流れ(z-側が高い楔形。箱を傾けると
   _RQ(p, u, [-0.5,0,-0.5], [0.5,0,-0.5], [0.5,0,0.5], [-0.5,0,0.5]);
   return _roofGeo(p, u);
 })();
+const PYRAMID_GEO = (() => { // 方形(4面が頂点1点に集まる)。正方形に近い住宅向け
+  const p = [], u = [];
+  const T = (a, b, c) => { p.push(...a, ...b, ...c); u.push(0,0, 4,0, 2,1); };
+  T([0.5,0,-0.5], [-0.5,0,-0.5], [0,1,0]);
+  T([-0.5,0,0.5], [0.5,0,0.5], [0,1,0]);
+  T([0.5,0,0.5], [0.5,0,-0.5], [0,1,0]);
+  T([-0.5,0,-0.5], [-0.5,0,0.5], [0,1,0]);
+  _RQ(p, u, [-0.5,0,-0.5], [0.5,0,-0.5], [0.5,0,0.5], [-0.5,0,0.5]); // 軒裏
+  return _roofGeo(p, u);
+})();
 const PARAPET_GEO = (() => { // 陸屋根のパラペット(4辺の立ち上がり壁を1ジオメトリに)
   const p = [], u = [];
   const q = (a, b, c, d) => { p.push(...a, ...b, ...c, ...a, ...c, ...d); u.push(0,0, 1,0, 1,1, 0,0, 1,1, 0,1); };
@@ -610,12 +623,23 @@ const REGION_PROFILES = {
     lotSurfaceColor: 0xd8c090, // 砂地
     fallbackGridSpacing: 30, fallbackFillProbability: 0.5,
   },
+  japan: { // 日本の市街地・住宅地(サイディング・モルタル・タイルの淡色壁、瓦・スレート・金属屋根)
+    wallPalette: [0xe8e4dc, 0xdcd4c4, 0xcfc8bc, 0xe2d6bc, 0xbdb4a6, 0x9a9894, 0x6e7276, 0xc9b08c],
+    roofPalette: [0x4a5058, 0x3c4248, 0x2f3134, 0x5a4a3c, 0x2e3a4c, 0x55524c],
+    roofShapeWeights: { gable: 0.42, hip: 0.38, shed: 0.12, flat: 0.08 },
+    roofPickMaxH: 10,             // これ以上の高さと集合住宅・オフィス・工場は国別抽選を使わず、高さと種別から推定する
+    roofPitchRange: [0.3, 0.55],  // 屋根勾配(高さ÷半スパン)。3寸〜5.5寸
+    roofMaterialBias: 'tile',
+    flatRoofHeightThreshold: 10,
+    fallbackGridSpacing: 24, fallbackFillProbability: 0.6,
+  },
 };
 // 個別に作り込んだ国(必要になったものから追加)。無ければREGION_FALLBACK_BY_COUNTRYへ、
 // それも無ければnull(=現状通りDEFAULT_WALLS_REAL/ROOF_COLS等の既定値。壊れない)。
 const COUNTRY_BUILDING_PROFILES = {
   hk: REGION_PROFILES.denseHighRise,
   us: REGION_PROFILES.sprawlingSuburban,
+  jp: REGION_PROFILES.japan,
 };
 // 個別プロファイルが無い国の地域バケツ割り当て。判断根拠が薄い国は入れず未設定のまま
 // (=既定値)にとどめる。「わからない国は現状維持」を明示的なデフォルトにすることで、
@@ -1152,7 +1176,7 @@ function getBuildingStyle(tags) {
     style = { color: 0xb0b4bc, roofColor: 0x888ea0, emissive: 0x08080c, type: 'stadium', stadiumDome };
   } else if (tags.shop || am === 'supermarket' || am === 'convenience') {
     // 実際の店構え(コンビニ・商店等)。街灯り演出(のれん/看板バンド等)はこの'shop'型限定。
-    style = { color: 0xff8840, roofColor: 0xcc5500, emissive: 0x221100, type: 'shop' };
+    style = { color: 0xff8840, wallPalette: MODE === 'real' ? SHOP_WALL_PALETTE : null, roofColor: MODE === 'real' ? 0x5a5a5e : 0xcc5500, emissive: 0x221100, type: 'shop' };
   } else if (bt === 'office' || tags.office) {
     // オフィスビル(ガラス張り寒色系)。東京・NY等の都心はマンションよりオフィスの方が
     // 多いため、'shop'(店構え演出)とは別の落ち着いた見た目にする。
@@ -1169,7 +1193,7 @@ function getBuildingStyle(tags) {
   } else if (bt === 'apartments') {
     style = { color: 0x8290ab, wallPalette: APARTMENT_WALL_PALETTE, roofColor: 0x506080, emissive: 0x001122, type: 'apartment' };
   } else if (bt === 'house' || bt === 'detached' || bt === 'residential') {
-    style = { color: 0xd4b070, roofColor: 0x886030, emissive: 0x110800, type: 'house' };
+    style = { color: 0xd4b070, wallPalette: MODE === 'real' ? HOUSE_WALL_PALETTE : null, roofColor: 0x886030, emissive: 0x110800, type: 'house' };
   } else if (bt === 'industrial' || bt === 'warehouse' || bt === 'factory') {
     style = { color: 0x808890, wallPalette: INDUSTRIAL_WALL_PALETTE, roofColor: 0x505860, emissive: 0x111111, type: 'industrial' };
   }

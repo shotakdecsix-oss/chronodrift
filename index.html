@@ -574,6 +574,7 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
     <span data-i18n="debugSectionTitle">🩺 デバッグ</span>
     <div class="charRow">
       <button id="debugTileBtn" data-i18n="debugTileBtn">🩺 タイル状況</button>
+      <button id="perfHudBtn" data-i18n="perfHudBtn">⏱ 性能表示</button>
     </div>
     <div id="perfDesc" data-i18n="debugTileDesc">デバッグ用: 周囲のOSMタイルごとの取得・生成状況を色分け表示します(灰=未取得 赤=取得中 青=地形待ち 橙=生成中 緑=完了)</div>
   </div>
@@ -653,7 +654,6 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 <button id="birdDownBtn" class="glass" title="下降" data-i18n-title="birdDownBtnTitle">⤵</button>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="js/core/mode-registry.js"></script>
 <script src="js/core/audio.js"></script>
@@ -668,5 +668,7 @@ body.uiHidden #uiToggleBtn { opacity:0.45; }
 <script src="js/legacy/part8.js"></script>
 <script src="js/legacy/part9.js"></script>
 <script src="js/legacy/part10.js"></script>
+<script src="js/core/perf-hud.js"></script>
+<script src="js/core/wake-lock.js"></script>
 </body>
 </html>
