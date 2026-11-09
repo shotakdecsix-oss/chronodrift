@@ -659,6 +659,9 @@ function processTileData(data, tileCount, tileList) {
     const _placeName = (tags['name:ja'] || tags.name || '').trim();
     const _placeKind = tags.amenity || tags.leisure || (tags.building && tags.building !== 'yes' ? tags.building : 'building');
     const realRec = { x: cx, z: cz, w: fw, d: fd, h: fh, style, real: true, rot: bRot, name: _placeName, kind: _placeKind };
+    // 【2026-11-10・H-2】下端が地面から浮いている部品(building:partの min_height。ベクタータイル由来)
+    const _minH = parseFloat(tags.min_height) || 0;
+    if (_minH > 0 && _minH < fh - 1) realRec.minH = _minH;
     // 【2026-07-28・静止していても落ちる不具合の主因】以前はタイルから取れた実建物を
     // 距離に関係なく全部pendingBuildingsへ積んでいた。密集地(東京)では取得半径内に
     // 15万件以上あるのに、生成距離(BUILDING_GEN_DIST_REAL)の中に入れるのは2万件程度。

@@ -33,6 +33,7 @@
       [mem ? `heap ${(mem.usedJSHeapSize / 1048576).toFixed(0)}MB` : '',
        (typeof buildingRecords !== 'undefined') ? `bldg ${buildingRecords.length}` : ''].filter(Boolean).join('  '),
       (typeof bbStats === 'function') ? bbStats() : '',
+      (typeof rbStats === 'function') ? rbStats() : '',
       (typeof vtStatsText === 'function') ? vtStatsText() : '',
     ].filter(Boolean).join('\n');
   }

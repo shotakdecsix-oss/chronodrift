@@ -848,7 +848,7 @@ function removeBuildingsOverlappingRoad(r) {
       removeIds.add(rec.bid);
       if (rec.real) {
         pendingBuildings.push({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h,
-          style: rec.style, real: true, rot: rec.rot }); // _fit無し→再fitされる
+          style: rec.style, real: true, rot: rec.rot, minH: rec.minH }); // _fit無し→再fitされる
       }
     }
   }
@@ -1084,7 +1084,7 @@ function rebuildRoadMesh(r) {
     // 経路を用意し、unloadFarRoads側もmotorwayを対象に含める(MOTORWAY_UNLOAD_DIST参照)。
     const geo = makeMotorwayGeo(r.x1, r.z1, r.x2, r.z2);
     if (!geo) return;
-    const mesh = new THREE.Mesh(geo, realRoadMat('motorway', 24));
+    const mesh = rbMakePart(geo, realRoadMat('motorway', 24), (r.x1 + r.x2) / 2, (r.z1 + r.z2) / 2); // まとめ描画(road-batch.js)
     mesh.renderOrder = 1;
     scene.add(mesh);
     r.mesh = mesh;
@@ -1111,7 +1111,7 @@ function rebuildRoadMesh(r) {
     r.mesh.geometry.dispose();
     r.mesh.geometry = geo;
   } else {
-    const mesh = new THREE.Mesh(geo, r.mat);
+    const mesh = rbMakePart(geo, r.mat, (r.x1 + r.x2) / 2, (r.z1 + r.z2) / 2); // まとめ描画(road-batch.js)
     mesh.renderOrder = 1;
     scene.add(mesh);
     r.mesh = mesh;

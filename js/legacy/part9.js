@@ -1193,7 +1193,7 @@ function animate() {
       if (_f.drop) continue; // 縮小しても線路に被る建物(線路またぎ)は生成しない
       b.w = _f.w; b.d = _f.d; b._fit = 1;
     }
-    if (b.real || !isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style, b.real, b.rot, b.name, b.kind);
+    if (b.real || !isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style, b.real, b.rot, b.name, b.kind, b.minH);
     _bgGenerated++;
   }
   if (pendingBuildingIdx > 0 && pendingBuildingIdx === pendingBuildings.length) {
@@ -1265,6 +1265,7 @@ function animate() {
   updateFarMesh(); // 200mグリッドをまたいだ時だけ再サンプリング(それ以外は即return)
 
   if (typeof bbUpdate === 'function') bbUpdate(); // 建物のまとめ描画: セルのカリングと属性の転送
+  if (typeof rbUpdate === 'function') rbUpdate(); // 道路のまとめ描画: 変化したセルの再結合(近い順・予算内)
   if (!_freezeRender) renderer.render(scene, camera); // 二分探索用(window.freezeRender)
   drawMinimap();
   updateGPS(t);

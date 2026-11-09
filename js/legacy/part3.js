@@ -312,7 +312,7 @@ function _doorLocalX(w, tw) {
   const cols = _quantUVStep(Math.max(1, Math.round(w / tw)));
   return -w / 2 + (Math.floor(cols * 0.5) + 0.5) * (w / cols);
 }
-function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
+function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, minH) {
   const _origH = h; // 遠方アンロード時、再生成できるよう元のhを覚えておく(下でhを斜面ぶん延長するため)
   const rnd = _bldRng(x, z); // この建物の見た目用の決定的乱数
   // 正面(ローカル+z)を最寄りの道路へ向ける。箱は90°単位で回してw/dを入れ替えれば同じ形なので、
@@ -328,8 +328,13 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
     getGroundY(x - w/2, z - d/2), getGroundY(x + w/2, z - d/2),
     getGroundY(x - w/2, z + d/2), getGroundY(x + w/2, z + d/2),
   ];
-  const gy = Math.min(...hs);   // 基礎 = 最低点
-  h += Math.max(...hs) - gy;    // 斜面の高低差ぶん建物を延長して埋まりを防ぐ
+  const groundY = Math.min(...hs);   // 基礎 = 最低点
+  // 【2026-11-10・H-2】下端が浮いている部品(min_height)は、その高さから上だけを描く(斜面の延長は不要)。
+  // 以降のメッシュ配置はgy(=下端)基準。記録(brec.gy)には地面の高さを残す(rebuildBuildingHeightの差分用)
+  minH = (minH > 0 && minH < h - 1) ? minH : 0;
+  const gy = groundY + minH;
+  if (minH) h -= minH;
+  else h += Math.max(...hs) - groundY;    // 斜面の高低差ぶん建物を延長して埋まりを防ぐ
 
   // このbuildingを構成する全メッシュ/ライトをここに集める。
   // 【重要】以前はここで各パーツを個別に絶対Y座標でsceneへ直置きし、生成後は二度と
@@ -675,7 +680,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
       pitched(geoR, geoR === SHED_GEO ? Math.max(0.8, minWD * 0.18)
                                       : _roofRise(minWD, cprof, rnd), 1.0, rM);
       // 玄関庇(住宅のみ)
-      if (type === 'house' && detailOK() && rnd() < 0.5)
+      if (type === 'house' && !minH && detailOK() && rnd() < 0.5)
         dm(UNIT_BOX, roofSurfMat(roofC, null), MODE === 'real' ? x + _doorLocalX(w, tw) : x + w * 0.22, gy + 2.35, z + d / 2 + 0.5, 2.2, 0.16, 1.1);
     }
   }
@@ -688,7 +693,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
   }
 
   // コンビニ・商店のモード別演出(共有マテリアル、追加は最大2メッシュ+提灯インスタンス)
-  if (type === 'shop' && h <= 12) {
+  if (type === 'shop' && h <= 12 && !minH) {
     if (MODE === 'edo') {
       // 茶屋: 暖簾+提灯
       dm(UNIT_PLANE, NOREN_MAT, x, gy + 1.7, z + d / 2 + 0.08, Math.min(w * 0.7, 6), 1.1, 1);
@@ -700,7 +705,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
       dm(UNIT_BOX, bandMats[(rnd() * bandMats.length) | 0],
                  x, gy + 2.4, z + d / 2 + 0.2, Math.min(w, 12) * 0.95, 0.7, 0.25);
     }
-  } else if (type === 'school') {
+  } else if (type === 'school' && !minH) {
     // 校庭(土色の広場)
     yard = dm(UNIT_PLANE, YARD_MAT, x, gy + 0.12, z, w + 18, d + 18, 1);
     yard.rotation.x = -Math.PI / 2;
@@ -788,7 +793,8 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
   // h/styleも保持しておき、遠方アンロード時にpendingBuildingsへ戻して再訪時に再生成できるようにする。
   // isReal: 実OSM建物かどうか(手続き生成の密集地判定で「本物の建物が近くにあるか」の
   // 裏付けに使う。農地の農道グリッドを住宅街と誤認する対策)
-  const brec = { x, z, w, d, h: _origH, style, gy, parts, cbox, ck: currentChunkKey, bid, real: !!isReal, rot: rot || 0 };
+  const brec = { x, z, w, d, h: _origH, style, gy: groundY, parts, cbox, ck: currentChunkKey, bid, real: !!isReal, rot: rot || 0 };
+  if (minH) brec.minH = minH;
   buildingRecords.push(brec);
   meshedBuildingGridAdd(brec);
   // 【2026-08-21・IMPL_PROMPT_20260819_03_NEARBY_PLACE_NAMES.md Phase2】name付き実建物を
@@ -1053,7 +1059,7 @@ function addMotorway(x1, z1, x2, z2, wayId=null) {
   const hw2 = MWY_W / 2;
   const geo = makeMotorwayGeo(x1, z1, x2, z2);
   if (!geo) return;
-  const mesh = new THREE.Mesh(geo, realRoadMat('motorway', 24));
+  const mesh = rbMakePart(geo, realRoadMat('motorway', 24), (x1 + x2) / 2, (z1 + z2) / 2); // まとめ描画(road-batch.js)
   mesh.renderOrder = 1;
   scene.add(mesh);
 

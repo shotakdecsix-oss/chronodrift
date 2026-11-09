@@ -478,6 +478,15 @@ function _vtPois(T, feats, out) { // 駅ノードを出し、建物への付与�
 function _vtBldgTags(q, grid) {
   const t = { building: 'yes' };
   const lv = _vtHeightTags(t, q.p.render_height || 0);
+  // 【2026-11-10・H-2】下端の高さ(building:partの min_height / min_level)。render_min_heightは
+  // min_level×3.66の切り捨てなので、階数由来なら「1階=3m」に換算し直す(上端を building:levels×3 で
+  // 描くのと揃えないと、低層部の屋上と高層部の下端の間に隙間ができる)。
+  const mh = q.p.render_min_height || 0;
+  if (mh > 0 && (q.p.render_height || 0) > mh + 1) {
+    let m = mh;
+    for (let L = 1; L <= 300; L++) { const v = Math.floor(L * 3.66); if (v === mh) { m = L * 3; break; } if (v > mh) break; }
+    t.min_height = String(m);
+  }
   const col = q.p.colour;
   if (typeof col === 'string' && /^#[0-9a-f]{6}$/i.test(col)) t['building:colour'] = col;
   if (!grid || !grid.size) return t;
