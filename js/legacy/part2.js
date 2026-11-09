@@ -108,7 +108,8 @@ const FACADE_CACHE_MAX = PERF_PRESET === 'lite' ? 220 : Infinity;
 // 上限キャップに頼らず、使われなくなったテクスチャは常時バックグラウンドで解放される
 // (ユーザー体験には出ない。既存の90フレームごとの遠方建物アンロード処理に相乗り)。
 function facadeMat(kind, color, variant) {
-  if (MODE === 'real') return facadeMatReal(kind, color); // 現実モードは共有アトラス+シェーダー(下のfacadeMatReal)
+  // 現実モードは共有アトラス+シェーダー(下のfacadeMatReal)。URLに ?oldfacade=1 で従来の外壁(スマホでの性能比較用)
+  if (MODE === 'real' && !/[?&]oldfacade=1/.test(location.search)) return facadeMatReal(kind, color);
   const key = kind + '_' + color + '_' + variant;
   const hit = facadeCache.get(key);
   if (hit) { hit.userData.refCount = (hit.userData.refCount || 0) + 1; return hit; }

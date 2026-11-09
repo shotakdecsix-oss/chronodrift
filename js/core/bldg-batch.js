@@ -4,7 +4,8 @@
 // インスタンスを登録・解除する。解放・休眠・再生成など「partsを回してscene.remove」する既存処理は
 // そのまま動く。部品の位置を後から変える処理(建物の回転適用、地形への再スナップ)は bbSync(parts) を呼ぶ。
 // 色はインスタンスごとの属性(aCol)で渡すので、壁色・屋根色が違っても同じ描画コールにまとまる。
-const BB_ON = (MODE === 'real');
+// URLに ?nobatch=1 を付けると従来の1部品1メッシュに戻る(スマホでの性能比較用)
+const BB_ON = (MODE === 'real') && !/[?&]nobatch=1/.test(location.search);
 const BB_CELL = 500;
 const BB_ROOT = new THREE.Group(); // まとめ描画のメッシュの親。generateChunkのscene.children追跡に混ざらないよう別ノードにする
 BB_ROOT.name = 'bldgBatches';
@@ -130,7 +131,7 @@ function _bbNewMesh(b, g, cap) {
 function _bbBatch(cell, key, p) {
   let b = cell.batches.get(key);
   if (b) return b;
-  b = { key, cell, base: _bbBaseGeo(p), mat: _bbTemplate(p, key), mesh: null, cap: 32, n: 0, owners: [], dirty: false };
+  b = { key, cell, base: _bbBaseGeo(p), mat: _bbTemplate(p, key), mesh: null, cap: 32, n: 0, owners: [], dirty: false, dMin: Infinity, dMax: -1 };
   b.mesh = _bbNewMesh(b, _bbMakeGeo(b.base, b.cap), b.cap);
   BB_ROOT.add(b.mesh);
   cell.batches.set(key, b);
@@ -146,6 +147,7 @@ function _bbGrow(b) {
   BB_ROOT.remove(old); old.geometry.dispose(); if (old.dispose) old.dispose();
   BB_ROOT.add(mesh);
   b.mesh = mesh; b.cap = cap; b.dirty = true;
+  b.dMin = Infinity; b.dMax = -1; // 新しいバッファは初回に丸ごと転送される
 }
 function _bbWrite(b, i, p) {
   p.updateMatrix();
@@ -155,6 +157,8 @@ function _bbWrite(b, i, p) {
   ao[i * 4] = p.position.x; ao[i * 4 + 1] = p.position.z; ao[i * 4 + 2] = gu.fcx || 1; ao[i * 4 + 3] = gu.fcz || 1;
   ac[i * 4] = c ? c.r : 1; ac[i * 4 + 1] = c ? c.g : 1; ac[i * 4 + 2] = c ? c.b : 1; ac[i * 4 + 3] = gu.ffl || 1;
   b.dirty = true;
+  if (i < b.dMin) b.dMin = i;
+  if (i > b.dMax) b.dMax = i;
   const s = p.scale, r = Math.max(Math.abs(s.x), Math.abs(s.z)) * 0.75 + 2, hy = Math.abs(s.y) + 2;
   b.cell.box.expandByPoint(_bbV.set(p.position.x - r, p.position.y - hy, p.position.z - r));
   b.cell.box.expandByPoint(_bbV.set(p.position.x + r, p.position.y + hy, p.position.z + r));
@@ -184,6 +188,8 @@ function _bbUnregister(p) {
     b.mesh.geometry.attributes.aObj.array.copyWithin(i * 4, last * 4, last * 4 + 4);
     b.mesh.geometry.attributes.aCol.array.copyWithin(i * 4, last * 4, last * 4 + 4);
     b.owners[i] = q; q._bb.i = i;
+    if (i < b.dMin) b.dMin = i;
+    if (i > b.dMax) b.dMax = i;
   }
   b.owners.length = last;
   b.n = last; b.mesh.count = last; b.dirty = true;
@@ -210,10 +216,14 @@ function bbUpdate() {
     for (const b of cell.batches.values()) {
       b.mesh.visible = vis;
       if (b.dirty) {
-        b.mesh.instanceMatrix.needsUpdate = true;
-        b.mesh.geometry.attributes.aObj.needsUpdate = true;
-        b.mesh.geometry.attributes.aCol.needsUpdate = true;
-        b.dirty = false;
+        // 変わったインスタンスの範囲だけを転送する(丸ごとだと大きなバッチで1フレーム数MBになる)
+        if (b.dMax >= b.dMin) {
+          const n = b.dMax - b.dMin + 1, im = b.mesh.instanceMatrix, ga = b.mesh.geometry.attributes;
+          im.updateRange.offset = b.dMin * 16; im.updateRange.count = n * 16; im.needsUpdate = true;
+          ga.aObj.updateRange.offset = b.dMin * 4; ga.aObj.updateRange.count = n * 4; ga.aObj.needsUpdate = true;
+          ga.aCol.updateRange.offset = b.dMin * 4; ga.aCol.updateRange.count = n * 4; ga.aCol.needsUpdate = true;
+        }
+        b.dirty = false; b.dMin = Infinity; b.dMax = -1;
       }
     }
   }
