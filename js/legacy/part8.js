@@ -443,6 +443,9 @@ function processTileData(data, tileCount, tileList) {
         const _p1 = latLonToXZ(el.geometry[ti].lat, el.geometry[ti].lon);
         _tLen += Math.hypot(_p1.x - _p0.x, _p1.z - _p0.z);
       }
+      // 【2026-11-09・B-2】ベクタータイル(js/core/vt.js)ではトンネルがタイル境界で分割されるため、
+      // 境界で繋がった全長(vtTunnelLen)で判定する(長いトンネルの短い断片が地表に描かれないように)。
+      if (el.vtTunnelLen > _tLen) _tLen = el.vtTunnelLen;
       // 鉄道(地下鉄・地下区間)と高速道路(地下の首都高等)は長さを問わず常に非表示。
       // 高速道路はaddMotorway経由で「地面+7mの高架」として建ってしまうため特に害が大きい。
       const _hwT = tags.highway;
@@ -497,9 +500,14 @@ function processTileData(data, tileCount, tileList) {
       // 適用する。OSMには橋の絶対高さ(標高)を示すタグが実質存在しないため、既定はこの
       // 補間に任せる。
       const isBridge = type !== 'motorway' && tags.bridge && tags.bridge !== 'no';
-      let bridgeAx = 0, bridgeAz = 0, bridgeBx = 0, bridgeBz = 0, bridgeCum = null, bridgeTotalLen = 0, bridgePts = null;
+      let bridgeAx = 0, bridgeAz = 0, bridgeBx = 0, bridgeBz = 0, bridgeCum = null, bridgeTotalLen = 0, bridgePts = null, bridgeOff = 0;
       if (isBridge) {
-        const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
+        // 【2026-11-09・B-2】ベクタータイル由来でタイル境界により分割された橋は、繋がった全体
+        // (vtBridgeChain、js/core/vt.js)を1本の橋として補間する(継ぎ目で橋桁が川底へ垂れないように)。
+        // offsetはこの断片の先頭頂点が全体の何番目かを表す。
+        const _vc = el.vtBridgeChain;
+        const pts = (_vc ? _vc.geometry : el.geometry).map(g => latLonToXZ(g.lat, g.lon));
+        if (_vc) bridgeOff = _vc.offset;
         bridgePts = pts; // このwayの全区間で共有する実ジオメトリ(下記コメント参照)
         bridgeCum = [0];
         for (let i = 1; i < pts.length; i++) {
@@ -517,7 +525,7 @@ function processTileData(data, tileCount, tileList) {
         if (isBridge && bridgeTotalLen > 0.01) {
           bridgeY = {
             ax: bridgeAx, az: bridgeAz, bx: bridgeBx, bz: bridgeBz,
-            fracA: bridgeCum[i] / bridgeTotalLen, fracB: bridgeCum[i+1] / bridgeTotalLen,
+            fracA: bridgeCum[i + bridgeOff] / bridgeTotalLen, fracB: bridgeCum[i + 1 + bridgeOff] / bridgeTotalLen,
             // 【2026-08-03・IMPL_PROMPT_20260803_BRIDGE_WATER_v2.md 修正D対応】このway全体の
             // 実ジオメトリ(pts/cum/totalLen)への参照。全セグメントで同じ配列を共有する
             // (コピーしない=軽い)。bridgeSegmentY(part3.js)がこれを使い、呼ばれるたびに
@@ -1488,6 +1496,28 @@ async function fetchOSMTileBatch(opts) {
     unlockTileReadiness(posKey, kind);
   };
   try {
+    // 【2026-11-09・B-2】ベクタータイル(OpenFreeMap、js/core/vt.js)を一次ソースにする。
+    // 失敗したバッチだけ下の従来経路(IndexedDBキャッシュ→Overpass)へフォールバックする。
+    // OverpassのIndexedDBキャッシュは参照しない(取得元が違う要素はIDが一致せず二重描画になるため)。
+    // 切り戻しは ?osm=overpass。
+    if (typeof vtLoadBatch === 'function' && VT_ON) {
+      const _vt = await vtLoadBatch(bboxes, batchKind);
+      if (_vt) {
+        if (myEpoch === osmEpoch) { // await中にマップジャンプしていたら捨てる(キャッシュヒット経路と同じ)
+          processTileData(_vt, batch.length, batch.map(t => ({ tx: t.tx, tz: t.tz, kind: batchKind })));
+          for (let i = 0; i < batch.length; i++) markTileSuccess(keys[i], stateKeys[i], batchKind);
+          if (awaitingDestinationLoad && osmTilesReadyAround(player.position.x, player.position.z, 64)) {
+            awaitingDestinationLoad = false;
+            showToast(t('mapShownToast'), { duration: 3000 });
+          }
+        }
+        clearTimeout(timeoutId);
+        _releaseMainSlot();
+        processOSMTileQueue();
+        return;
+      }
+      vtStats.fallback++;
+    }
     // 1枚クエリはまずIndexedDBキャッシュを照会(ヒットなら即時復元・ネットワーク不要)
     if (batch.length === 1) {
       // 【2026-07-17・Fable5診断】キーはkeys[0](tx,tz=浮動原点からの相対座標)ではなく
