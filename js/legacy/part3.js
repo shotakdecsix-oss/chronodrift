@@ -431,7 +431,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
         _oneTile ? 1 : Math.max(1, Math.round(d / tw)),
         _oneTile ? 1 : floors)
     : UNIT_BOX;
-  const mesh = new THREE.Mesh(geo, mat);
+  const mesh = bbMakePart(geo, mat);
   mesh.position.set(x, gy + h/2, z);
   // キノコ型だけは実寸で生成しているのでscale不要。それ以外(箱・スタジアムの単位円柱)は実寸へ。
   if (!isMushroom) mesh.scale.set(w, h, d);
@@ -497,7 +497,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
 
   // 勾配屋根を載せる(長辺方向に棟を向け、ov=軒の張り出し)
   const pitched = (geoR, rh, ov, matR) => {
-    const m2 = new THREE.Mesh(geoR, matR);
+    const m2 = bbMakePart(geoR, matR);
     if (d > w) { m2.rotation.y = Math.PI / 2; m2.scale.set(d + ov, rh, w + ov); }
     else m2.scale.set(w + ov, rh, d + ov);
     m2.position.set(x, gy + h - 0.02, z);
@@ -747,6 +747,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind) {
       }
     }
   }
+  bbSync(parts); // まとめ描画側へ回転後の位置を反映
 
   // Collision AABB — terrain-aware(chunkKey はアンロード時の掃除用)
   // 上端は実際の屋根高さに(+5の余白があるとジャンプでの屋根着地位置がずれる)

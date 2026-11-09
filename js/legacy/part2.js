@@ -536,6 +536,7 @@ function facadeMatReal(kind, color) {
   m.userData.cacheKey = key; m.userData.refCount = 1; m.userData.baseEmi = 0.85;
   m.userData.sharedMaps = true; m.userData.facadeV2 = true;
   m.userData.doorOnce = (kind === 'house' || kind === 'apt');
+  m.userData.kind = kind;
   facadeCache.set(key, m);
   return m;
 }
@@ -600,6 +601,7 @@ function sharedFacadeBoxGeo(colsX, colsZ, floors) {
     setBoxFacadeUVs(g, cx, cz, fl);
     _setBoxFaceAttr(g, cx, cz, fl);
     g.userData.shared = true; // アンロード時にdisposeしない印
+    g.userData.fcx = cx; g.userData.fcz = cz; g.userData.ffl = fl; // まとめ描画で列数・階数を渡す
     _facadeBoxCache.set(key, g);
   }
   return g;
@@ -734,7 +736,7 @@ const UNIT_TAPER_ROUND = new THREE.CylinderGeometry(0.3, 0.5, 1, 14);
 const UNIT_CYL_SMOOTH = new THREE.CylinderGeometry(0.5, 0.5, 1, 24);
 [UNIT_BOX, UNIT_CYL, UNIT_CONE4, UNIT_CONE8, UNIT_DOME, UNIT_SPH, UNIT_PLANE, UNIT_TAPER4, UNIT_TAPER_ROUND, UNIT_CYL_SMOOTH].forEach(gg => gg.userData.shared = true);
 function detailMesh(geo, mat, x, y, z, sx, sy, sz, ry) {
-  const m = new THREE.Mesh(geo, mat);
+  const m = bbMakePart(geo, mat); // 現実モードはまとめ描画(js/core/bldg-batch.js)
   m.position.set(x, y, z);
   m.scale.set(sx, sy, sz);
   if (ry) m.rotation.y = ry;

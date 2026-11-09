@@ -711,6 +711,7 @@ function applyTimeOfDay() {
       FACADE_U.emiNow = v2Emi;
       FACADE_U.uSkyRefl.value.copy(WORLD_FOG.color).multiplyScalar(0.45 * (1 - night));
     }
+    if (typeof BB_FACADE_MATS !== 'undefined') BB_FACADE_MATS.forEach((m) => { m.emissiveIntensity = v2Emi; });
     facadeCache.forEach((mat) => {
       if (mat.userData && mat.userData.facadeV2) { mat.emissiveIntensity = v2Emi; return; }
       const base = mat.userData && mat.userData.baseEmi != null ? mat.userData.baseEmi : 0.85;
@@ -1545,6 +1546,7 @@ function rebuildBuildingHeight(rec) {
   const delta = newGy - rec.gy;
   if (Math.abs(delta) < 0.05) return; // 誤差レベルは無視(毎回全建物を動かさない)
   for (const p of rec.parts) { if (p) p.position.y += delta; }
+  if (typeof bbSync === 'function') bbSync(rec.parts);
   if (rec.cbox) { rec.cbox.min.y += delta; rec.cbox.max.y += delta; }
   rec.gy = newGy;
 }

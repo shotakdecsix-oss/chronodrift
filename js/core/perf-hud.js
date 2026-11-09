@@ -32,6 +32,7 @@
       ri ? `geo ${ri.memory.geometries}  tex ${ri.memory.textures}` : '',
       [mem ? `heap ${(mem.usedJSHeapSize / 1048576).toFixed(0)}MB` : '',
        (typeof buildingRecords !== 'undefined') ? `bldg ${buildingRecords.length}` : ''].filter(Boolean).join('  '),
+      (typeof bbStats === 'function') ? bbStats() : '',
     ].filter(Boolean).join('\n');
   }
   function set(v) {

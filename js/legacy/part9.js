@@ -1261,6 +1261,7 @@ function animate() {
   }
   updateFarMesh(); // 200mグリッドをまたいだ時だけ再サンプリング(それ以外は即return)
 
+  if (typeof bbUpdate === 'function') bbUpdate(); // 建物のまとめ描画: セルのカリングと属性の転送
   if (!_freezeRender) renderer.render(scene, camera); // 二分探索用(window.freezeRender)
   drawMinimap();
   updateGPS(t);
