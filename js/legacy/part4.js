@@ -711,7 +711,7 @@ function buildFixedFlatAreaPoly(pts, mat, yOff, fixedY, holes) {
   const avoidPoly = { pts, minX, maxX, minZ, maxZ };
   avoidPolygons.push(avoidPoly);
   polyGridAdd(avoidGrid, avoidPoly);
-  return true;
+  return entry; // 【2026-11-10】作った面を返す(ベクタータイルの海面が、破棄されたかを後で確認するため)
 }
 // タイルに一度でも海面を試みたら(coastlineが無く何もしなかった場合も含め)二度と再試行しない
 // —— coastlineの位置は実データなので、同じタイルへ何度到着しても結果は変わらない。
@@ -1009,7 +1009,30 @@ function _fillCoastlineTile(tx, tz, seaY) {
 // _fillCoastlineTileで判定する。batchKind==='building'はnatural=coastlineを含まないクエリ
 // なので何もしない(OSM_TILE_CLAUSES_BUILDING参照)。
 let _coastlineNoIdSeq = 0; // 通常のOverpass応答では起きないはずのel.id欠落用フォールバックキー
-function processCoastlineFill(elements, tileList) {
+// 【2026-11-10・B-2】ベクタータイル由来(vtSea=true)の海面は、ocean面そのもの('vt:sea'要素)を平らな海面として
+// 描き、下の50mセル塗りは行わない。セル塗りは「タイルを最初に判定した時点で届いていた海岸線」で海/陸を
+// 1回だけ決めるため、海岸線がタイル単位で少しずつ届くベクタータイルでは判定が欠け(海底の地形が見える帯)、
+// 岸がセルの階段状になっていた。海岸線(地形を海面下へ下げる判定などに使う)はこれまでどおり蓄える。
+const _vtSeaEntries = new Map(); // 'vt:sea'要素のID → 面(buildFixedFlatAreaPolyの戻り値)
+function _buildVtSea(elements, seaY) {
+  const xz = (g) => { const a = g.map(p => latLonToXZ(p.lat, p.lon)); if (a.length > 1 && a[0].x === a[a.length - 1].x && a[0].z === a[a.length - 1].z) a.pop(); return a; };
+  for (const el of elements) {
+    if (!el.tags || el.tags['vt:sea'] !== 'yes') continue;
+    const prev = _vtSeaEntries.get(el.id);
+    if (prev && !prev.dropped) continue;
+    let outer, holes = null;
+    if (el.type === 'relation') {
+      const om = el.members.find(m => m.role === 'outer');
+      if (!om) continue;
+      outer = xz(om.geometry);
+      holes = el.members.filter(m => m.role === 'inner').map(m => xz(m.geometry));
+    } else outer = xz(el.geometry);
+    if (outer.length < 3 || !areaPolyBudgetOK('sea')) continue;
+    const e = buildFixedFlatAreaPoly(outer, waterAreaMat, seaYOffset(), seaY, holes && holes.length ? holes : null);
+    if (e) _vtSeaEntries.set(el.id, e);
+  }
+}
+function processCoastlineFill(elements, tileList, vtSea) {
   if (!tileList || tileList.length === 0) return;
   if (tileList[0].kind === 'building') return;
   const CLOSE_EPS = 1; // 始点・終点がこの距離(m)以内なら閉じたリング(=島)とみなす
@@ -1025,6 +1048,7 @@ function processCoastlineFill(elements, tileList) {
     for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z); }
     const rec = { pts, minX, maxX, minZ, maxZ };
     const id = (el.id !== undefined && el.id !== null) ? el.id : ('noid_' + (_coastlineNoIdSeq++));
+    if (coastlineWayStore.has(id) || coastlineIslandStore.has(id)) continue; // 既に蓄えた海岸線(同じIDは同じ形)。作り直しを起こさない
     if (closed) {
       coastlineIslandStore.set(id, rec);
       newIsland++;
@@ -1040,6 +1064,11 @@ function processCoastlineFill(elements, tileList) {
   }
   if (_coastlineChainsDirty) rebuildCoastlineChains();
   const seaY = seaLevelY();
+  if (vtSea) {
+    _buildVtSea(elements, seaY);
+    for (const t of tileList) { seenCoastlineTiles.add(t.tx + ',' + t.tz); pendingCoastlineTiles.delete(t.tx + ',' + t.tz); }
+    return;
+  }
   for (const t of tileList) {
     if (seenCoastlineTiles.has(t.tx + ',' + t.tz)) continue;
     _fillCoastlineTile(t.tx, t.tz, seaY);
@@ -1087,6 +1116,7 @@ function dropAreaRecordsInTile(tx, tz, tileM) {
   for (const e of areaPolyMeshes) {
     if (inTile(e)) {
       if (e.mesh) { scene.remove(e.mesh); e.mesh.geometry.dispose(); e.mesh = null; } // matは共有なのでdisposeしない
+      e.dropped = true; // ベクタータイルの海面(_vtSeaEntries)は、これを見て再取得時に作り直す
       areaPolyRefund(e.areaKind); // 予算を返す(再取得でまた確保される)
       dropped++; continue;
     }

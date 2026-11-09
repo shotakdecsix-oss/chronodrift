@@ -123,7 +123,7 @@ function _vtGeom(end, s) {
   return parts;
 }
 // → { レイヤー名: [{ type(1点/2線/3面), props, parts }] }(wantのレイヤーだけ)
-const _VT_AUX_LAYERS = new Set(['transportation', 'waterway', 'building']);
+const _VT_AUX_LAYERS = new Set(['transportation', 'waterway', 'building', 'water']);
 function _vtDecode(buf, want) {
   want = want || VT_LAYERS;
   _vb = buf; _vp = 0;
@@ -275,6 +275,7 @@ function _vtCtx(x, y) {
     x, y, gx0: x * VT_E, gy0: y * VT_E, clip: [],
     mpu: 40075016.686 * Math.cos(latC * Math.PI / 180) / (VT_N * VT_E), // 1ローカル単位のメートル
     id: () => base + (seq++), mid: (k) => base + 900000 + k,
+    cid: (k) => base + 800000 + k, // 海岸線・海面(隣接タイルの補完でも同じIDになるよう、他の要素と別の連番)
   };
 }
 
@@ -409,10 +410,28 @@ function _vtAreas(T, feats, mapFn, out, holes) {
     }
   }
 }
-function _vtCoast(T, feats, out) {
-  const emit = (pts) => { if (pts.length >= 4) out.push(_vtWay(T.id(), _vtG(T, pts), false, { natural: 'coastline' })); };
+// 海: ocean面から (1) 海面そのもの('vt:sea'、タイル本体でクリップ。part4.js processCoastlineFill が平らな海面として描く)と
+// (2) 海岸線(natural=coastline。地形を海面下へ下げる判定など既存の海岸線処理が使う)を作る。
+// seaOut=null なら海岸線だけ(隣接タイルの補完用)。
+function _vtCoast(T, feats, coastOut, seaOut) {
+  let cseq = 0, sseq = 0;
+  const emit = (pts) => { if (pts.length >= 4) coastOut.push(_vtWay(T.cid(cseq++), _vtG(T, pts), false, { natural: 'coastline' })); };
   for (const f of feats) {
     if (f.type !== 3 || f.props.class !== 'ocean') continue;
+    T.hasSea = true;
+    if (seaOut) for (const poly of _vtPolys(f.parts)) {
+      const o = _vtClipRing(poly[0]);
+      if (!o || Math.abs(_vtArea(o)) < 16) continue;
+      const ow = _vtWay(T.cid(50000 + sseq++), _vtG(T, o), true, { 'vt:sea': 'yes' });
+      const members = [];
+      for (let k = 1; k < poly.length; k++) { // 穴=島
+        const h = _vtClipRing(poly[k]);
+        if (h && Math.abs(_vtArea(h)) >= 16) members.push({ type: 'way', role: 'inner', geometry: _vtWay(0, _vtG(T, h), true, null).geometry });
+      }
+      if (!members.length) { seaOut.push(ow); continue; }
+      members.unshift({ type: 'way', role: 'outer', geometry: ow.geometry });
+      seaOut.push({ type: 'relation', id: ow.id, tags: ow.tags, members, bounds: ow.bounds });
+    }
     for (const r of f.parts) {
       const n = r.length / 2;
       if (n < 3) continue;
@@ -657,7 +676,7 @@ async function _vtLoadBase(x, y) {
     _vtLines(T, L.transportation || [], _vtRoadTags, els, pieces);
     _vtLines(T, L.waterway || [], _vtWaterwayTags, els, pieces);
     _vtAreas(T, L.water || [], _vtWaterTags, els, true);
-    _vtCoast(T, L.water || [], els);
+    _vtCoast(T, L.water || [], els, els);
     _vtAreas(T, L.landcover || [], _vtLandcoverTags, els, false);
     _vtAreas(T, L.landuse || [], _vtLanduseTags, els, false);
     const grid = _vtPois(T, L.poi || [], els);
@@ -665,26 +684,27 @@ async function _vtLoadBase(x, y) {
     vtStats.bytes += res.data.length;
   }
   vtStats.tiles++; vtStats.fetchMs += t1 - t0; vtStats.convMs += performance.now() - t1;
-  return { T, els, pieces, bytes: res.data ? res.data.length : 0 };
+  return { T, els, pieces, coast: els.filter(e => e.tags && e.tags.natural === 'coastline'), bytes: res.data ? res.data.length : 0 };
 }
 // 隣接タイルの継ぎ目情報(境界をまたぐ建物の記録・橋/トンネル断片)だけを作る軽量版。
 // 本体のLRUへ入れないので、継ぎ目の確認のために変換済みタイルが押し出されることがない。
 async function _vtLoadAux(x, y) {
   const res = await _vtGetData(x, y);
-  const T = _vtCtx(x, y), pieces = [];
+  const T = _vtCtx(x, y), pieces = [], coast = [];
   if (res.data) {
     const L = _vtDecode(res.data, _VT_AUX_LAYERS);
     _vtLines(T, L.transportation || [], _vtRoadTags, null, pieces); // 要素のIDは本体変換と同じ順序で振られる
     _vtLines(T, L.waterway || [], _vtWaterwayTags, null, pieces);
+    _vtCoast(T, L.water || [], coast, null);
     _vtBuildings(T, L.building || [], null, null);
   }
   vtStats.aux++;
-  return { clip: T.clip, pieces };
+  return { clip: T.clip, pieces, coast };
 }
 const _vtAux = new Map();
 function _vtAuxOf(x, y) {
   const k = x + '/' + y, e = _vtTiles.get(k);
-  if (e) return e.baseP.then(b => ({ clip: b.T.clip, pieces: b.pieces })); // 変換済みならそれを使う
+  if (e) return e.baseP.then(b => ({ clip: b.T.clip, pieces: b.pieces, coast: b.coast })); // 変換済みならそれを使う
   let p = _vtAux.get(k);
   if (!p) {
     p = _vtLoadAux(x, y);
@@ -851,15 +871,27 @@ async function vtLoadBatch(bboxes, kind) {
       if (seen.has(el.id)) continue;
       const isB = !!(el.tags && el.tags.building);
       if ((kind === 'road' && isB) || (kind === 'building' && !isB)) continue;
-      const d = el.bounds;
-      if (!boxes.some(b => d.maxlat >= b[0] && d.minlat <= b[2] && d.maxlon >= b[1] && d.minlon <= b[3])) continue;
+      const d = el.bounds, isCoast = el.tags && el.tags.natural === 'coastline';
+      // 海岸線は範囲外でも全部渡す(海の判定は近くの海岸線が揃っている前提。既存の海岸線ストアがIDで重複排除する)
+      if (!isCoast && !boxes.some(b => d.maxlat >= b[0] && d.minlat <= b[2] && d.maxlon >= b[1] && d.minlon <= b[3])) continue;
       seen.add(el.id);
       out.push(el);
+    }
+    // 海に面したタイルなら、周囲1枚ぶんのタイルの海岸線も渡す(タイル境界で切れた海岸線の先が欠けたまま
+    // 海の判定・海底の地形処理が行われないように)
+    if (kind !== 'building' && [...union.values()].some(f => f.T.hasSea)) {
+      const ring = new Set();
+      for (const k of union.keys()) {
+        const [x, y] = k.split('/').map(Number);
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) { const nk = (x + dx) + '/' + (y + dy); if (!union.has(nk)) ring.add(nk); }
+      }
+      const more = await Promise.all([...ring].map(k => { const [x, y] = k.split('/').map(Number); return _vtAuxOf(x, y).then(a => a.coast, () => []); }));
+      for (const arr of more) for (const el of arr) if (!seen.has(el.id)) { seen.add(el.id); out.push(el); }
     }
     await _vtChains(out, union);
     _vtFailStreak = 0;
     _vtCredit();
-    return { elements: out };
+    return { elements: out, vt: true };
   } catch (e) {
     vtStats.fail++;
     vtStats.lastErr = String((e && (e.name === 'AbortError' ? 'timeout' : e.message)) || e).slice(0, 60);

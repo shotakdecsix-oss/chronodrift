@@ -568,7 +568,7 @@ function processTileData(data, tileCount, tileList) {
   });
   // 海(natural=coastline)。川ポリゴンと違いwayが多数のタイルを跨ぐため、way単位ではなく
   // タイル単位(tileList=このバッチが対象にした{tx,tz}群)で1回ずつ塗る(part4.js参照)。
-  if (typeof processCoastlineFill === 'function') processCoastlineFill(data.elements, tileList);
+  if (typeof processCoastlineFill === 'function') processCoastlineFill(data.elements, tileList, !!data.vt);
   // Buildings — 直接生成せずキューに積み、フレーム分割して生成する
   // (以前は1タイル分の建物を1フレームで同期生成し、大きなカクつきの原因だった)
   const _buildingStart8 = pendingBuildings.length; // このバッチで新規投入する分の開始位置(近傍優先ソート用)
