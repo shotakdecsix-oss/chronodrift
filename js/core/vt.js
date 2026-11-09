@@ -31,13 +31,19 @@ const VT_ON = (typeof location === 'undefined') || !/[?&]osm=overpass/.test(loca
 const VT_Z = 14, VT_N = 16384, VT_E = 4096;   // z14 / 2^14 / 座標は全レイヤーextent 4096基準に正規化
 const VT_TILEJSON_URL = 'https://tiles.openfreemap.org/planet';
 const VT_TPL_KEY = 'iseharaVtTpl', VT_TPL_TTL_MS = 6 * 3600 * 1000;
-const VT_FETCH_TIMEOUT_MS = 15000;
+const VT_FETCH_TIMEOUT_MS = 30000; // スマホは描画・変換でメインスレッドが詰まり応答処理が遅れるので長め
 const VT_LRU = 16, VT_LRU_BYTES = 6 * 1048576; // 変換済みタイルの保持上限(枚数/元データ量。東京駅級の密集地は1枚0.7MB→変換後数MB)
 const VT_AUX_MAX = 64;        // 隣接タイルの継ぎ目情報(建物断片・橋/トンネル断片だけ。小さい)の保持数
 const VT_BLDG_BUFFER = 64;    // OpenMapTiles(planetiler)のbuildingレイヤーのバッファ(4px=64/4096)
 const VT_LAYERS = new Set(['transportation', 'building', 'water', 'waterway', 'landcover', 'landuse', 'poi']);
-const vtStats = { batches: 0, tiles: 0, aux: 0, bytes: 0, fetchMs: 0, convMs: 0, fail: 0, fallback: 0, merged: 0, chains: 0 };
+const vtStats = { batches: 0, tiles: 0, aux: 0, bytes: 0, fetchMs: 0, convMs: 0, fail: 0, retry: 0, fallback: 0, merged: 0, chains: 0, lastErr: '' };
 let _vtDownUntil = 0, _vtFailStreak = 0;
+// 失敗したタイルはまずベクタータイルで取り直し、同じタイルで3回続けて失敗した時だけOverpassへ回す
+// (part8.js fetchOSMTileBatch)。Overpassは慢性的に混雑していて、すぐ切り替えるとかえって遅くなるため。
+const _vtTileFails = new Map();
+function vtUsable() { return VT_ON && Date.now() >= _vtDownUntil; }
+function vtNoteFail(k) { const n = (_vtTileFails.get(k) || 0) + 1; _vtTileFails.set(k, n); if (_vtTileFails.size > 4000) _vtTileFails.clear(); return n; }
+function vtNoteOk(k) { _vtTileFails.delete(k); }
 
 // ---------------------------------------------------------------- 取得
 let _vtTplP = null, _vtTplAt = 0;
@@ -847,10 +853,11 @@ async function vtLoadBatch(bboxes, kind) {
     return { elements: out };
   } catch (e) {
     vtStats.fail++;
-    if (++_vtFailStreak >= 3) {
-      _vtDownUntil = Date.now() + 5 * 60 * 1000;
+    vtStats.lastErr = String((e && (e.name === 'AbortError' ? 'timeout' : e.message)) || e).slice(0, 60);
+    if (++_vtFailStreak >= 8) { // 配信元の障害とみなす(単発の失敗はタイル単位の取り直しで吸収する)
+      _vtDownUntil = Date.now() + 60 * 1000;
       _vtFailStreak = 0;
-      console.warn('[vt] 3回連続で失敗したため5分間Overpassのみで取得します');
+      console.warn('[vt] 8回連続で失敗したため1分間Overpassのみで取得します');
     }
     console.warn('[vt] ベクタータイル取得失敗 → Overpassへフォールバック', e);
     return null;
@@ -873,5 +880,5 @@ function vtStatsText() { // 性能HUD(js/core/perf-hud.js)用
   if (!VT_ON) return 'vt off (Overpass)';
   const s = vtStats, n = s.tiles || 1;
   return `vt ${s.tiles}枚(+隣${s.aux}) ${(s.bytes / 1048576).toFixed(1)}MB 取得${(s.fetchMs / n).toFixed(0)}ms 変換${(s.convMs / n).toFixed(0)}ms` +
-    `  fb${s.fallback} 失敗${s.fail} 合成${s.merged} 継ぎ目${s.chains}`;
+    `  失敗${s.fail} 再試行${s.retry} Overpass${s.fallback} 合成${s.merged} 継ぎ目${s.chains}` + (s.lastErr ? `\nvt最後のエラー: ${s.lastErr}` : '');
 }

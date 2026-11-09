@@ -1144,17 +1144,30 @@ function rebuildRoadMesh(r) {
 // 後方に埋もれ、生成が追いつかず地形・建物の「端」に行き当たる不具合につながっていた。
 // バッチ全体を毎フレーム並べ替えるのはコストが大きいので、新規追加分(fromIdx以降)だけを
 // 1回だけ、そのバッチが積まれた直後にプレイヤー位置を中心とした近い順へ並べ替える。
+// 【2026-11-10・ユーザー要望】取得(タイル待ち行列)と描画(道路・建物の生成待ち)の優先度を
+// 「プレイヤー位置からの実効距離」に一本化する。近いほど先。移動中は進行方向の補正として
+// 実効距離 = 距離 × (1 − PRIORITY_FWD_BIAS × cos(進行方向とのなす角)) とし、前方を最大40%近く・
+// 後方を40%遠く扱う(停止中は純粋な距離)。進行方向はcheckOSMTiles(part8.js)が約0.5秒ごとに更新する。
+// 返り値は実効距離の2乗(並べ替えの比較用)。
+const PRIORITY_FWD_BIAS = 0.4;
+function priorityDist2(x, z) {
+  const dx = x - player.position.x, dz = z - player.position.z;
+  const d2 = dx * dx + dz * dz;
+  const ux = _osmMoveUx, uz = _osmMoveUz;
+  if ((!ux && !uz) || d2 < 1) return d2;
+  const f = 1 - PRIORITY_FWD_BIAS * (dx * ux + dz * uz) / Math.sqrt(d2);
+  return d2 * f * f;
+}
+// 【2026-11-10】比較のたびに座標オブジェクトを作っていた(要素数×logN回の生成)のを、
+// 要素ごとに1回だけ実効距離を計算してから並べ替える形にした(数万件の道路キューで重かった)。
 function sortNewEntriesByDistanceToPlayer(arr, fromIdx, getXZ) {
-  if (fromIdx >= arr.length) return;
-  const px = player.position.x, pz = player.position.z;
-  const tail = arr.splice(fromIdx);
-  tail.sort((a, b) => {
-    const pa = getXZ(a), pb = getXZ(b);
-    const da = (pa.x - px) * (pa.x - px) + (pa.z - pz) * (pa.z - pz);
-    const db = (pb.x - px) * (pb.x - px) + (pb.z - pz) * (pb.z - pz);
-    return da - db;
-  });
-  for (const t of tail) arr.push(t);
+  const n = arr.length - fromIdx;
+  if (n <= 1) return;
+  const keys = new Float64Array(n), idx = new Uint32Array(n);
+  for (let i = 0; i < n; i++) { const p = getXZ(arr[fromIdx + i]); keys[i] = priorityDist2(p.x, p.z); idx[i] = i; }
+  idx.sort((a, b) => keys[a] - keys[b]);
+  const tail = arr.slice(fromIdx);
+  for (let i = 0; i < n; i++) arr[fromIdx + i] = tail[idx[i]];
 }
 
 // ======= 道路メッシュ生成のフレーム分割 =======

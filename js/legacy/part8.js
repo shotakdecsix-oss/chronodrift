@@ -816,7 +816,35 @@ function processTileData(data, tileCount, tileList) {
 // キューに空きワーカー枠がある限り、並行してタイルを取得していく
 // (以前は1件処理→待機→次の1件、という完全直列で、高速移動時に描写エリアの
 //  拡大が追いつかなかった)
+// 【2026-11-10】取得済み・未処理のバッチ(ベクタータイル経路)。プレイヤーに一番近いものから
+// 1タスクに1バッチずつ処理する(間に描画フレームが入る)。溜まり過ぎたら新規取得を控える
+// (取得が処理を追い越して、もう遠くなったデータでメモリと処理時間を使わないように)。
+const OSM_READY_MAX = 6;
+const _osmReady = [];
+let _osmReadyTimer = 0;
+function osmReadyPush(batch, epoch, apply) {
+  _osmReady.push({ batch, epoch, apply });
+  if (!_osmReadyTimer) _osmReadyTimer = setTimeout(_osmReadyDrain, 0);
+}
+function _osmReadyDrain() {
+  _osmReadyTimer = 0;
+  for (let i = _osmReady.length - 1; i >= 0; i--) if (_osmReady[i].epoch !== osmEpoch) _osmReady.splice(i, 1); // ジャンプ前の分は捨てる
+  let bi = -1, bd = Infinity;
+  for (let i = 0; i < _osmReady.length; i++) {
+    for (const t of _osmReady[i].batch) {
+      const d = priorityDist2((t.tx + 0.5) * OSM_TILE_M, (t.tz + 0.5) * OSM_TILE_M);
+      if (d < bd) { bd = d; bi = i; }
+    }
+  }
+  if (bi >= 0) {
+    const it = _osmReady.splice(bi, 1)[0];
+    try { it.apply(); } catch (e) { console.error('[osm] タイルデータの処理に失敗', e); }
+  }
+  if (_osmReady.length) _osmReadyTimer = setTimeout(_osmReadyDrain, 0);
+  processOSMTileQueue();
+}
 function processOSMTileQueue() {
+  if (_osmReady.length >= OSM_READY_MAX) return; // 処理待ちが溜まっている間は新規取得を控える(_osmReadyDrainが再開する)
   // 【2026-07-21】429/502/504のグローバル・クールダウン中は新規リクエストを一切出さない
   // (osmGlobalCooldownUntil参照。fetchOSMTileBatch側で設定)。クールダウン明けはcheckOSMTiles
   // の周期呼び出し(最大0.5秒後)で自然に再開する。
@@ -830,7 +858,9 @@ function processOSMTileQueue() {
   // fetchOSMTileBatch側のソート任せだが、_tileScoreがblockingを-100000で最優先にするため、
   // この条件下で起動される1本は実質そのblockingタイルになる(全てbackoff中なら
   // 下のhasEligible判定で何も起動せずに抜けるので無害)。
-  const _cooling = Date.now() < osmGlobalCooldownUntil;
+  // 【2026-11-10・B-2】Overpassの失敗で入るクールダウンは、ベクタータイル取得中は無視する(取得先が別。
+  // 以前はOverpassへのフォールバックが1回失敗しただけで、待ち行列全体が最大120秒止まっていた)
+  const _cooling = Date.now() < osmGlobalCooldownUntil && !(typeof vtUsable === 'function' && vtUsable());
   if (_cooling) {
     if (osmTileActiveCount > 0) return; // 免除は1本だけ
     const _bp = 64;
@@ -1187,56 +1217,19 @@ async function fetchOSMTileBatch(opts) {
   // NEAR_TIER_R判定は「その場所が近いか」という位置の話なのでkindに関係なく位置キーのまま、
   // 失敗回数・backoff・待ち時間計測はkind別のtileStateKeyを使う。
   const _posKey = (t) => t.tx + ',' + t.tz;
+  // 【2026-11-10・ユーザー要望】優先度は「プレイヤー位置からの実効距離」に一本化(近いほど先。
+  // 移動中は前方を最大40%近く扱う。priorityDist2、part1.js。道路・建物の生成待ちも同じ式)。
+  // 足元(建物生成を直接ブロックしているタイル)だけは別格で最優先。以前の階層オフセットと
+  // エイジング(最大100)はOverpassが数分単位で遅れる前提の飢餓対策だったが、エイジングが距離を
+  // 上回り「遠くで長く待ったタイルが近いタイルより先」になる場面があった。ベクタータイル化で取得が
+  // 速くなり範囲外のタイルは待ち行列から外すようになったので、エイジングは同距離のタイブレーク
+  // (最大0.3タイル分)だけ残す。
   const _tileScore = (t) => {
-    const dx = t.tx + 0.5 - ptx, dz = t.tz + 0.5 - ptz;
-    const base = Math.abs(dx) + Math.abs(dz) - (dx * _osmMoveUx + dz * _osmMoveUz) * 0.8;
-    // 【2026-07-21・ユーザー報告】距離だけのスコアだと、プレイヤーが動き続ける限り新しく
-    // 近傍に入ってくるタイルが毎回優先され、外側のタイルが理論上いつまでも後回しにされる
-    // 「飢餓」が起きうる(実機ログで、あるタイルが8分近くfetchingのまま一度も取得を
-    // 試みられていないことを確認)。
-    // 【2026-07-21・ユーザー指摘で修正】最初の実装はエイジング・ボーナスが階層(最優先/近傍/
-    // それ以外)を跨いで逆転しうる式になっており、「60秒待った遠方タイル」が「待ち時間0の
-    // 近傍タイル」より優先されてしまっていた。これは近傍優先という設計の趣旨に反する
-    // (体感を左右するのは常に近傍なので、そこは待ち時間に関わらず最優先であるべき)。
-    // 階層そのものを大きく離れたオフセット(0 / -10000 / -100000)で分離し、エイジングは
-    // 「同じ階層内でのタイブレーク」だけに使う(最大でも100。階層間の10000ギャップより
-    // 十分小さく、階層を跨いでの逆転は起こり得ない)。これにより、外側タイル同士の中で
-    // 「一番待たされている物」が優先されるようになり(=特定タイルだけが恒常的に
-    // 後回しにされ続ける飢餓は解消)、近傍優先の原則自体は変えない。
+    const d = Math.sqrt(priorityDist2((t.tx + 0.5) * OSM_TILE_M, (t.tz + 0.5) * OSM_TILE_M)) / OSM_TILE_M;
     const waitedMs = Date.now() - (osmTileQueuedAt.get(tileStateKey(t.tx, t.tz, t.kind)) || Date.now());
-    const agingTiebreak = Math.min(100, waitedMs / 600); // 60秒で頭打ち、最大100(階層間ギャップ10000より十分小さい)
-    if (_blockingTiles.has(_posKey(t))) return base - agingTiebreak - 100000; // 建物生成を直接ブロックしている分は最優先
-    // 【2026-07-27・IMPL_PROMPT_20260726 修正5】建物後追いジョブ(kind='building')は、
-    // 投入された時点で既に道路確定済みだった元近傍タイル(=有限集合、無制限には増えない)。
-    // 以前は下のNEAR_TIER_R距離判定の中でしか近傍tierオフセットを付けていなかったため、
-    // プレイヤーが移動してそのタイルが現在の近傍圏外に出るとオフセット0(外周tier)に落ち、
-    // 恒久的に後回しにされていた(「緑緑赤」の一因)。距離に関係なく常に近傍tier「帯」の
-    // オフセットで扱う(blocking(-100000)より上には行かないため現在地優先は崩れない)。
-    // 【2026-07-27・ユーザー判断】ただし同じ近傍帯の中では「まだ道路すら取れていない
-    // 新しいタイル」を「既に道路が終わって建物だけ残っているタイル」より先に処理する方針に
-    // 変更(Step Aで建物ジョブが消えて二度と来なくなるバグは修正済みのため、建物を
-    // 多少後回しにしても迷子になるリスクは無い)。
-    // 【2026-07-27・ユーザー報告「tier2緑緑赤・tier3緑緑黄で順序が前後」への対応】
-    // 従来はtier2(分離ゾーン、NEAR_SPLIT_TIER_R=1、3x3)とtier3(NEAR_TIER_R=2、5x5の
-    // 残り16枚)を同じ-10000帯にまとめていた。tier3は道路・建物が分離されておらず1回の
-    // クエリで同時に届くため、そのクエリが完了すると「tier2はまだ道路のみ・建物追いかけは
-    // 後回し」の状態を追い越して先にtier3の建物が仕上がる、という近さの逆転が起きていた
-    // (agingTiebreak(最大100)がtier2/tier3間の生の距離差(1〜2程度)よりずっと大きく、
-    // 待ち時間次第で簡単に逆転しうる点も一因)。tier2(分離ゾーン、道路・建物ジョブとも)と
-    // tier3(複合クエリ)を別帯に分離し、両者の差(1000)をagingTiebreak上限(100)より
-    // 十分大きく取ることで、待ち時間に関わらずtier2がtier3を追い越さないようにする。
-    // 【2026-07-26・ユーザー判断で道路優先(+80)を撤廃】進行方向前方の建物生成が
-    // 体感で遅れるという報告を受け、tier2帯内では道路とbuildingを同列(オフセット無し)に
-    // 戻す。移動し続けると新しく近傍に入るtileの道路要求が絶え間なく割り込み、少し後ろの
-    // 「道路済み・建物待ち」タイルが繰り返し追い越されて建物だけ遅延する副作用があった。
-    if (t.kind === 'building') return base - agingTiebreak - 10000; // tier2帯内、道路と同列
-    if (Math.abs(t.tx - _pTileX) <= NEAR_SPLIT_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_SPLIT_TIER_R) return base - agingTiebreak - 10000; // tier1+2(分離ゾーン)
-    if (Math.abs(t.tx - _pTileX) <= NEAR_TIER_R && Math.abs(t.tz - _pTileZ) <= NEAR_TIER_R) return base - agingTiebreak - 9000; // tier3(複合クエリ)。tier2より明確に一段下
-    return base - agingTiebreak;
+    const sc = d - Math.min(0.3, waitedMs / 200000);
+    return _blockingTiles.has(_posKey(t)) ? sc - 100000 : sc;
   };
-  // 【2026-07-17・Fable5診断】距離だけでなく、backoff中(osmTileNextRetryAtが未来)の
-  // タイルは近さに関係なく後ろへ回す。以前は「近い順」だけだったため、直近で失敗した
-  // 近傍タイルが再試行間隔を無視して毎回先頭に来て連打されてしまっていた。
   const _now = Date.now();
   const _tileKey = (t) => tileStateKey(t.tx, t.tz, t.kind);
   osmTileQueue.sort((a, b) => {
@@ -1500,20 +1493,41 @@ async function fetchOSMTileBatch(opts) {
     // 失敗したバッチだけ下の従来経路(IndexedDBキャッシュ→Overpass)へフォールバックする。
     // OverpassのIndexedDBキャッシュは参照しない(取得元が違う要素はIDが一致せず二重描画になるため)。
     // 切り戻しは ?osm=overpass。
-    if (typeof vtLoadBatch === 'function' && VT_ON) {
+    if (typeof vtLoadBatch === 'function' && vtUsable()) {
       const _vt = await vtLoadBatch(bboxes, batchKind);
       if (_vt) {
-        if (myEpoch === osmEpoch) { // await中にマップジャンプしていたら捨てる(キャッシュヒット経路と同じ)
-          processTileData(_vt, batch.length, batch.map(t => ({ tx: t.tx, tz: t.tz, kind: batchKind })));
-          for (let i = 0; i < batch.length; i++) markTileSuccess(keys[i], stateKeys[i], batchKind);
+        stateKeys.forEach(k => vtNoteOk(k));
+        // 【2026-11-10】届いたデータはすぐには処理せず「処理待ち」に入れ、プレイヤーに一番近い
+        // バッチから1つずつ処理する(osmReadyPush)。同時に複数届いた時に遠いタイルの処理で足元が
+        // 待たされず、1バッチごとに描画フレームを挟めるのでカクつきも減る。
+        // await中にマップジャンプしていたら捨てる(キャッシュヒット経路と同じ)。
+        if (myEpoch === osmEpoch) osmReadyPush(batch, myEpoch, () => {
+          try {
+            processTileData(_vt, batch.length, batch.map(t => ({ tx: t.tx, tz: t.tz, kind: batchKind })));
+          } finally { // 例外でも取得済みにする(未処理のまま「取得中」で止まり続けないように)
+            for (let i = 0; i < batch.length; i++) markTileSuccess(keys[i], stateKeys[i], batchKind);
+          }
           if (awaitingDestinationLoad && osmTilesReadyAround(player.position.x, player.position.z, 64)) {
             awaitingDestinationLoad = false;
             showToast(t('mapShownToast'), { duration: 3000 });
           }
-        }
+        });
         clearTimeout(timeoutId);
         _releaseMainSlot();
         processOSMTileQueue();
+        return;
+      }
+      // 【2026-11-10】失敗: まずベクタータイルで取り直す(少し間を置いて待ち行列へ戻す)。
+      // 同じタイルで3回続けて失敗した時だけ下のOverpass経路へ回す。
+      if (myEpoch !== osmEpoch) { clearTimeout(timeoutId); _releaseMainSlot(); return; } // ジャンプ済み
+      const _vtFails = stateKeys.map(k => vtNoteFail(k));
+      if (_vtFails.every(n => n < 3)) {
+        vtStats.retry++;
+        const _retryAt = Date.now() + 1500;
+        batch.forEach((t, i) => { osmTileNextRetryAt.set(stateKeys[i], _retryAt); osmTileQueue.push(t); });
+        clearTimeout(timeoutId);
+        _releaseMainSlot();
+        setTimeout(() => processOSMTileQueue(), 1600);
         return;
       }
       vtStats.fallback++;
@@ -1912,6 +1926,10 @@ function checkOSMTiles() {
   // 進行方向の追加先読み(下)は従来どおり効くため、移動中の端到達も従来と変わらない。
   // 先読み半径はパフォーマンス設定に連動(標準2=5×5。高品質は3=7×7で実建物4200mをカバー)
   const _pfR = PERF.prefetchR;
+  // 進行方向の先読み(タイル数)。【2026-11-10】鳥モードは以前 6×3=18枚(約29km)先まで積んでおり、
+  // 向きを変えるたびに数十枚ずつ増えて待ち行列が1000枚を超えていた(iPhone実測 tileQ 1007)。
+  // ベクタータイルは1枚1〜2秒で届くので9枚(約14km)で足りる。
+  const _osmFwdKMax = birdMode ? 9 : 6;
   for (let dx = -_pfR; dx <= _pfR; dx++)
     for (let dz = -_pfR; dz <= _pfR; dz++)
       queueTile(px + dx * OSM_TILE_M, pz + dz * OSM_TILE_M);
@@ -1929,12 +1947,36 @@ function checkOSMTiles() {
     // BIRDモード中は先読み距離(k上限)も同じ倍率で伸ばし、猶予時間を通常時と揃える
     // (幅=s方向は変えない。奥行きだけ伸ばせば十分なため)。遠方タイルはtier4扱いで
     // ベストエフォートに回るだけなので、キュー自体が伸びても既存の優先度設計は壊れない。
-    const _fwdKMax = birdMode ? 6 * BIRD_SPEED_MULT : 6;
+    // 【2026-11-10】上の延長(6×3=18枚)はOverpass時代の取得遅延が前提。ベクタータイル化で1枚1〜2秒に
+    // なった一方、先読みし過ぎた分の変換・生成処理がメインスレッドを奪い足元が遅れるようになったため、
+    // 9枚に縮めた(_osmFwdKMax、上で定義)。通り過ぎたタイルは関数末尾で待ち行列から外す。
+    const _fwdKMax = _osmFwdKMax;
     for (let k = 3; k <= _fwdKMax; k++)
       for (let s = -1; s <= 1; s++)
         queueTile(px + (ux * k + perpx * s) * OSM_TILE_M, pz + (uz * k + perpz * s) * OSM_TILE_M);
   } else {
     _osmMoveUx = 0; _osmMoveUz = 0; // 停止中は方向バイアス無し(純粋な距離順)
+  }
+  // 【2026-11-10】通り過ぎた・向きを変えて外れたタイルを待ち行列から外す。以前は一度積んだタイルが
+  // 残り続け、もう要らない遠方タイルの取得・変換に処理時間を使って足元のタイルが待たされていた。
+  // 外したタイルは範囲に戻ればqueueTileが積み直す(取得済みの記録はそのまま)。
+  if (osmTileQueue.length > 0) {
+    const _keepR = _pfR + 1, _ux = _osmMoveUx, _uz = _osmMoveUz, _ptx = px / OSM_TILE_M, _ptz = pz / OSM_TILE_M;
+    let _w = 0;
+    for (let i = 0; i < osmTileQueue.length; i++) {
+      const t = osmTileQueue[i];
+      let keep = Math.max(Math.abs(t.tx - _qPTileX), Math.abs(t.tz - _qPTileZ)) <= _keepR;
+      if (!keep && (_ux || _uz)) {
+        const dx = t.tx + 0.5 - _ptx, dz = t.tz + 0.5 - _ptz;
+        const along = dx * _ux + dz * _uz, side = Math.abs(-dx * _uz + dz * _ux);
+        keep = along > 0 && along <= _osmFwdKMax + 1.5 && side <= 2;
+      }
+      if (keep) { osmTileQueue[_w++] = t; continue; }
+      const _pk = t.tx + ',' + t.tz;
+      if (t.kind === 'building') buildingQueuedTiles.delete(_pk); else queuedTiles.delete(_pk);
+      osmTileQueuedAt.delete(tileStateKey(t.tx, t.tz, t.kind));
+    }
+    osmTileQueue.length = _w;
   }
   if (osmTileQueue.length > 0) processOSMTileQueue(); // 空きワーカー枠がある分だけ内部で処理される
 }

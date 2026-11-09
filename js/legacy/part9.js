@@ -21,6 +21,7 @@ let _forestBX = Infinity, _forestBZ = Infinity;
 // 常にプレイヤーの現在地に近い建物・道路から生成されるようにする。
 let _buildingSortFrame = 0;
 let _roadSortFrame = 0;
+let _lastRoadSortT = 0, _lastBldgSortT = 0; // 【2026-11-10】並べ替えは0.5秒ごと(フレーム数基準だとiPhoneの低fps時に2秒近く空いていた)
 // 【2026-07-21・ユーザー要望】建物生成が「データ取得待ち」なのか「取得後の生成処理待ち」
 // なのかを切り分けるための計測。exploreOnUpdate内の建物生成ループ(下記)で、1件処理する
 // たびにどの分岐を通ったかをカウントし、updateDebugTileOverlayの定期ログでまとめて出す
@@ -1028,7 +1029,8 @@ function animate() {
   // 保っているので、fromIdx=0でまるごと並べ直せばよい(pendingBuildingsのような
   // インデックスカーソル管理が不要な分、建物より単純)。
   _roadSortFrame++;
-  if (_roadSortFrame % 30 === 0) {
+  if (performance.now() - _lastRoadSortT > 500) {
+    _lastRoadSortT = performance.now();
     sortNewEntriesByDistanceToPlayer(pendingRoadMeshes, 0, r => ({ x: (r.x1 + r.x2) / 2, z: (r.z1 + r.z2) / 2 }));
   }
   if (!_freezeWorld) processRoadMeshQueue(); // 道路メッシュもフレーム分割(密集タイル到着時のフリーズ防止)
@@ -1053,7 +1055,8 @@ function animate() {
   // 毎フレームやると要素数が多い時にソート自体が重くなるため、~30フレーム(0.5秒)おきに
   // 留める(その程度の遅延なら「常に一番近い建物から出る」体感には十分)。
   _buildingSortFrame++;
-  if (_buildingSortFrame % 30 === 0) {
+  if (performance.now() - _lastBldgSortT > 500) {
+    _lastBldgSortT = performance.now();
     // 【2026-07-20・タブクラッシュ調査】pendingBuildingIdxは処理済み分を「読み飛ばす」
     // カーソルなだけで、配列からは一切取り除いていなかった。配列全体が空になってidx===
     // lengthになった時だけ丸ごとpendingBuildings.length=0にリセットされる(下の488行目)が、
