@@ -1266,6 +1266,7 @@ function animate() {
 
   if (typeof bbUpdate === 'function') bbUpdate(); // 建物のまとめ描画: セルのカリングと属性の転送
   if (typeof rbUpdate === 'function') rbUpdate(); // 道路のまとめ描画: 変化したセルの再結合(近い順・予算内)
+  if (typeof WATER_U !== 'undefined') WATER_U.uWTime.value = t; // 水面の揺らぎ(part4.js)
   if (!_freezeRender) renderer.render(scene, camera); // 二分探索用(window.freezeRender)
   drawMinimap();
   updateGPS(t);

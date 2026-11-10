@@ -308,6 +308,43 @@ const waterAreaMat = new THREE.MeshBasicMaterial({
   color: MODE_CONF.water, side: THREE.DoubleSide,
   polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8,
 });
+// 【2026-11-10・D-3(軽量版)、ユーザー報告「海の色が青じゃない」】水面(海・川・池の面と水路の帯)の見た目。
+// 以前は単色(MODE_CONF.water)の無照明マテリアルで、濃い霧(FogExp2)にそのまま溶けて少し離れた海が灰色に
+// 見え、夜も昼と同じ色のままだった。
+//  - 水の色を時刻で変える(夜は暗く。applyTimeOfDay(part1.js)が _applyWaterTime を呼ぶ)
+//  - 視線が浅い(遠い)ほど空の明るい青を映す(フレネル近似)。細かな揺らぎが時間で動く(uWTime、part9.js)
+//  - 霧の効きを陸の45%にする(遠くの海も青みが残る)
+// 色はmaterial.colorではなく共有uniformで決める(水路の帯 ROAD_MAT.water にも同じ処理を掛け、境目を出さない)。
+const WATER_FOG_K = 0.45;
+const WATER_U = { uWDeep: { value: new THREE.Color(MODE_CONF.water) }, uWSky: { value: new THREE.Color(MODE_CONF.water) }, uWTime: { value: 0 } };
+function _applyWaterTime(night) {
+  const k = 1 - 0.5 * night;
+  WATER_U.uWDeep.value.setHex(MODE_CONF.water).multiplyScalar(k);
+  WATER_U.uWSky.value.setHex(MODE_CONF.water).lerp(new THREE.Color(0x5fb0ff), 0.55).multiplyScalar(k * (1 - 0.25 * night));
+}
+function _waterOnBeforeCompile(sh) {
+  sh.uniforms.uWDeep = WATER_U.uWDeep; sh.uniforms.uWSky = WATER_U.uWSky; sh.uniforms.uWTime = WATER_U.uWTime;
+  sh.vertexShader = sh.vertexShader
+    .replace('#include <common>', '#include <common>\nvarying vec3 vWPos;')
+    .replace('#include <project_vertex>', '#include <project_vertex>\n  vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+  sh.fragmentShader = sh.fragmentShader
+    .replace('#include <common>', '#include <common>\nvarying vec3 vWPos;\nuniform vec3 uWDeep;\nuniform vec3 uWSky;\nuniform float uWTime;')
+    .replace('vec4 diffuseColor = vec4( diffuse, opacity );', [
+      'vec3 _wv = normalize(cameraPosition - vWPos);',
+      'float _wf = pow(1.0 - clamp(abs(_wv.y), 0.0, 1.0), 3.0);',
+      'float _ww = sin(vWPos.x * 0.045 + uWTime * 0.7) * sin(vWPos.z * 0.06 - uWTime * 0.5) + 0.5 * sin((vWPos.x + vWPos.z) * 0.11 + uWTime * 1.1);',
+      'vec3 _wc = mix(uWDeep, uWSky, clamp(_wf * 0.5, 0.0, 1.0)) * (1.0 + _ww * 0.04);',
+      'vec4 diffuseColor = vec4( _wc, opacity );'].join('\n'))
+    // 霧は弱め、かつ霧の色を少し水の青へ寄せる(灰色に溶けて「青くない」と見えないように)
+    .replace('#include <fog_fragment>', THREE.ShaderChunk.fog_fragment.replace('fogColor, fogFactor )', 'mix(fogColor, uWSky, 0.4), fogFactor * ' + WATER_FOG_K.toFixed(2) + ' )'));
+}
+waterAreaMat.onBeforeCompile = _waterOnBeforeCompile;
+waterAreaMat.customProgramCacheKey = () => 'water-v1';
+if (typeof ROAD_MAT !== 'undefined' && ROAD_MAT.water) {
+  ROAD_MAT.water.onBeforeCompile = _waterOnBeforeCompile;
+  ROAD_MAT.water.customProgramCacheKey = () => 'water-v1';
+}
+if (typeof applyTimeOfDay === 'function') applyTimeOfDay(); // 水の色を現在の時刻に合わせる
 const minimapWaterPolys = []; // ミニマップに描く実形状水面 {pts,minX,maxX,minZ,maxZ}
 const minimapWaterGrid = new Map(); // polyGridAdd/queryPolyGridで使う空間ハッシュ(全件走査を避ける)
 // 田畑: あぜ縞のcanvasテクスチャ(uv=世界座標なので repeat で約9m周期の縞になる)

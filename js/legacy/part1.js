@@ -697,6 +697,7 @@ function applyTimeOfDay() {
   const winLit = _winLitCurve(h); // 1=点灯(18時〜翌4時), 0=消灯(6時〜16時)
   // フォグは従来どおり星と同じnightカーブで薄める(遠景の窓明かりが霞まないように)。
   WORLD_FOG.density = BASE_FOG_DENSITY * (1 - night * 0.4);
+  if (typeof _applyWaterTime === 'function') _applyWaterTime(night); // 水面の色(part4.js、D-3)
   if (typeof facadeCache !== 'undefined') {
     // 【2026-07-25追加】史実では江戸・明治の夜は行灯・蝋燭程度の弱い明かりで、現代の
     // 電灯のように窓が煌々と光ることはなかった(ユーザーへの回答参照)。倍率自体も
