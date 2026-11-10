@@ -96,6 +96,7 @@ function establishRegionBase(raw) {
   terrainMaxH = 1; // 色の正規化基準もこの地域向けにリセット(updateFarMeshが再度積み上げる)
   regionBaseReady = true;
   if (seaMesh) setSeaLevel(); else initDistantSea(); // 初回はここでseaMeshを作る。2回目以降(地域移動)は高さだけ更新
+  if (typeof relevelSeaPolys === 'function') relevelSeaPolys(); // 基準標高より前に作った海面を新しい高さへ(part4.js)
 }
 
 // 【2026-07-17】sampleGridはjs/lib/pure.jsへ移動(CODE_REVIEW_20260717 P13-1)。

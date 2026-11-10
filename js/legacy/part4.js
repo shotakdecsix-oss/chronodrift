@@ -1113,6 +1113,21 @@ function _vtSeaAt(x, z) { // → true/false: 海面ポリゴンで判定 / null:
   }
   return false;
 }
+// 【2026-11-10・香港で報告「水の境界線がおかしい」】海面の高さ(seaLevelY = -elevBase×ELEV_SCALE)は、地域の基準標高
+// (elevBase。part6.js establishRegionBase)が決まると変わる。それより前に届いた海面は古い高さ(0)のまま作られ、地形の
+// 下に隠れていた(香港の実測: 海面20枚のうち11枚が16下。タイル単位で水が欠け、水の境界が四角い段になって見えた)。
+// 基準標高が決まったら、海面(高さ固定の面)を新しい高さで作り直す。
+function relevelSeaPolys() {
+  const y = seaLevelY();
+  let n = 0;
+  for (const e of areaPolyMeshes) {
+    if (e.fixedY == null || e.fixedY === y) continue;
+    e.fixedY = y; n++;
+    if (e.mesh) { scene.remove(e.mesh); e.mesh.geometry.dispose(); e.mesh = null; _instantiateAreaPolyMesh(e); }
+  }
+  if (n) { coastlineVersion++; _seaMeshDirty = true; console.log('[sea] 基準標高の確定に合わせて海面' + n + '枚の高さを直した'); }
+  return n;
+}
 function _buildVtSea(elements, seaY) {
   const xz = (g) => { const a = g.map(p => latLonToXZ(p.lat, p.lon)); if (a.length > 1 && a[0].x === a[a.length - 1].x && a[0].z === a[a.length - 1].z) a.pop(); return a; };
   for (const el of elements) {
