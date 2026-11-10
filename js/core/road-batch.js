@@ -33,6 +33,7 @@ class RBPart extends THREE.Object3D {
     this.material = mat;
     this._cx = cx; this._cz = cz;
     this._grp = null;
+    this.isRBPart = true;
     this.matrixAutoUpdate = false;
     this.addEventListener('added', () => _rbAttach(this));
     this.addEventListener('removed', () => _rbDetach(this));

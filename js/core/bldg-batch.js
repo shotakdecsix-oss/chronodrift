@@ -103,6 +103,12 @@ function _bbTemplate(p, key) {
   return t;
 }
 
+// 【2026-11-10・H-1】外形ポリゴンの建物(part3.js _addPolyBody。road-batchで結合する固有形状)用の外壁マテリアル。
+// 箱の建物のインスタンス版と同じもの(列数・階数・壁色・建物位置は頂点属性aObj/aColで渡す)
+function bbFacadeTpl(kind) {
+  const key = 'F:' + kind;
+  return _bbTplMats.get(key) || _bbTemplate({ material: { userData: { facadeV2: true, kind, doorOnce: kind === 'house' || kind === 'apt' } } }, key);
+}
 function _bbBaseGeo(p) {
   const isF = !!(p.material.userData && p.material.userData.facadeV2);
   const gk = isF ? 'F' : p.geometry.uuid;

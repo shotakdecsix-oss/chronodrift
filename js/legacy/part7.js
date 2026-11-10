@@ -961,7 +961,11 @@ function drawMinimap() {
     if (Math.abs(b.x - px) > R || Math.abs(b.z - pz) > R) continue;
     const c = toMap(b.x, b.z);
     const bw = b.w * scale, bd = b.d * scale;
-    if (b.rot) {
+    if (b.poly) { // H-1 外形ポリゴンの建物は実際の形で
+      mctx.beginPath();
+      for (let i = 0; i < b.poly.length; i++) { const q = toMap(b.poly[i].x, b.poly[i].z); if (i) mctx.lineTo(q.mx, q.my); else mctx.moveTo(q.mx, q.my); }
+      mctx.fill();
+    } else if (b.rot) {
       // 【2026-07-16】3D側は回転外接矩形+メッシュ回転になったため(part8/part3)、
       // ミニマップも同じ向きで描かないと実際の街並みと食い違う。
       // world→canvasはtoMapの平行移動+スケールのみ(北固定)なので、canvas回転角は-rot。
@@ -1487,6 +1491,7 @@ const playerRadius = 0.25; // small radius so player fits on narrow roads
 // プレイヤー座標を建物ローカル系へ逆回転して軸平行判定(円vs矩形近似)。
 // これで斜め向きのビルも見た目どおりの壁位置で当たる。
 function collBoxHitsXZ(box, x, z, r) {
+  if (box.poly) return polyHitXZ(box.poly, x, z, r); // H-1 外形ポリゴンの建物(part3.js)
   if (box.cx === undefined) { // 回転の無い従来ボックス
     return x + r > box.min.x && x - r < box.max.x && z + r > box.min.z && z - r < box.max.z;
   }

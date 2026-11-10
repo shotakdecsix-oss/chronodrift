@@ -626,6 +626,8 @@ function processTileData(data, tileCount, tileList) {
     let w = Math.max(_maxU - _minU, 2), d = Math.max(_maxV - _minV, 2);
     // three.jsのrotation.y(+Xから-Z方向が正)に合わせて符号反転して保持
     const bRot = -_ang;
+    // 【2026-11-10・H-1】長方形から大きく外れる外形は、外形ポリゴンのまま立ち上げる(part3.js h1Footprint/addBuilding)
+    const _poly = (MODE === 'real' && !isCampusOnly && !isStadiumOnly) ? h1Footprint(pts, w * d) : null;
     if (isCampusOnly) { w = Math.min(w, 34); d = Math.min(d, 22); } // 敷地全体でなく校舎サイズに収める
     let style = getBuildingStyle(tags);
     if (MODE === 'edo' && shouldSkipEdoBuilding(style)) return; // 江戸: 現代の建物密度をそのまま使わず間引く
@@ -663,6 +665,7 @@ function processTileData(data, tileCount, tileList) {
     // 【2026-11-10・H-2】下端が地面から浮いている部品(building:partの min_height。ベクタータイル由来)
     const _minH = parseFloat(tags.min_height) || 0;
     if (_minH > 0 && _minH < fh - 1) realRec.minH = _minH;
+    if (_poly) realRec.poly = _poly;
     // 【2026-07-28・静止していても落ちる不具合の主因】以前はタイルから取れた実建物を
     // 距離に関係なく全部pendingBuildingsへ積んでいた。密集地(東京)では取得半径内に
     // 15万件以上あるのに、生成距離(BUILDING_GEN_DIST_REAL)の中に入れるのは2万件程度。

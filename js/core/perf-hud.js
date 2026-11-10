@@ -34,6 +34,7 @@
        (typeof buildingRecords !== 'undefined') ? `bldg ${buildingRecords.length}` : ''].filter(Boolean).join('  '),
       (typeof bbStats === 'function') ? bbStats() : '',
       (typeof rbStats === 'function') ? rbStats() : '',
+      (typeof signsStats === 'function') ? signsStats() : '',
       (typeof vtStatsText === 'function') ? vtStatsText() : '',
     ].filter(Boolean).join('\n');
   }

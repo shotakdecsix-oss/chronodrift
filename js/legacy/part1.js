@@ -849,7 +849,7 @@ function removeBuildingsOverlappingRoad(r) {
       removeIds.add(rec.bid);
       if (rec.real) {
         pendingBuildings.push({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h,
-          style: rec.style, real: true, rot: rec.rot, minH: rec.minH }); // _fit無し→再fitされる
+          style: rec.style, real: true, rot: rec.rot, minH: rec.minH, poly: rec.poly, name: rec.pn, kind: rec.pk }); // _fit無し→再fitされる
       }
     }
   }
@@ -1559,7 +1559,11 @@ function rebuildBuildingHeight(rec) {
   const newGy = Math.min(...hs);
   const delta = newGy - rec.gy;
   if (Math.abs(delta) < 0.05) return; // 誤差レベルは無視(毎回全建物を動かさない)
-  for (const p of rec.parts) { if (p) p.position.y += delta; }
+  for (const p of rec.parts) {
+    if (!p) continue;
+    if (p.isRBPart) { p.geometry.translate(0, delta, 0); p.geometry = p.geometry; } // H-1: ワールド座標の結合形状(road-batch)は形状ごと動かす
+    else p.position.y += delta;
+  }
   if (typeof bbSync === 'function') bbSync(rec.parts);
   if (rec.cbox) { rec.cbox.min.y += delta; rec.cbox.max.y += delta; }
   rec.gy = newGy;
@@ -1689,7 +1693,8 @@ function unloadFarBuildings(force) {
     // 再接近時に復元できるよう、軽量な記述だけdormantBuildingsへ(すでに
     // BUILDING_UNLOAD_DIST > BUILDING_GEN_DIST の外なので、そのままpendingBuildingsへ
     // 戻すと次のフレームで即dormantへ送り返されるだけの無駄が発生する)。
-    dormantAdd({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h, style: rec.style, real: rec.real, rot: rec.rot });
+    dormantAdd({ x: rec.x, z: rec.z, w: rec.w, d: rec.d, h: rec.h, style: rec.style, real: rec.real, rot: rec.rot,
+                 minH: rec.minH, poly: rec.poly, name: rec.pn, kind: rec.pk }); // 再接近時も同じ形・名前で(以前はminH・名前が落ちていた)
   }
   _freedThisCycle = removeIds.size; // 【2026-07-21・Fable5診断】このサイクルの実解放件数を記録
   _bgEvicted += removeIds.size; // part9.js側の[buildgen]ログ用(2秒累計、ヒストグラム縮小の発火確認)

@@ -1193,7 +1193,7 @@ function animate() {
       if (_f.drop) continue; // 縮小しても線路に被る建物(線路またぎ)は生成しない
       b.w = _f.w; b.d = _f.d; b._fit = 1;
     }
-    if (b.real || !isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style, b.real, b.rot, b.name, b.kind, b.minH);
+    if (b.real || !isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style, b.real, b.rot, b.name, b.kind, b.minH, b.poly);
     _bgGenerated++;
   }
   if (pendingBuildingIdx > 0 && pendingBuildingIdx === pendingBuildings.length) {
@@ -1266,6 +1266,7 @@ function animate() {
 
   if (typeof bbUpdate === 'function') bbUpdate(); // 建物のまとめ描画: セルのカリングと属性の転送
   if (typeof rbUpdate === 'function') rbUpdate(); // 道路のまとめ描画: 変化したセルの再結合(近い順・予算内)
+  if (typeof signsUpdate === 'function') signsUpdate(); // H-7 店名の看板のアトラス転送
   if (typeof WATER_U !== 'undefined') WATER_U.uWTime.value = t; // 水面の揺らぎ(part4.js)
   if (!_freezeRender) renderer.render(scene, camera); // 二分探索用(window.freezeRender)
   drawMinimap();

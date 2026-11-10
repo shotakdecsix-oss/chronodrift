@@ -290,8 +290,157 @@ function _roofRise(minWD, cprof, rnd) {
 // 正面(ローカル+z)を最寄りの道路へ向けるための90°回転数(0〜3)。線路・水路・高速道路は対象外
 const FRONT_TYPES = new Set(['default', 'house', 'shop', 'apartment', 'office', 'industrial']);
 const _FRONT_SKIP = new Set(['railway', 'water', 'motorway']);
-function _frontTurns(x, z, w, d, rot) {
-  const R = Math.max(w, d) / 2 + 30;
+// 【2026-11-10・H-1】外形ポリゴンで建物を立ち上げる(実際の外形がL字・コの字・台形・角の欠けた形など、
+// 長方形から大きく外れる実建物だけ)。以前は全ての実建物を外接矩形(OBB)の箱で描いていたため、こうした建物は
+// 実際より大きな箱になり、隣の建物や道路に食い込んでいた。
+// 形が建物ごとに違うのでインスタンス化はできず、道路と同じセル単位の結合(road-batch.js)で描く。外壁は箱の建物と
+// 同じシェーダー・同じアトラス(bldg-batch.jsのテンプレートマテリアル)で、列数・階数・壁色・建物位置は頂点属性で渡す。
+// 屋根は陸屋根+パラペット。切り戻し: URLに ?noh1=1
+const H1_ON = !/[?&]noh1=1/.test(location.search);
+const H1_FILL_MAX = 0.85;        // 外接矩形に対する面積の充填率がこれ未満なら外形ポリゴンで立ち上げる
+const H1_HOUSE_MIN_AREA = 250;   // 住宅(勾配屋根の箱)はこの面積(m²)以上の大きい建物だけ外形で立ち上げる
+const H1_PARAPET = 0.9;
+// part8.js(タイル到着時)から: 外形リング(閉じ点・ほぼ重複・ほぼ一直線の頂点を除いたもの)。長方形に近ければnull
+function h1Footprint(pts, obbArea) {
+  if (!H1_ON || !pts || pts.length < 4 || !(obbArea > 0)) return null;
+  let P = pts.slice();
+  const f = P[0], l = P[P.length - 1];
+  if (Math.abs(f.x - l.x) < 0.05 && Math.abs(f.z - l.z) < 0.05) P.pop();
+  for (let pass = 0; pass < 2 && P.length >= 3; pass++) {
+    const Q = [];
+    for (let i = 0, n = P.length; i < n; i++) {
+      const a = Q.length ? Q[Q.length - 1] : P[(i + n - 1) % n], b = P[i], c = P[(i + 1) % n];
+      const ux = b.x - a.x, uz = b.z - a.z, vx = c.x - b.x, vz = c.z - b.z;
+      const lu = Math.hypot(ux, uz), lv = Math.hypot(vx, vz);
+      if (lu < 0.3) continue;                                       // ほぼ重複
+      if (lv > 0.01 && Math.abs(ux * vz - uz * vx) / (lu * lv) < 0.03 && ux * vx + uz * vz > 0) continue; // ほぼ一直線
+      Q.push(b);
+    }
+    P = Q;
+  }
+  if (P.length < 3) return null;
+  let A = 0;
+  for (let i = 0, n = P.length; i < n; i++) { const a = P[i], b = P[(i + 1) % n]; A += a.x * b.z - b.x * a.z; }
+  A = Math.abs(A) / 2;
+  if (A < 30 || A / obbArea >= H1_FILL_MAX) return null;
+  return P;
+}
+// 向きをそろえ(上から見て時計回り=外向き法線が(ez,-ex))、陸屋根の三角形分割を作る。自己交差などで外形と合わなければnull
+function _h1Triangulate(poly) {
+  let A = 0;
+  const n = poly.length;
+  for (let i = 0; i < n; i++) { const a = poly[i], b = poly[(i + 1) % n]; A += a.x * b.z - b.x * a.z; }
+  if (Math.abs(A) < 4) return null;
+  const P = A > 0 ? poly : poly.slice().reverse();
+  let tris;
+  try { tris = THREE.ShapeUtils.triangulateShape(P.map(p => new THREE.Vector2(p.x, p.z)), []); } catch (e) { return null; }
+  if (!tris || !tris.length) return null;
+  let sum = 0;
+  for (const t of tris) {
+    const a = P[t[0]], b = P[t[1]], c = P[t[2]];
+    const s = (b.x - a.x) * (c.z - a.z) - (c.x - a.x) * (b.z - a.z);
+    sum += Math.abs(s);
+    if (s > 0) { const k = t[1]; t[1] = t[2]; t[2] = k; } // 上向きの面(上から見て反時計回り)にそろえる
+  }
+  if (Math.abs(sum - Math.abs(A)) > Math.abs(A) * 0.05) return null;
+  return { P, tris };
+}
+function _polyEdgeDist2(P, x, z) {
+  let best = Infinity;
+  for (let i = 0, n = P.length; i < n; i++) {
+    const a = P[i], b = P[(i + 1) % n], dx = b.x - a.x, dz = b.z - a.z, L2 = dx * dx + dz * dz;
+    let t = L2 > 0 ? ((x - a.x) * dx + (z - a.z) * dz) / L2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const px = a.x + dx * t - x, pz = a.z + dz * t - z, d2 = px * px + pz * pz;
+    if (d2 < best) best = d2;
+  }
+  return best;
+}
+// 当たり判定(part7.js collBoxHitsXZ): 外形の内側か、外形の縁から半径r以内
+function polyHitXZ(P, x, z, r) {
+  return pointInPolygon(x, z, P) || _polyEdgeDist2(P, x, z) < r * r;
+}
+// 屋上設備を置ける点(面積重心と、重心から各頂点へ1/3の点のうち、外形の内側で縁から2.5m以上離れた所)
+function _h1RoofSpots(P, k) {
+  let A = 0, gx = 0, gz = 0;
+  for (let i = 0, n = P.length; i < n; i++) { const a = P[i], b = P[(i + 1) % n], cr = a.x * b.z - b.x * a.z; A += cr; gx += (a.x + b.x) * cr; gz += (a.z + b.z) * cr; }
+  if (Math.abs(A) < 1e-6) return [];
+  gx /= 3 * A; gz /= 3 * A;
+  const cand = [{ x: gx, z: gz }];
+  for (const p of P) cand.push({ x: gx + (p.x - gx) / 3, z: gz + (p.z - gz) / 3 });
+  const out = [];
+  for (const q of cand) {
+    if (out.length >= k) break;
+    if (!pointInPolygon(q.x, q.z, P) || _polyEdgeDist2(P, q.x, q.z) < 6.25) continue;
+    if (out.some(o => Math.abs(o.x - q.x) + Math.abs(o.z - q.z) < 5)) continue;
+    out.push(q);
+  }
+  return out;
+}
+// 外壁・パラペット・陸屋根を1つの形状にして結合描画へ。壁の役割(正面/裏/妻)は、壁の外向きと「最寄りの道路の方向」で
+// 決める(箱の建物の正面=道路側と同じ規則)。戻り値: いちばん長い正面の壁(店の看板用)
+function _addPolyBody(parts, pt, cx, cz, gy, h, kind, wallC, floors, tw, R) {
+  const P = pt.P, tris = pt.tris, n = P.length;
+  const rv = _nearestRoadVec(cx, cz, R);
+  let fx = 0, fz = 0;
+  if (rv) { const l = Math.hypot(rv.x, rv.z) || 1; fx = rv.x / l; fz = rv.z / l; }
+  const c = new THREE.Color(wallC);
+  const nV = n * 12 + n;
+  const pos = new Float32Array(nV * 3), nrm = new Float32Array(nV * 3), uv = new Float32Array(nV * 2);
+  const face = new Float32Array(nV * 3), obj = new Float32Array(nV * 4), col = new Float32Array(nV * 4);
+  const idx = [];
+  let v = 0, front = null;
+  const put = (x, y, z, nx, ny, nz, u, w, role, cols) => {
+    pos[v * 3] = x; pos[v * 3 + 1] = y; pos[v * 3 + 2] = z;
+    nrm[v * 3] = nx; nrm[v * 3 + 1] = ny; nrm[v * 3 + 2] = nz;
+    uv[v * 2] = u; uv[v * 2 + 1] = w;
+    face[v * 3] = role; face[v * 3 + 1] = cols; face[v * 3 + 2] = floors;
+    obj[v * 4] = cx; obj[v * 4 + 1] = cz; obj[v * 4 + 2] = cols; obj[v * 4 + 3] = cols;
+    col[v * 4] = c.r; col[v * 4 + 1] = c.g; col[v * 4 + 2] = c.b; col[v * 4 + 3] = floors;
+    return v++;
+  };
+  const top = gy + h, ptop = top + H1_PARAPET;
+  for (let i = 0; i < n; i++) {
+    const a = P[i], b = P[(i + 1) % n];
+    const ex = b.x - a.x, ez = b.z - a.z, L = Math.hypot(ex, ez);
+    if (L < 0.05) continue;
+    const nx = ez / L, nz = -ex / L;
+    const cs = rv ? nx * fx + nz * fz : 1;
+    const role = L < 1.2 ? 4 : cs >= 0.6 ? 0 : cs <= -0.6 ? 1 : 2;
+    const cols = Math.max(1, Math.round(L / tw));
+    if (role === 0 && (!front || L > front.len)) front = { mx: (a.x + b.x) / 2, mz: (a.z + b.z) / 2, nx, nz, len: L, yaw: Math.atan2(-ez, ex) };
+    // 外壁(外から見て左=b、右=a。u は左→右)
+    let i0 = put(a.x, gy, a.z, nx, 0, nz, 1, 0, role, cols), i1 = put(b.x, gy, b.z, nx, 0, nz, 0, 0, role, cols);
+    let i2 = put(b.x, top, b.z, nx, 0, nz, 0, 1, role, cols), i3 = put(a.x, top, a.z, nx, 0, nz, 1, 1, role, cols);
+    idx.push(i0, i3, i2, i0, i2, i1);
+    // パラペット(外側・内側とも無地)
+    i0 = put(a.x, top, a.z, nx, 0, nz, 0, 0, 4, 1); i1 = put(b.x, top, b.z, nx, 0, nz, 0, 0, 4, 1);
+    i2 = put(b.x, ptop, b.z, nx, 0, nz, 0, 0, 4, 1); i3 = put(a.x, ptop, a.z, nx, 0, nz, 0, 0, 4, 1);
+    idx.push(i0, i3, i2, i0, i2, i1);
+    i0 = put(a.x, top, a.z, -nx, 0, -nz, 0, 0, 4, 1); i1 = put(b.x, top, b.z, -nx, 0, -nz, 0, 0, 4, 1);
+    i2 = put(b.x, ptop, b.z, -nx, 0, -nz, 0, 0, 4, 1); i3 = put(a.x, ptop, a.z, -nx, 0, -nz, 0, 0, 4, 1);
+    idx.push(i0, i2, i3, i0, i1, i2);
+  }
+  const r0 = v;
+  for (const p of P) put(p.x, top, p.z, 0, 1, 0, 0, 0, 4, 1);
+  for (const t of tris) idx.push(r0 + t[0], r0 + t[1], r0 + t[2]);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos.slice(0, v * 3), 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(nrm.slice(0, v * 3), 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(uv.slice(0, v * 2), 2));
+  g.setAttribute('aFace', new THREE.BufferAttribute(face.slice(0, v * 3), 3));
+  g.setAttribute('aObj', new THREE.BufferAttribute(obj.slice(0, v * 4), 4));
+  g.setAttribute('aCol', new THREE.BufferAttribute(col.slice(0, v * 4), 4));
+  g.setIndex(idx);
+  const part = rbMakePart(g, bbFacadeTpl(kind), cx, cz);
+  part.renderOrder = 2;
+  part.userData.noRot = true;
+  scene.add(part);
+  parts.push(part);
+  return front;
+}
+// 建物の中心から最寄りの道路(歩道・小道などは除く)への水平ベクトル。半径R内に無ければnull
+function _nearestRoadVec(x, z, R) {
   let best = Infinity, bx = 0, bz = 0;
   for (const r of queryRoadGrid(x - R, x + R, z - R, z + R)) {
     if (_FRONT_SKIP.has(r.type)) continue;
@@ -301,7 +450,12 @@ function _frontTurns(x, z, w, d, rot) {
     const px = r.x1 + dx * t - x, pz = r.z1 + dz * t - z, dd = px * px + pz * pz;
     if (dd < best) { best = dd; bx = px; bz = pz; }
   }
-  if (best === Infinity) return 0;
+  return best === Infinity ? null : { x: bx, z: bz };
+}
+function _frontTurns(x, z, w, d, rot) {
+  const v = _nearestRoadVec(x, z, Math.max(w, d) / 2 + 30);
+  if (!v) return 0;
+  const bx = v.x, bz = v.z;
   const sn = Math.sin(rot), cs = Math.cos(rot);
   const fz = bx * sn + bz * cs, fx = bx * cs - bz * sn; // ローカル+z、+x方向の成分
   if (Math.abs(fz) >= Math.abs(fx)) return fz >= 0 ? 0 : 2;
@@ -312,7 +466,7 @@ function _doorLocalX(w, tw) {
   const cols = _quantUVStep(Math.max(1, Math.round(w / tw)));
   return -w / 2 + (Math.floor(cols * 0.5) + 0.5) * (w / cols);
 }
-function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, minH) {
+function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, minH, poly) {
   const _origH = h; // 遠方アンロード時、再生成できるよう元のhを覚えておく(下でhを斜面ぶん延長するため)
   const rnd = _bldRng(x, z); // この建物の見た目用の決定的乱数
   // 正面(ローカル+z)を最寄りの道路へ向ける。箱は90°単位で回してw/dを入れ替えれば同じ形なので、
@@ -361,7 +515,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, mi
   // 【2026-07-18】観光ランドマーク(東京タワー等)は下の汎用な箱+屋根生成を丸ごとスキップし、
   // drawLandmarkTowerの専用ジオメトリだけを描く。kindはこのelseブロック内でのみ決まるが、
   // 後段(エントランス演出の判定等)で参照されるためnullで先に確保しておく。
-  let kind = null;
+  let kind = null, polyMode = false, polyTris = null, polyFront = null; // polyMode: H-1 外形ポリゴンで立ち上げる
   if (type === 'landmark') {
     drawLandmarkTower(dm, x, gy, z, style.landmark);
   } else {
@@ -412,7 +566,14 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, mi
     (floors <= 2 && (type === 'house' || type === 'default' || type === 'shop')) ? 'house' :
     (type === 'house' || type === 'apartment') ? 'apt' : 'office';
   // バリアントは2種(4種に増やしたらテクスチャメモリ超過で東京駅クラッシュ→縮小。part2.js参照)
-  const mat = kind
+  // 【H-1】外形ポリゴン(part8.jsで長方形から大きく外れると判定済み)は、窓タイルの外壁を持つ種別だけその形で立ち上げる
+  // (神社仏閣・スタジアム等は従来の形。住宅は勾配屋根が載らなくなるので大きい建物だけ)
+  if (poly && isReal && MODE === 'real' && kind && !minH && !isMushroom && BB_ON && typeof bbFacadeTpl === 'function' &&
+      (kind !== 'house' || w * d >= H1_HOUSE_MIN_AREA)) {
+    polyTris = _h1Triangulate(poly);
+    polyMode = !!polyTris;
+  }
+  const mat = polyMode ? null : kind
     ? facadeMat(kind, wallC, (rnd() * 2) | 0)
     : lambertMat(wallC, (style && style.emissive) || (MODE === 'space' ? 0x0a1420 : 0));
 
@@ -428,6 +589,13 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, mi
   // sharedFacadeBoxGeo のコメント参照。
   const tw = kind === 'ind' ? 8 : (kind === 'house' || kind === 'shop') ? 4.5 : 3.6; // 窓タイル1枚の実幅
   const _oneTile = kind === 'house' && MODE !== 'real'; // 現実モード以外の住宅は1面に絵1枚(江戸の町家など)
+  if (polyMode) {
+    polyFront = _addPolyBody(parts, polyTris, x, z, gy, h, kind, wallC, floors, tw, Math.max(w, d) / 2 + 30);
+    if (kind !== 'ind' && detailOK()) for (const q of _h1RoofSpots(polyTris.P, 2)) {
+      const ac = dm(UNIT_BOX, AC_MAT, q.x, gy + h + 0.5, q.z, 1.8, 1.0, 1.2, rnd() * 3);
+      ac.userData.noRot = true;
+    }
+  } else {
   const geo = isMushroom
     ? new THREE.CylinderGeometry(minWD * 0.42, minWD * 0.5, h, 10)
     : isStadiumBody ? UNIT_CYL_SMOOTH
@@ -443,6 +611,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, mi
   mesh.renderOrder = 2;
   scene.add(mesh);
   parts.push(mesh);
+  } // !polyMode
 
   // ---- 敷地の余白(lotPadding。国プロファイル限定・実測OSM建物のみ) ----
   // 建物本体のフットプリント・位置には一切触れず、周囲に芝生/舗装の縁取りを追加描画するだけ。
@@ -467,6 +636,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, mi
     }
   }
 
+  if (!polyMode) { // 【H-1】外形ポリゴンの建物は陸屋根+パラペット(_addPolyBody)
   // ==== 屋根 — 切妻・寄棟・片流れ・陸屋根+パラペットをモード/種別/高さで出し分け ====
   // 【2026-07-20】building=yes等、種別もroof:colourタグも無い建物(=type:'default'。
   // 世界的に最も多いbuildingタグでOSM上ごく一般的)が軒並みこの0x5030a0固定の紫になり、
@@ -684,6 +854,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, mi
         dm(UNIT_BOX, roofSurfMat(roofC, null), MODE === 'real' ? x + _doorLocalX(w, tw) : x + w * 0.22, gy + 2.35, z + d / 2 + 0.5, 2.2, 0.16, 1.1);
     }
   }
+  } // !polyMode
   } // end of else(type !== 'landmark') 【2026-07-18】
 
   // エントランス(中高層ビルの1階の玄関ガラス)
@@ -692,6 +863,27 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, mi
     dm(UNIT_PLANE, ENTRANCE_MAT, x, gy + 1.4, z + d / 2 + 0.06, 3.0, 2.8, 1);
   }
 
+  // 【2026-11-10・H-7】店の正面の看板(帯+実際の店名の文字面。js/core/shop-signs.js)と日除けテント。現実モードのみ。
+  // 部品はワールド座標で置く(外形ポリゴンの建物はいちばん長い正面の壁、箱の建物は回転後の正面)
+  const _shopSign = (bandM, y, awning) => {
+    let cx, cz, nx, nz, W, yaw;
+    if (polyMode) {
+      if (!polyFront) return;
+      nx = polyFront.nx; nz = polyFront.nz; cx = polyFront.mx; cz = polyFront.mz; W = Math.min(polyFront.len, 12) * 0.95; yaw = polyFront.yaw;
+    } else {
+      const rs = Math.sin(rot || 0), rc = Math.cos(rot || 0);
+      nx = rs; nz = rc; cx = x + (d / 2) * rs; cz = z + (d / 2) * rc; W = Math.min(w, 12) * 0.95; yaw = rot || 0;
+    }
+    const br = signBrand(placeName);
+    const bm = br ? signBandMat(br.bg) : bandM;
+    const band = dm(UNIT_BOX, bm, cx + nx * 0.2, y, cz + nz * 0.2, W, 0.7, 0.25);
+    band.rotation.y = yaw; band.userData.noRot = true;
+    if (placeName) signAddSite(placeName, br ? br.bg : bm.color, br ? br.fg : '#ffffff', cx + nx * 0.34, cz + nz * 0.34, nx, nz, W, 0.7, band, parts);
+    if (awning && W > 2) {
+      const aw = dm(UNIT_BOX, lambertMat(AWNING_COLORS[(rnd() * AWNING_COLORS.length) | 0]), cx + nx * 0.6, y - 0.45, cz + nz * 0.6, W * 0.92, 0.06, 1.1);
+      aw.rotation.order = 'YXZ'; aw.rotation.y = Math.atan2(nx, nz); aw.rotation.x = 0.35; aw.userData.noRot = true;
+    }
+  };
   // コンビニ・商店のモード別演出(共有マテリアル、追加は最大2メッシュ+提灯インスタンス)
   if (type === 'shop' && h <= 12 && !minH) {
     if (MODE === 'edo') {
@@ -702,13 +894,23 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, mi
     } else {
       const bandMats = MODE === 'space' ? NEON_MATS : MODE === 'marchen' ? CANDY_BAND_MATS : SIGN_BAND_MATS;
       if (MODE !== 'real') dm(UNIT_PLANE, STOREFRONT_MAT, x, gy + 1.1, z + d / 2 + 0.06, Math.min(w * 0.85, 10), 1.6, 1); // 現実モードは外壁の店構えタイルで描く
-      dm(UNIT_BOX, bandMats[(rnd() * bandMats.length) | 0],
-                 x, gy + 2.4, z + d / 2 + 0.2, Math.min(w, 12) * 0.95, 0.7, 0.25);
+      const bandM = bandMats[(rnd() * bandMats.length) | 0];
+      if (MODE === 'real') _shopSign(bandM, gy + 2.4, true);
+      else dm(UNIT_BOX, bandM, x, gy + 2.4, z + d / 2 + 0.2, Math.min(w, 12) * 0.95, 0.7, 0.25);
     }
   } else if (type === 'school' && !minH) {
     // 校庭(土色の広場)
     yard = dm(UNIT_PLANE, YARD_MAT, x, gy + 0.12, z, w + 18, d + 18, 1);
     yard.rotation.x = -Math.PI / 2;
+  }
+  // 【H-7】商店以外の建物の1階に入っている、店名付きの飲食店・銀行などにも1階の上に看板を付ける
+  if (MODE === 'real' && type !== 'shop' && !minH && h >= 4 && placeName && SIGN_KINDS.has(placeKind)) {
+    _shopSign(SIGN_BAND_MATS[(rnd() * SIGN_BAND_MATS.length) | 0], gy + 3.3, false);
+  }
+  // 【H-7】住宅の室外機(側面の壁際に1台)
+  if (MODE === 'real' && kind === 'house' && !polyMode && !minH && detailOK() && rnd() < 0.7) {
+    const sd = rnd() < 0.5 ? 1 : -1;
+    dm(UNIT_BOX, AC_MAT, x + sd * (w / 2 + 0.17), gy + 0.32, z + (rnd() - 0.5) * d * 0.5, 0.3, 0.6, 0.8);
   }
 
   // (旧: 窓プレーン生成はファサードテクスチャの emissiveMap に置換され削除)
@@ -732,7 +934,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, mi
   if (rot) {
     const rc = Math.cos(rot), rs = Math.sin(rot);
     for (const p of parts) {
-      if (!p || !p.position) continue; // partsにはnull要素が入りうる(unloadFarBuildings等の既存ガードと同様)
+      if (!p || !p.position || p.userData.noRot) continue; // partsにはnull要素が入りうる(unloadFarBuildings等の既存ガードと同様)。noRot: H-1のワールド座標で置いた部品
       const dx0 = p.position.x - x, dz0 = p.position.z - z;
       p.position.x = x + dx0 * rc + dz0 * rs;
       p.position.z = z - dx0 * rs + dz0 * rc;
@@ -766,11 +968,16 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, mi
     const _hz = (Math.abs(w * Math.sin(rot)) + Math.abs(d * Math.cos(rot))) / 2;
     _bMinX = x - _hx; _bMaxX = x + _hx; _bMinZ = z - _hz; _bMaxZ = z + _hz;
   }
+  if (polyMode) { // 外形ポリゴンの外接AABB(当たり判定のセル登録用)
+    _bMinX = _bMinZ = Infinity; _bMaxX = _bMaxZ = -Infinity;
+    for (const p of poly) { if (p.x < _bMinX) _bMinX = p.x; if (p.x > _bMaxX) _bMaxX = p.x; if (p.z < _bMinZ) _bMinZ = p.z; if (p.z > _bMaxZ) _bMaxZ = p.z; }
+  }
   const cbox = new THREE.Box3(
     new THREE.Vector3(_bMinX, gy, _bMinZ),
     new THREE.Vector3(_bMaxX, gy + h, _bMaxZ)
   );
   if (rot) { cbox.rot = rot; cbox.cx = x; cbox.cz = z; cbox.hw = w / 2; cbox.hd = d / 2; }
+  if (polyMode) cbox.poly = poly; // 実判定は外形ポリゴン(part7.js collBoxHitsXZ)
   cbox.chunkKey = currentChunkKey;
   // 実OSM建物を遠方アンロードする際、collisionBoxes/minimapBuildings/placedBuildings
   // からもこのbuilding分だけ一括で取り除けるよう、共通のIDを振っておく。
@@ -780,7 +987,9 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, mi
   collGridAdd(cbox);
 
   // Minimap record
-  minimapBuildings.push({x, z, w, d, rot: rot || 0, ck: currentChunkKey, bid}); // rotはミニマップの回転描画用
+  const _mmRec = {x, z, w, d, rot: rot || 0, ck: currentChunkKey, bid}; // rotはミニマップの回転描画用
+  if (polyMode) _mmRec.poly = poly;
+  minimapBuildings.push(_mmRec);
   // Spatial index for landuse fill de-duplication
   // 【2026-07-18】r(hasBuildingNearby用の安全半径)は以前max(w,d)/2だった。長方形の対角線
   // 方向の角は中心からmax(w,d)/2より遠い(真の外接円半径はsqrt((w/2)^2+(d/2)^2))ため、
@@ -795,6 +1004,9 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, mi
   // 裏付けに使う。農地の農道グリッドを住宅街と誤認する対策)
   const brec = { x, z, w, d, h: _origH, style, gy: groundY, parts, cbox, ck: currentChunkKey, bid, real: !!isReal, rot: rot || 0 };
   if (minH) brec.minH = minH;
+  if (poly) brec.poly = poly;            // 遠方アンロード→再接近の再生成でも同じ形・名前で建てる(part1.js)
+  if (placeName) brec.pn = placeName;
+  if (placeKind) brec.pk = placeKind;
   buildingRecords.push(brec);
   meshedBuildingGridAdd(brec);
   // 【2026-08-21・IMPL_PROMPT_20260819_03_NEARBY_PLACE_NAMES.md Phase2】name付き実建物を
