@@ -900,7 +900,9 @@ const SEA_BED_FAR   = 3000;  // これより遠い区間は判定に使わない
 // 海岸線からの距離と海/陸を返す。重い(区間を全走査する)のでfarNodeY側でキャッシュする対象。
 // null = 近くに海岸線が無い(判定しない)
 function coastGeomAt(x, z) {
-  if (!coastlineSegs || coastlineSegs.length === 0) return null;
+  // 【2026-11-10】ベクタータイルの海面ポリゴンがある範囲は、その内外で海/陸を決める(_vtSeaAt。距離dは従来どおり海岸線から)
+  const vs = _vtSeaAt(x, z);
+  if (!coastlineSegs || coastlineSegs.length === 0) return vs ? { d: SEA_BED_FAR, sea: true, vt: true } : null;
   let inRing = false;
   for (const r of coastlineRings) if (pointInPolygon(x, z, r)) { inRing = true; break; }
   // 【2026-08-27・A-3修正】coastlineSegs全件ではなく、SEA_BED_FAR四方のセルだけを
@@ -917,8 +919,9 @@ function coastGeomAt(x, z) {
     const d = (x - cx) * (x - cx) + (z - cz) * (z - cz);
     if (d < best) { best = d; dot = (x - cx) * (-dz) + (z - cz) * dx; }
   }
-  if (best === Infinity) return null;
-  return { d: Math.sqrt(best), sea: (dot >= 0) && !inRing }; // 島の内側は必ず陸
+  if (best === Infinity) return vs ? { d: SEA_BED_FAR, sea: true, vt: true } : null;
+  // vt: 海/陸をベクタータイルの海面ポリゴンで確定できた(=陸なら確実に陸。seaClampYが水面より上へ持ち上げてよい)
+  return { d: Math.sqrt(best), sea: vs !== null ? vs : ((dot >= 0) && !inRing), vt: vs !== null }; // 島の内側は必ず陸
 }
 // 上の判定と元の高さから、そのノードに使う高さを返す。軽い。毎回呼ぶこと(baseはキャッシュ
 // できないため)。
@@ -926,18 +929,31 @@ function coastGeomAt(x, z) {
 // 陸側 : 岸からSHORE_RAMPまで、海面高→元の高さへ連続的にブレンドする(汀線ランプ)。
 //        岸がいきなり高いと、地形と海面の交点が最大200m沖へずれて大きな楔になるため。
 //        ここで潰れる斜面は543m間隔のサンプルを直線補間した産物であり、実測値ではない。
+const COAST_NODE_BAND = 220; // seaClampY: 岸からこの距離以内の海のノードは水面のすぐ下(地形格子200m+余裕)
 const SHORE_RAMP = 400;   // 汀線ランプの長さ(m)。唯一の調整つまみ
+const LAND_MIN_ABOVE = 0.8; // 陸と確定したノードの水面からの最低高さ(岸からSHORE_RAMP以上離れた所。岸に向かって0へ)
 function seaClampY(base, g) {
   if (!g) return base;
   const seaTop = seaLevelY() + seaYOffset();
   if (g.sea) {
     if (g.d < SEA_BED_INSET) return base;      // 岸ぎりぎりの海側は触らない
+    // 【2026-11-10】岸から地形の1格子(200m)以内の海は、水面のすぐ下にそろえる。地形は200m格子なので、
+    // 岸の近くの海のノードを深く下げると、そこへ向かう三角形が陸側の地面ごと水面下へ引き込み、岸壁の建物が
+    // 沈んで見えていた(追浜の実測: 半径2.5kmの実建物の約6%で地面が水面より下)。
+    if (g.d < COAST_NODE_BAND) return seaTop - 0.05;
     const y = seaLevelY() - SEA_BED_DROP;
     return y < base ? y : base;
   }
-  if (g.d >= SHORE_RAMP || base <= seaTop) return base;
-  const cap = seaTop + (base - seaTop) * (g.d / SHORE_RAMP);
-  return cap < base ? cap : base;
+  const k = g.d < SHORE_RAMP ? g.d / SHORE_RAMP : 1;
+  let y = base;
+  if (k < 1 && base > seaTop) y = seaTop + (base - seaTop) * k;
+  // 【2026-11-10】海面ポリゴンで陸と確定したノード(g.vt)は水面より下に置かない。標高データは543〜840m間隔と
+  // 粗く、埋立地や岸壁では実際より低い(ゲームの海面より下の)値になることがあり、水面の横で地面だけが沈んで
+  // 岸の建物が水に浸かったように見えていた(追浜の実測: 実建物10,912棟のうち455棟で地面が水面より下)。
+  // 岸では水面の高さ、岸から離れるほどLAND_MIN_ABOVEまで上げる(汀線ランプと同じ形)。
+  // 判定がフォールバック(最寄りの海岸線の向き)のノードは誤判定があり得るので上げない(海の中に地面が出るため)。
+  if (g.vt) { const f = seaTop + LAND_MIN_ABOVE * k; if (y < f) y = f; }
+  return y;
 }
 // 【2026-08-13・SEA_CLAMP_IN_FARNODEY.md】part5.js farNodeYのキャッシュは遅延評価
 // (参照されて初めてcoastGeomAtを呼ぶ)なので、放っておくと画面は古いまま。海岸線が更新される
@@ -954,8 +970,29 @@ function scanSeaBed() {
   _seaMeshDirty = false;
   const t0 = performance.now();
   updateFarMesh(true);
+  const nr = _coastResnap();
   console.log('[seabed] mesh rebuilt (' + (performance.now() - t0).toFixed(0) + 'ms) segs=' +
-    (coastlineSegs ? coastlineSegs.length : 0));
+    (coastlineSegs ? coastlineSegs.length : 0) + ' resnap=' + nr);
+}
+// 【2026-11-10】海/陸の判定が後から変わると(隣のタイルの到着など)地形の高さが変わるが、すでに置いた建物・道路・
+// 水面などは置いた時の高さのままで、浮き/埋まりになる。高さが変わったノード(farNodeYが記録)の周りだけ、
+// NEAR地形更新時と同じ関数で合わせ直す(道路はフレーム分割キュー、建物はY移動だけ)。
+var _coastResnapCells = new Set(); // 2ノード四方のセル "ci,cj"
+function _coastResnap() {
+  const n = _coastResnapCells.size;
+  if (!n) return 0;
+  const S = FAR_STEP * 2;
+  for (const key of _coastResnapCells) {
+    const c = key.indexOf(','), ci = +key.slice(0, c), cj = +key.slice(c + 1);
+    const x0 = ci * S - FAR_STEP, x1 = ci * S + S, z0 = cj * S - FAR_STEP, z1 = cj * S + S; // ノードの影響は±1格子
+    rebuildRoadsInBounds(x0, x1, z0, z1);
+    rebuildAreaPolysInBounds(x0, x1, z0, z1);
+    rebuildBuildingsInBounds(x0, x1, z0, z1);
+    rebuildStationsInBounds(x0, x1, z0, z1);
+    if (typeof resnapPropsAndTreesInBounds === 'function') resnapPropsAndTreesInBounds(x0, x1, z0, z1);
+  }
+  _coastResnapCells.clear();
+  return n;
 }
 // 【2026-08-12・COASTLINE_CANDIDATE_SET.md】「見た」印は、実際に判定まで
 // たどり着けた時だけ打つ(=候補が0件で早期returnしただけのタイルは保留扱いにし、後で
@@ -1051,6 +1088,31 @@ let _coastlineNoIdSeq = 0; // 通常のOverpass応答では起きないはずの
 // 1回だけ決めるため、海岸線がタイル単位で少しずつ届くベクタータイルでは判定が欠け(海底の地形が見える帯)、
 // 岸がセルの階段状になっていた。海岸線(地形を海面下へ下げる判定などに使う)はこれまでどおり蓄える。
 const _vtSeaEntries = new Map(); // 'vt:sea'要素のID → 面(buildFixedFlatAreaPolyの戻り値)
+// 【2026-11-10、ユーザー報告「海岸線で陸であるべきところが水にのまれる」(横須賀・追浜)】
+// 海/陸の判定(地形を海面下へ下げる・遠景を水の色で塗る・波の音)は「最寄りの海岸線の区間の右手側か」で
+// 決めていたが、港の入り組んだ岸(岸壁の角・運河・タイル境界で切れた海岸線)では陸を海と誤り、工場地帯の
+// 地面が水面下に沈んで水色に塗られていた(追浜の実測: 半径2.5kmの実建物11,080棟中320棟が「海」の上)。
+// ベクタータイルを読み込んだ範囲では、ocean面(海面ポリゴン)そのものの内外で判定する。
+var _vtZ14Loaded = new Set();     // 海面ポリゴンまで届いたz14タイル(x*16384+y)。varなのは読み込み途中に呼ばれても安全なように
+var _vtSeaGrid = new Map();       // 1kmセル → 海面の面(判定用。メッシュの破棄後も形は有効なので消さない)
+const VT_SEA_CELL = 1000;
+function vtNoteZ14(keys) {
+  let added = false;
+  for (const k of keys) if (!_vtZ14Loaded.has(k)) { _vtZ14Loaded.add(k); added = true; }
+  if (added && (_vtSeaGrid.size || coastlineWayStore.size)) { coastlineVersion++; _seaMeshDirty = true; } // 判定キャッシュ(part5.js)を作り直す
+}
+function _vtSeaAt(x, z) { // → true/false: 海面ポリゴンで判定 / null: その場所のベクタータイルが未到着
+  if (!_vtZ14Loaded || !_vtZ14Loaded.size || typeof _vtLon2X !== 'function') return null;
+  const ll = xzToLatLon(x, z);
+  if (!_vtZ14Loaded.has(_vtLon2X(ll.lon) * 16384 + _vtLat2Y(ll.lat))) return null;
+  const a = _vtSeaGrid.get(Math.floor(x / VT_SEA_CELL) + ',' + Math.floor(z / VT_SEA_CELL));
+  if (!a) return false;
+  for (const e of a) {
+    if (x < e.minX || x > e.maxX || z < e.minZ || z > e.maxZ) continue;
+    if (pointInPolygon(x, z, e.pts) && !(e.holes && e.holes.some(h => pointInPolygon(x, z, h)))) return true;
+  }
+  return false;
+}
 function _buildVtSea(elements, seaY) {
   const xz = (g) => { const a = g.map(p => latLonToXZ(p.lat, p.lon)); if (a.length > 1 && a[0].x === a[a.length - 1].x && a[0].z === a[a.length - 1].z) a.pop(); return a; };
   for (const el of elements) {
@@ -1066,7 +1128,18 @@ function _buildVtSea(elements, seaY) {
     } else outer = xz(el.geometry);
     if (outer.length < 3 || !areaPolyBudgetOK('sea')) continue;
     const e = buildFixedFlatAreaPoly(outer, waterAreaMat, seaYOffset(), seaY, holes && holes.length ? holes : null);
-    if (e) _vtSeaEntries.set(el.id, e);
+    if (!e) continue;
+    if (!prev) { // 判定用の索引(作り直しでは形が同じなので追加しない)
+      for (let gx = Math.floor(e.minX / VT_SEA_CELL); gx <= Math.floor(e.maxX / VT_SEA_CELL); gx++)
+        for (let gz = Math.floor(e.minZ / VT_SEA_CELL); gz <= Math.floor(e.maxZ / VT_SEA_CELL); gz++) {
+          const k = gx + ',' + gz;
+          let a = _vtSeaGrid.get(k);
+          if (!a) _vtSeaGrid.set(k, a = []);
+          a.push(e);
+        }
+      coastlineVersion++; _seaMeshDirty = true;
+    }
+    _vtSeaEntries.set(el.id, e);
   }
 }
 function processCoastlineFill(elements, tileList, vtSea) {

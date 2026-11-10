@@ -871,8 +871,9 @@ async function vtLoadBatch(bboxes, kind) {
       if (seen.has(el.id)) continue;
       const isB = !!(el.tags && el.tags.building);
       if ((kind === 'road' && isB) || (kind === 'building' && !isB)) continue;
-      const d = el.bounds, isCoast = el.tags && el.tags.natural === 'coastline';
-      // 海岸線は範囲外でも全部渡す(海の判定は近くの海岸線が揃っている前提。既存の海岸線ストアがIDで重複排除する)
+      const d = el.bounds, isCoast = el.tags && (el.tags.natural === 'coastline' || el.tags['vt:sea']);
+      // 海岸線・海面は範囲外でも全部渡す(海/陸の判定はこのバッチのz14タイルの海が全部揃っている前提。
+      // 受け側はIDで重複排除する。part4.js _vtSeaAt / processCoastlineFill)
       if (!isCoast && !boxes.some(b => d.maxlat >= b[0] && d.minlat <= b[2] && d.maxlon >= b[1] && d.minlon <= b[3])) continue;
       seen.add(el.id);
       out.push(el);
@@ -891,7 +892,7 @@ async function vtLoadBatch(bboxes, kind) {
     await _vtChains(out, union);
     _vtFailStreak = 0;
     _vtCredit();
-    return { elements: out, vt: true };
+    return { elements: out, vt: true, z14: [...union.values()].map(f => f.T.x * VT_N + f.T.y) };
   } catch (e) {
     vtStats.fail++;
     vtStats.lastErr = String((e && (e.name === 'AbortError' ? 'timeout' : e.message)) || e).slice(0, 60);

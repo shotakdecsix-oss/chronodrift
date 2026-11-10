@@ -78,7 +78,10 @@ function farNodeY(i, j) {
   const k = i + '|' + j;
   let e = _seaNodeCache.get(k);
   if (!e || e.v !== coastlineVersion) {
-    e = { v: coastlineVersion, g: coastGeomAt(i * FAR_STEP, j * FAR_STEP) };
+    const g = coastGeomAt(i * FAR_STEP, j * FAR_STEP);
+    // 【2026-11-10】判定が変わって高さが動いたノードを記録し、周りの建物・道路を合わせ直す(part4.js _coastResnap)
+    if (e && Math.abs(seaClampY(base, e.g) - seaClampY(base, g)) > 0.05) _coastResnapCells.add((i >> 1) + ',' + (j >> 1));
+    e = { v: coastlineVersion, g };
     if (_seaNodeCache.size > 40000) _seaNodeCache.clear(); // 移動し続けても際限なく増やさない
     _seaNodeCache.set(k, e);
   }
@@ -89,6 +92,7 @@ function farNodeY(i, j) {
 // 【2026-11-10】海側のノード(海岸線の判定で海。farNodeYが海面のすぐ下へ下げている)。遠景地形を水の色で塗るのに使う。
 // 海面ポリゴンは読み込み済みタイルの範囲にしか無いため、その外側では下げた地形が緑(霧で淡く)の帯に見えていた。
 function farNodeIsSea(i, j) { const e = _seaNodeCache.get(i + '|' + j); return !!(e && e.g && e.g.sea); }
+function _farNodeSeaN(i, j) { farNodeY(i, j); return farNodeIsSea(i, j); } // 隣のノード(未計算ならここで計算してキャッシュ)
 const _farSeaRGB = (() => { const c = new THREE.Color(MODE_CONF.water); return [c.r, c.g, c.b]; })();
 function farNodeYOrNull(i, j) {
   if (typeof terrainYOrNull !== 'function') return null;
@@ -123,7 +127,10 @@ function updateFarMesh(force) {
       const h = farNodeY(i0 + jx, j0 + jz); // クエリと同じノード関数を使用
       pos.setZ(idx, h);
       if (h > terrainMaxH) terrainMaxH = h; // 色の正規化用の最大高さも同じループで更新(space/edo/marchenモード)
-      const c = farNodeIsSea(i0 + jx, j0 + jz) ? _farSeaRGB : terrainColorRGB(h);
+      const ii = i0 + jx, jj = j0 + jz;
+      // 周りの4ノードも海の時だけ水の色(1ノード=200mの間で陸側へ青がにじまないように。岸際は海面ポリゴンが受け持つ)
+      const sea = farNodeIsSea(ii, jj) && _farNodeSeaN(ii - 1, jj) && _farNodeSeaN(ii + 1, jj) && _farNodeSeaN(ii, jj - 1) && _farNodeSeaN(ii, jj + 1);
+      const c = sea ? _farSeaRGB : terrainColorRGB(h);
       col.setXYZ(idx, c[0], c[1], c[2]);
     }
   }
