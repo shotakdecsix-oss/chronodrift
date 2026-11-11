@@ -109,7 +109,7 @@ function _signMake(site) {
   p.renderOrder = 2;
   p.userData.noRot = true;
   p.addEventListener('removed', () => { _signRelease(s.key); _signStat.panels--; if (site.panel === p) site.panel = null; });
-  scene.add(p);
+  rbAttach(p);
   site.parts.push(p);
   site.panel = p;
   _signStat.panels++;

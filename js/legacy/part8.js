@@ -1999,6 +1999,7 @@ function generateChunk(chunkX, chunkZ) {
   const worldZ = chunkZ * CHUNK_SIZE;
 
   const beforeCount = scene.children.length; // snapshot to track added meshes
+  const _bbBefore = BB_HOLDER.children.length; // まとめ描画の部品はsceneではなくBB_HOLDERの子。生成中は解放が起きない前提で、増えた分を後ろから数える
 
   const x0 = worldX, z0 = worldZ, x1 = worldX + CHUNK_SIZE, z1 = worldZ + CHUNK_SIZE;
   // チャンク周辺のポリゴンだけに絞る(以降の判定を軽く)。
@@ -2282,6 +2283,7 @@ function generateChunk(chunkX, chunkZ) {
 
   // Store all meshes added during this chunk for future unloading
   const added = scene.children.slice(beforeCount);
+  for (let i = _bbBefore; i < BB_HOLDER.children.length; i++) added.push(BB_HOLDER.children[i]); // このチャンクで増えた部品
   chunkMeshes.set(key, added);
   currentChunkKey = null;
 }
@@ -2522,7 +2524,7 @@ function updateChunks() {
       meshes.forEach(m => {
         if (!m || m.userData._released) return; // 【2026-07-20・二重解放バグ修正】下記コメント参照
         m.userData._released = true;
-        scene.remove(m);
+        if (m.parent) m.parent.remove(m); // 親はsceneかBB_HOLDER
         // 屋根・小物の単位ジオメトリは全建物で共有しているため破棄しない
         if (m.geometry && !m.geometry.userData.shared) m.geometry.dispose();
         if (m.material) releaseFacadeMat(m.material); // facadeMat以外は無害なno-op(part2.js参照)

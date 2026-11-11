@@ -742,7 +742,7 @@ function detailMesh(geo, mat, x, y, z, sx, sy, sz, ry) {
   m.scale.set(sx, sy, sz);
   if (ry) m.rotation.y = ry;
   m.renderOrder = 2;
-  scene.add(m);
+  bbAttach(m); // まとめ描画の部品はBB_HOLDERの子になる(bldg-batch.js)
   return m;
 }
 // 追加ディテール(玄関庇・屋上設備等)は建物が多い時は自動で省略(ドローコール抑制。

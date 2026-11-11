@@ -5,7 +5,7 @@
  * 「セル(500m四方)×マテリアル」ごとに、区間の形状を1つのBufferGeometryへ結合して描く。
  * (以前は区間1本=1メッシュ=1描画コールで、伊勢原でも道路だけで約8,000本あった)
  *
- * 区間側(road record の r.mesh)は、従来どおり scene.add / scene.remove / geometryの差し替え /
+ * 区間側(road record の r.mesh)は、従来どおり追加(rbAttach) / 解放(p.parent.remove) / geometryの差し替え /
  * dispose される軽量な Object3D(RBPart)にする。そのイベントでグループを「要再結合」にするので、
  * part1.js rebuildRoadMesh 等の既存の生成・解放・再構築の経路は変えていない。
  * 再結合はフレーム予算内で、プレイヤーに近いグループから行う(rbUpdate、part9.jsの描画前に呼ぶ)。
@@ -17,6 +17,11 @@ const RB_BUDGET_MS = 3;          // 1フレームで再結合に使う時間
 const RB_MIN_INTERVAL_MS = 250;  // 同じグループの再結合の最短間隔(読み込み中に毎フレーム作り直さない)
 const RB_ROOT = new THREE.Group();
 RB_ROOT.name = 'roadBatch';
+const RB_HOLDER = makePartsHolder('roadPartsHolder'); // 区間・看板・外形建物の部品(RBPart)の置き場。理由はbldg-batch.jsのBB_HOLDERと同じ
+// 部品をシーンへ載せる。RBPartはholderへ、?norbatch=1 の通常Meshは従来どおりscene
+function rbAttach(p) {
+  if (p.isRBPart) RB_HOLDER.add(p); else scene.add(p);
+}
 let _rbRootAdded = false;
 const _rbGroups = new Map(); // key → { key, cx, cz, mat, ro, sig, parts:Set, mesh, last }
 const _rbDirty = new Set();

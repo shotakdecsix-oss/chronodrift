@@ -85,7 +85,7 @@ const I18N = {
     helpBody: 'PC: WASD移動 / Shiftダッシュ / Spaceジャンプ / ドラッグ回転 / Cで高度キープ切替 / Bで🐦BIRDモード切替(浮遊・3倍速、Space上昇/Ctrl下降)<br>スマホ: 左スティック移動(倒すほど加速) / 右スワイプ回転 / ⤴ジャンプ / 🔓で高度キープ切替 / 🐦でBIRDモード切替(⤴上昇/⤵下降)',
     closeBtn: '閉じる',
     statusInitial: '🗺 伊勢原マップ読み込み中...',
-    debugLegendHtml: '🩺左から地形/道路線路/建物の3本<span style="background:#555555"></span>未取得<span style="background:#3388dd"></span>待ち<span style="background:#dd3333"></span>取得中<span style="background:#ffaa22"></span>生成中<span style="background:#33cc55"></span>完了<span style="background:#9b3fd4"></span>諦め(未着)',
+    debugLegendHtml: '🩺左から地形/道路線路/建物の3本<span style="background:#555555"></span>未取得<span style="background:#3388dd"></span>待ち<span style="background:#dd3333"></span>取得中<span style="background:#ffaa22"></span>生成中<span style="background:#22cccc"></span>休眠<span style="background:#33cc55"></span>完了<span style="background:#9b3fd4"></span>諦め(未着)',
     altKeepTitleOff: '高度キープ(空中でタップ)',
     altKeepTitleOn: '高度キープ中(タップで解除)',
     birdBtnTitleOff: 'BIRDモード(浮遊・3倍速)',
@@ -212,7 +212,7 @@ const I18N = {
     helpBody: 'PC: WASD to move / Shift to dash / Space to jump / drag to rotate view / C to toggle altitude hold / B to toggle 🐦BIRD mode (float, 3x speed, Space up / Ctrl down)<br>Mobile: left stick to move (tilt further to speed up) / swipe right side to rotate view / ⤴ to jump / 🔓 to toggle altitude hold / 🐦 to toggle BIRD mode (⤴ up / ⤵ down)',
     closeBtn: 'Close',
     statusInitial: '🗺 Loading Isehara map...',
-    debugLegendHtml: '🩺From left: terrain / road+rail / building<span style="background:#555555"></span>not fetched<span style="background:#3388dd"></span>waiting<span style="background:#dd3333"></span>fetching<span style="background:#ffaa22"></span>generating<span style="background:#33cc55"></span>done<span style="background:#9b3fd4"></span>gave up (unreached)',
+    debugLegendHtml: '🩺From left: terrain / road+rail / building<span style="background:#555555"></span>not fetched<span style="background:#3388dd"></span>waiting<span style="background:#dd3333"></span>fetching<span style="background:#ffaa22"></span>generating<span style="background:#22cccc"></span>dormant<span style="background:#33cc55"></span>done<span style="background:#9b3fd4"></span>gave up (unreached)',
     altKeepTitleOff: 'Altitude hold (tap while airborne)',
     altKeepTitleOn: 'Altitude hold on (tap to release)',
     birdBtnTitleOff: 'BIRD mode (float, 3x speed)',
@@ -842,7 +842,7 @@ function removeBuildingsOverlappingRoad(r) {
       for (const p of rec.parts) {
         if (!p || p.userData._released) continue; // 【2026-07-20・二重解放バグ修正】下記コメント参照
         p.userData._released = true;
-        scene.remove(p);
+        if (p.parent) p.parent.remove(p); // 部品の親はsceneではなくBB_HOLDER(bldg-batch.js)のことがある
         if (p.geometry && !p.geometry.userData.shared) p.geometry.dispose();
         if (p.material) releaseFacadeMat(p.material); // facadeMat以外は無害なno-op(part2.js参照)
       }
@@ -947,7 +947,7 @@ function removeRoadRecordsByWid(widSet) {
   for (let i = 0; i < roadRecords.length; i++) {
     const r = roadRecords[i];
     if (r.wid == null || !widSet.has(r.wid)) { roadRecords[w++] = r; continue; }
-    if (r.mesh) { scene.remove(r.mesh); r.mesh.geometry.dispose(); r.mesh = null; }
+    if (r.mesh) { if (r.mesh.parent) r.mesh.parent.remove(r.mesh); r.mesh.geometry.dispose(); r.mesh = null; }
     if (r.railWhite) { scene.remove(r.railWhite); r.railWhite.geometry.dispose(); r.railWhite = null; }
     r._dropped = true;
     dropped++;
@@ -1087,7 +1087,7 @@ function rebuildRoadMesh(r) {
     if (!geo) return;
     const mesh = rbMakePart(geo, realRoadMat('motorway', 24), (r.x1 + r.x2) / 2, (r.z1 + r.z2) / 2); // まとめ描画(road-batch.js)
     mesh.renderOrder = 1;
-    scene.add(mesh);
+    rbAttach(mesh);
     r.mesh = mesh;
     if (r.slope) {
       // 既存のslopeオブジェクト(motorwaySlopesに入っている実体)を書き換える。
@@ -1114,7 +1114,7 @@ function rebuildRoadMesh(r) {
   } else {
     const mesh = rbMakePart(geo, r.mat, (r.x1 + r.x2) / 2, (r.z1 + r.z2) / 2); // まとめ描画(road-batch.js)
     mesh.renderOrder = 1;
-    scene.add(mesh);
+    rbAttach(mesh);
     r.mesh = mesh;
   }
   // 非現実モードの線路(白帯オーバーレイ)も同じタイミングで復元/追従
@@ -1352,7 +1352,7 @@ function unloadFarRoads(force) {
       continue;
     }
     if (dd <= lim2r) continue; // まだ範囲内(細街路は短い距離で切る)
-    scene.remove(r.mesh);
+    if (r.mesh.parent) r.mesh.parent.remove(r.mesh); // 親はsceneかRB_HOLDER
     r.mesh.geometry.dispose();
     r.mesh = null;
     if (r.railWhite) {
@@ -1434,7 +1434,7 @@ function evictFarRoads(force) {
     }
     _tileDropped.add(_tk);
     // ここに来る時点でunloadFarRoadsが既にメッシュを解放しているはずだが、念のため。
-    if (r.mesh) { scene.remove(r.mesh); r.mesh.geometry.dispose(); r.mesh = null; }
+    if (r.mesh) { if (r.mesh.parent) r.mesh.parent.remove(r.mesh); r.mesh.geometry.dispose(); r.mesh = null; }
     if (r.railWhite) { scene.remove(r.railWhite); r.railWhite.geometry.dispose(); r.railWhite = null; }
     // pendingRoadMeshes に既に積まれている参照はここでは消せない(配列の途中を突くのは高コスト)。
     // 代わりに印を付けておき、processRoadMeshQueue / queueRoadMesh 側で無視させる。
@@ -1685,7 +1685,7 @@ function unloadFarBuildings(force) {
     for (const p of rec.parts) {
       if (!p || p.userData._released) continue; // 【2026-07-20・二重解放バグ修正】下記コメント参照
       p.userData._released = true;
-      scene.remove(p);
+      if (p.parent) p.parent.remove(p); // 部品の親はsceneではなくBB_HOLDER(bldg-batch.js)のことがある
       if (p.geometry && !p.geometry.userData.shared) p.geometry.dispose();
       if (p.material) releaseFacadeMat(p.material); // facadeMat以外は無害なno-op(part2.js参照)
     }
@@ -1714,10 +1714,23 @@ function unloadFarBuildings(force) {
 // 通常の生成キューに合流させる。unloadFarBuildingsと同じ頻度(~1.5秒ごと)で十分
 // (境界を跨いだ直後1.5秒以内に生成されれば体感上ポップインは気にならない)。
 let _dormantCheckFrame = 0;
+// 性能HUD(js/core/perf-hud.js)用のカウンタ: bldN=addBuildingを呼んだ回数、bldMs=その合計ms、rev=休眠から行列へ戻した件数。
+// part9.jsの_bgGenerated等は2秒ごとにリセットされるので流用しない(HUD側が差分を取る)。
+const GEN_STATS = { bldN: 0, bldMs: 0, rev: 0 };
+// ?revive=old で従来の復帰方式(90フレームごと・待ち行列の残りを見ない)に戻す。比較用
+const _REVIVE_OLD = /[?&]revive=old/.test(location.search);
+let _reviveLastT = 0;
 function reactivateNearbyDormantBuildings() {
   if (!worldPosSettled) return; // 開始位置が確定するまで距離を根拠に捨てない(part1.js worldPosSettled参照)
-  _dormantCheckFrame++;
-  if (_dormantCheckFrame % 90 !== 18) return; // 位相18(他の低頻度スキャナと衝突回避)
+  if (_REVIVE_OLD) {
+    _dormantCheckFrame++;
+    if (_dormantCheckFrame % 90 !== 18) return; // 位相18(他の低頻度スキャナと衝突回避)
+  } else {
+    // フレーム数基準だと低fpsの端末ほど復帰が遅れる(90フレームは60fpsで1.5秒、30fpsで3秒)ので時間基準にする
+    const _nowT = performance.now();
+    if (_nowT - _reviveLastT < 250) return;
+    _reviveLastT = _nowT;
+  }
   if (dormantCount === 0) return;
   // 総数上限(PERF.bMax)到達中は復帰させない(復帰→上限で即dormant戻しの空回り防止)
   if (buildingRecords.length >= PERF.bMax) return;
@@ -1744,7 +1757,11 @@ function reactivateNearbyDormantBuildings() {
   // なので雪崩にはならない)。総数超過はpart9側の最終弁(records>=bMaxでdormant退避)が
   // 別途守るため、多少の見積もり超過があっても安全。
   const headroom = Math.max(0, Math.floor(PERF.bMax * 0.95) - buildingRecords.length);
-  const REVIVE_BUDGET = Math.min(600, Math.max(30, headroom + _freedThisCycle));
+  // 待ち行列に200件以上残っている間は積み増さない(遠方の建物で行列が膨れ、近い建物が後回しになるのを防ぐ)。
+  // 周期が250msなので_freedThisCycleは使い切り(同じ解放数を何度も数えない)、下限も5/回に換算。計算はpure.jsのreviveBudget
+  const REVIVE_BUDGET = reviveBudget(headroom, _freedThisCycle, pendingBuildings.length - pendingBuildingIdx, _REVIVE_OLD);
+  if (REVIVE_BUDGET <= 0) return;
+  if (!_REVIVE_OLD) _freedThisCycle = 0;
   // ヒステリシスマージン(evict境界とのチャタリング防止)は維持。
   const _nearCapNow = buildingRecords.length >= PERF.bMax * 0.95;
   const _realRevLim = _nearCapNow ? Math.min(BUILDING_GEN_DIST_REAL, _lastRealKeepDist * 0.8) : BUILDING_GEN_DIST_REAL;
@@ -1786,6 +1803,7 @@ function reactivateNearbyDormantBuildings() {
       }
     }
   }
+  GEN_STATS.rev += revived; // HUD用
 }
 
 // ======= dormantの距離アンロード =======

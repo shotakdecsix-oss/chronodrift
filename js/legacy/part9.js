@@ -112,6 +112,7 @@ const DEBUG_TILE_COLORS = {
   fetching: 0xdd3333,       // リクエスト済みだが道路/線路が未確定(取得中・バックオフ中)
   waitTerrain: 0x3388dd,    // 道路/線路は確定・地形(NEAR高解像度グリッド)が未確定
   buildingPending: 0xffaa22,// 道路・地形は確定・道路メッシュ or 建物がまだ生成中/残っている
+  dormantOnly: 0x22cccc,    // 生成待ちの行列は空で、休眠(復帰待ち)の建物だけが残っている(まだ描かれていない)
   done: 0x33cc55,           // 道路メッシュ・地形・既知の建物残件がすべて揃っている(表示上「完了」)
   gaveUp: 0x9b3fd4,         // 【2026-07-20】4回連続失敗で「諦めて」ready扱いになっただけ。実データは未着の可能性が高い
 };
@@ -125,6 +126,7 @@ const DEBUG_LAYER_COLORS = {
   waiting:  0x3388dd, // 青: 取得/計算待ち
   fetching: 0xdd3333, // 赤: 取得中(道路/線路のみ。実際にネットワーク待ちの状態)
   pending:  0xffaa22, // 橙: データは届いたがメッシュ化/生成がまだ残っている
+  dormant:  0x22cccc, // 水色: 生成待ちの行列は空。休眠(復帰待ち)の建物だけが残っている(画面にはまだ描かれていない)
   ready:    0x33cc55, // 緑: 完了
   gaveUp:   0x9b3fd4, // 紫: 諦めてready扱いになっただけ(実データ未着の可能性)
 };
@@ -224,7 +226,8 @@ function updateDebugTileOverlay(force) {
     const terrainReady = _nearGiveUp || !!(nearElev &&
       x0 > nearCX - NEAR_W / 2 + 10 && x1 < nearCX + NEAR_W / 2 - 10 &&
       z0 > nearCZ - NEAR_D / 2 + 10 && z1 < nearCZ + NEAR_D / 2 - 10);
-    const pending = (pendingByTile.get(key) || 0) + (dormantByTile.get(key) || 0);
+    const pendingQ = pendingByTile.get(key) || 0; // 生成待ちの行列(+隔離キュー)。休眠は含めない
+    const pending = pendingQ + (dormantByTile.get(key) || 0);
     const done = doneByTile.get(key) || 0;
     const roadMeshPending = roadMeshPendingByTile.get(key) || 0;
     // 【2026-07-21・gaveUp判定の再設計(修正5)】以前はosmTileFailCount(全失敗を数える。
@@ -248,7 +251,8 @@ function updateDebugTileOverlay(force) {
     else if (gaveUpRoad) status = 'gaveUp';
     else if (!terrainReady) status = 'waitTerrain';
     else if (!buildingArrived) status = 'buildingPending'; // 建物クエリ待ち(道路は確定済み)
-    else if (roadMeshPending > 0 || pending > 0) status = 'buildingPending';
+    else if (roadMeshPending > 0 || pendingQ > 0) status = 'buildingPending';
+    else if (pending > 0) status = 'dormantOnly'; // 行列は空で休眠だけ残っている(橙と区別する)
     else status = 'done';
     // 【2026-07-21・ユーザー要望】道路生成が「地形は緑なのに赤いまま」滞留するパターンの
     // 診断用。fetching状態のタイルが初めてキューに入ってから何ms経過したかを見える化する
@@ -280,7 +284,8 @@ function updateDebugTileOverlay(force) {
     if (!queued || !roadReady) buildColor = DEBUG_LAYER_COLORS.notReady; // データ未着でまだ判定不能
     else if (gaveUpBuilding && !buildingArrived) buildColor = DEBUG_LAYER_COLORS.gaveUp; // 建物クエリだけ諦めた(道路は確定済み)
     else if (!buildingArrived) buildColor = DEBUG_LAYER_COLORS.fetching; // 道路確定済みだが建物クエリ(後追い)がまだ
-    else if (pending > 0) buildColor = DEBUG_LAYER_COLORS.pending;
+    else if (pendingQ > 0) buildColor = DEBUG_LAYER_COLORS.pending;
+    else if (pending > 0) buildColor = DEBUG_LAYER_COLORS.dormant; // 行列は空・休眠だけ残る(水色)
     else buildColor = DEBUG_LAYER_COLORS.ready;
     group.terrainMesh.material.color.setHex(terrainColor);
     group.roadMesh.material.color.setHex(roadColor);
@@ -1193,7 +1198,11 @@ function animate() {
       if (_f.drop) continue; // 縮小しても線路に被る建物(線路またぎ)は生成しない
       b.w = _f.w; b.d = _f.d; b._fit = 1;
     }
-    if (b.real || !isOnRoad(b.x, b.z, b.w, b.d)) addBuilding(b.x, b.z, b.w, b.d, b.h, b.style, b.real, b.rot, b.name, b.kind, b.minH, b.poly);
+    if (b.real || !isOnRoad(b.x, b.z, b.w, b.d)) {
+      const _gt0 = performance.now(); // HUD用: 1棟あたりの生成時間
+      addBuilding(b.x, b.z, b.w, b.d, b.h, b.style, b.real, b.rot, b.name, b.kind, b.minH, b.poly);
+      GEN_STATS.bldMs += performance.now() - _gt0; GEN_STATS.bldN++;
+    }
     _bgGenerated++;
   }
   if (pendingBuildingIdx > 0 && pendingBuildingIdx === pendingBuildings.length) {

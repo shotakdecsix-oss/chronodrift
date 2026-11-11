@@ -10,6 +10,39 @@ const BB_CELL = 500;
 const BB_ROOT = new THREE.Group(); // まとめ描画のメッシュの親。generateChunkのscene.children追跡に混ざらないよう別ノードにする
 BB_ROOT.name = 'bldgBatches';
 scene.add(BB_ROOT);
+// 部品(建物のBBPart。道路・看板・外形建物のRBPartはRB_HOLDER、road-batch.js)はsceneに繋がず、holderの子にする。
+// 部品は自分では描画されず、位置・形状は追加時にバッチへ書き込み済み。sceneの子にすると建物・道路の数に比例して
+// (数万)増え、毎フレームのupdateMatrixWorldと描画準備の走査がその数だけ空回りする。holderは孤立ノード(sceneの子ではない)
+// なのでどちらにも入らない。'added'/'removed'は従来どおり発火し(addの時点でp.parentはholder)、登録・解除も同じ。
+// 解放側は scene.remove ではなく p.parent.remove を使う。
+// Object3D.removeはindexOf+spliceでO(n)なので、holderだけ番号(_hi)で入れ替えて外す(O(1)。js/lib/pure.js)。
+// 外すと並びが変わるため、generateChunk(part8.js)の「増えた分を後ろから数える」処理は、その間に解放が起きない前提(BB_HOLDERだけが対象)。
+const _bbEvAdded = { type: 'added' }, _bbEvRemoved = { type: 'removed' };
+function makePartsHolder(name) {
+  const h = new THREE.Group();
+  h.name = name;
+  h.visible = false;
+  h.updateMatrixWorld = function () {};
+  h.add = function (p) {
+    if (p.parent) p.parent.remove(p);
+    p.parent = this;
+    idxPush(this.children, p);
+    p.dispatchEvent(_bbEvAdded);
+    return this;
+  };
+  h.remove = function (p) {
+    if (!idxSwapRemove(this.children, p)) return this;
+    p.parent = null;
+    p.dispatchEvent(_bbEvRemoved);
+    return this;
+  };
+  return h;
+}
+const BB_HOLDER = makePartsHolder('bldgPartsHolder');
+// 部品をシーンへ載せる。BBPartはholderへ、?nobatch=1 の通常Meshは従来どおりscene
+function bbAttach(p) {
+  if (p.isBBPart) BB_HOLDER.add(p); else scene.add(p);
+}
 const _bbCells = new Map();       // "cx,cz" -> { key, batches: Map(key -> batch), box }
 const BB_FACADE_MATS = new Map(); // 外壁の種類 -> インスタンス描画用マテリアル(applyTimeOfDayが発光を更新)
 const _bbTplMats = new Map();     // バッチキー -> テンプレートマテリアル(色は白。色はaColで掛ける)

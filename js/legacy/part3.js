@@ -435,7 +435,7 @@ function _addPolyBody(parts, pt, cx, cz, gy, h, kind, wallC, floors, tw, R) {
   const part = rbMakePart(g, bbFacadeTpl(kind), cx, cz);
   part.renderOrder = 2;
   part.userData.noRot = true;
-  scene.add(part);
+  rbAttach(part);
   parts.push(part);
   return front;
 }
@@ -609,7 +609,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, mi
   // キノコ型だけは実寸で生成しているのでscale不要。それ以外(箱・スタジアムの単位円柱)は実寸へ。
   if (!isMushroom) mesh.scale.set(w, h, d);
   mesh.renderOrder = 2;
-  scene.add(mesh);
+  bbAttach(mesh); // まとめ描画の部品はBB_HOLDERの子になる(bldg-batch.js)
   parts.push(mesh);
   } // !polyMode
 
@@ -677,7 +677,7 @@ function addBuilding(x, z, w, d, h, style, isReal, rot, placeName, placeKind, mi
     else m2.scale.set(w + ov, rh, d + ov);
     m2.position.set(x, gy + h - 0.02, z);
     m2.renderOrder = 2;
-    scene.add(m2);
+    bbAttach(m2);
     parts.push(m2);
     return m2;
   };
@@ -1273,7 +1273,7 @@ function addMotorway(x1, z1, x2, z2, wayId=null) {
   if (!geo) return;
   const mesh = rbMakePart(geo, realRoadMat('motorway', 24), (x1 + x2) / 2, (z1 + z2) / 2); // まとめ描画(road-batch.js)
   mesh.renderOrder = 1;
-  scene.add(mesh);
+  rbAttach(mesh);
 
   // 橋脚は見た目・当たり判定とも挙動が不安定(見えない当たり判定が動きをブロックする不具合)だったため廃止。
   // 高速道路は橋脚なしで空中に浮く形で表示する。

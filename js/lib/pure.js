@@ -174,3 +174,26 @@ function meijiMeshCode(lat, lon) {
   const q = Math.floor((lat * 1.5 - p) * 8), v = Math.floor(((lon - 100) - u) * 8);
   return { m1: '' + p + u, m2: '' + p + u + q + v };
 }
+
+// 休眠建物を待ち行列へ戻す件数(part1.js reactivateNearbyDormantBuildings)。
+//   headroom: 総数上限(PERF.bMaxの95%)までの空き / freed: 直近に解放された件数 / backlog: 待ち行列の残り件数
+//   oldMode(?revive=old): 従来式。待ち行列は見ない。
+//   新方式: 待ち行列に200件以上残っている間は0。下限は旧(30件/1.5秒)と同じ約20件/秒になる5件/250ms。
+function reviveBudget(headroom, freed, backlog, oldMode) {
+  const want = headroom + freed;
+  if (oldMode) return Math.min(600, Math.max(30, want));
+  if (backlog >= 200) return 0;
+  return Math.min(600, Math.max(5, want));
+}
+
+// 順序を問わない配列から O(1) で外す補助(BB_HOLDER.children用)。item._hi に配列内の番号を持たせる。
+// Object3D.removeはindexOf+spliceでO(n)のため、数万個の部品を持つholderでは解放のたびに数十msかかる。
+function idxPush(list, item) { item._hi = list.length; list.push(item); }
+function idxSwapRemove(list, item) {
+  const i = item._hi;
+  if (list[i] !== item) return false; // この配列の要素ではない(未追加・二重解放)
+  const last = list.pop();
+  if (last !== item) { list[i] = last; last._hi = i; } // 末尾の要素を空いた番号へ詰める
+  item._hi = -1;
+  return true;
+}

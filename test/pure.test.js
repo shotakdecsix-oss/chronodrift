@@ -46,3 +46,34 @@ test('parseOsmColor: #rrggbb / #rgb / 空', () => {
   assert.strictEqual(ctx.parseOsmColor('#f80'), 0xff8800);
   assert.strictEqual(ctx.parseOsmColor(''), null);
 });
+
+test('reviveBudget: 新方式は待ち行列200件以上で0、未満は min(600, max(5, 空き+解放))', () => {
+  assert.strictEqual(ctx.reviveBudget(1000, 50, 200, false), 0);
+  assert.strictEqual(ctx.reviveBudget(1000, 50, 5000, false), 0);
+  assert.strictEqual(ctx.reviveBudget(1000, 50, 199, false), 600); // 上限600
+  assert.strictEqual(ctx.reviveBudget(100, 20, 0, false), 120);
+  assert.strictEqual(ctx.reviveBudget(0, 0, 0, false), 5); // 下限(旧30/1.5秒≒5/250ms)
+});
+
+test('reviveBudget: ?revive=old は従来式(待ち行列を見ない・下限30)', () => {
+  assert.strictEqual(ctx.reviveBudget(0, 0, 99999, true), 30);
+  assert.strictEqual(ctx.reviveBudget(1000, 50, 99999, true), 600);
+  assert.strictEqual(ctx.reviveBudget(100, 20, 0, true), 120);
+});
+
+test('idxPush / idxSwapRemove: O(1)で外し、詰めた要素の番号も更新する', () => {
+  const list = [], a = {}, b = {}, c = {}, d = {};
+  [a, b, c, d].forEach(o => ctx.idxPush(list, o));
+  assert.deepStrictEqual([a._hi, b._hi, c._hi, d._hi], [0, 1, 2, 3]);
+  assert.strictEqual(ctx.idxSwapRemove(list, b), true); // 途中を外す → 末尾のdがbの位置へ
+  assert.strictEqual(list.length, 3);
+  assert.strictEqual(list[1], d);
+  assert.strictEqual(d._hi, 1);
+  assert.strictEqual(b._hi, -1);
+  assert.strictEqual(ctx.idxSwapRemove(list, b), false); // 二重に外してもfalse(何も壊さない)
+  assert.strictEqual(ctx.idxSwapRemove(list, d), true);
+  assert.strictEqual(ctx.idxSwapRemove(list, c), true); // 末尾を外す
+  assert.strictEqual(ctx.idxSwapRemove(list, a), true); // 最後の1個
+  assert.strictEqual(list.length, 0);
+  assert.strictEqual(ctx.idxSwapRemove(list, {}), false); // 未追加(_hi無し)
+});
