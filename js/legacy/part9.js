@@ -1147,6 +1147,7 @@ function animate() {
       if (bdx * bdx + bdz * bdz > BUILDING_GEN_DIST_REAL * BUILDING_GEN_DIST_REAL) {
         dormantAdd(b);
         _bgDormant++;
+        GEN_STATS.back++; // HUD「戻し/s」: 復帰/sと同じ値が続くなら復帰側と判定が食い違っている
         continue;
       }
       // 【2026-07-16】描画済み建物の総数上限(PERF.bMax)。密集地では距離制限だけだと
@@ -1155,6 +1156,7 @@ function animate() {
       if (buildingRecords.length >= PERF.bMax) {
         dormantAdd(b);
         _bgDormant++;
+        GEN_STATS.back++; // HUD「戻し/s」: 復帰/sと同じ値が続くなら復帰側と判定が食い違っている
         continue;
       }
     }

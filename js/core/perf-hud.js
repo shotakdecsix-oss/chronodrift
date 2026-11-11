@@ -20,20 +20,21 @@
   function genLines(ts) {
     if (typeof GEN_STATS === 'undefined' || typeof pendingBuildings === 'undefined') return '';
     const g = GEN_STATS;
-    let genS = '-', revS = '-';
+    let genS = '-', revS = '-', backS = '-';
     if (gPrev && ts > gPrev.ts) {
       const dt = (ts - gPrev.ts) / 1000, dn = g.bldN - gPrev.bldN;
       genS = (dn / dt).toFixed(0);
       revS = ((g.rev - gPrev.rev) / dt).toFixed(0);
+      backS = ((g.back - gPrev.back) / dt).toFixed(0);
       if (dn > 0) gMs = (g.bldMs - gPrev.bldMs) / dn;
     }
-    gPrev = { ts, bldN: g.bldN, bldMs: g.bldMs, rev: g.rev };
+    gPrev = { ts, bldN: g.bldN, bldMs: g.bldMs, rev: g.rev, back: g.back };
     let wait = 0;
     if (typeof chunkWaitBuildings !== 'undefined') for (const e of chunkWaitBuildings.values()) wait += e.arr.length;
     if (typeof tileWaitBuildings !== 'undefined') for (const e of tileWaitBuildings.values()) wait += e.arr.length;
     const q = pendingBuildings.length - (typeof pendingBuildingIdx !== 'undefined' ? pendingBuildingIdx : 0);
     const dor = (typeof dormantCount !== 'undefined') ? dormantCount : 0;
-    return `待ち ${q}  隔離 ${wait}  休眠 ${dor}\n生成 ${genS}/s  復帰 ${revS}/s  1棟 ${gMs === null ? '-' : gMs.toFixed(2)}ms`;
+    return `待ち ${q}  隔離 ${wait}  休眠 ${dor}\n生成 ${genS}/s  復帰 ${revS}/s  戻し ${backS}/s  1棟 ${gMs === null ? '-' : gMs.toFixed(2)}ms`;
   }
   let on = false, raf = 0, last = 0, lastShow = 0, n = 0, idx = 0;
   function frame(ts) {

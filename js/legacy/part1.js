@@ -1716,7 +1716,7 @@ function unloadFarBuildings(force) {
 let _dormantCheckFrame = 0;
 // 性能HUD(js/core/perf-hud.js)用のカウンタ: bldN=addBuildingを呼んだ回数、bldMs=その合計ms、rev=休眠から行列へ戻した件数。
 // part9.jsの_bgGenerated等は2秒ごとにリセットされるので流用しない(HUD側が差分を取る)。
-const GEN_STATS = { bldN: 0, bldMs: 0, rev: 0 };
+const GEN_STATS = { bldN: 0, bldMs: 0, rev: 0, back: 0 };
 // ?revive=old で従来の復帰方式(90フレームごと・待ち行列の残りを見ない)に戻す。比較用
 const _REVIVE_OLD = /[?&]revive=old/.test(location.search);
 let _reviveLastT = 0;
@@ -1785,11 +1785,11 @@ function reactivateNearbyDormantBuildings() {
         for (let i = arr.length - 1; i >= 0 && revived < REVIVE_BUDGET; i--) {
           const b = arr[i];
           const dx = b.x - px, dz = b.z - pz;
-          let dd = dx * dx + dz * dz;
-          // 【2026-07-21・Fable5診断】unloadFarBuildingsの高層優遇(÷1.6、距離の2乗なので
-          // ÷2.56)と評価基準を揃える。揃っていないと高層建物だけevict/revive境界がずれて
-          // チャーンしうる。
-          if (b.real && b.h > 40) dd /= 2.56;
+          const dd = dx * dx + dz * dz;
+          // 復帰の距離判定は、生成ループ(part9.js)がdormantへ戻す判定(BUILDING_GEN_DIST_REAL、高さの緩和なし)と
+          // 必ず同じにする。以前ここだけ高層(h>40)を1.6倍遠くまで復帰させていたため、生成ループが即dormantへ
+          // 戻す往復が毎秒1000件超続き、待ち行列が常に埋まってFPSが約30に張り付いた(2026-11-12 実機HUDで確認)。
+          // evict側(unloadFarBuildings)の高層優遇は「保持」の話で、復帰境界より外側なのでチャーンしない。
           if (dd <= (b.real ? d2Real : d2Proc)) {
             const last = arr.length - 1; // セル内はswap-remove(順序不要なのでO(1))
             arr[i] = arr[last]; arr.pop();
