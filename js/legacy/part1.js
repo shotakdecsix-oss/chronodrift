@@ -1766,13 +1766,17 @@ function reactivateNearbyDormantBuildings() {
   const _nearCapNow = buildingRecords.length >= PERF.bMax * 0.95;
   const _realRevLim = _nearCapNow ? Math.min(BUILDING_GEN_DIST_REAL, _lastRealKeepDist * 0.8) : BUILDING_GEN_DIST_REAL;
   const d2Real = _realRevLim * _realRevLim;
+  // 高層(h>40)はevict側(unloadFarBuildings)と同じ1.6倍まで復帰させる。ただし生成ループ(part9.js)が休眠へ戻す
+  // 距離(BUILDING_GEN_DIST_REAL)は絶対に超えない。超えると「復帰→即休眠」の往復が毎秒1000件超続く(2026-11-12 実機で確認)
+  const _tallRevLim = Math.min(BUILDING_GEN_DIST_REAL, _realRevLim * 1.6);
+  const d2RealTall = _tallRevLim * _tallRevLim;
   const d2Proc = BUILDING_GEN_DIST_PROC * BUILDING_GEN_DIST_PROC;
   // 【2026-07-21・Fable5診断(v2)】以前は配列の末尾(=直近dormant入りした建物)から走査
   // していたため、古くから待っている近傍建物に予算が永遠に回らない「LIFO飢餓」を
   // 起こしていた(レートを上げても解決しない選択の問題、と指摘された)。プレイヤーに
   // 近いセル(DORMANT_CELL=200m四方、part8.js)から外側へ順に走査し、常に「近い建物が
   // 最優先で復帰する」ことを保証する。
-  const maxD = Math.sqrt(Math.max(d2Real, d2Proc));
+  const maxD = Math.sqrt(Math.max(d2RealTall, d2Proc));
   const maxR = Math.max(0, Math.ceil(maxD / DORMANT_CELL)) + 1;
   const pgx = Math.floor(px / DORMANT_CELL), pgz = Math.floor(pz / DORMANT_CELL);
   let revived = 0;
@@ -1786,11 +1790,7 @@ function reactivateNearbyDormantBuildings() {
           const b = arr[i];
           const dx = b.x - px, dz = b.z - pz;
           const dd = dx * dx + dz * dz;
-          // 復帰の距離判定は、生成ループ(part9.js)がdormantへ戻す判定(BUILDING_GEN_DIST_REAL、高さの緩和なし)と
-          // 必ず同じにする。以前ここだけ高層(h>40)を1.6倍遠くまで復帰させていたため、生成ループが即dormantへ
-          // 戻す往復が毎秒1000件超続き、待ち行列が常に埋まってFPSが約30に張り付いた(2026-11-12 実機HUDで確認)。
-          // evict側(unloadFarBuildings)の高層優遇は「保持」の話で、復帰境界より外側なのでチャーンしない。
-          if (dd <= (b.real ? d2Real : d2Proc)) {
+          if (dd <= (b.real ? (b.h > 40 ? d2RealTall : d2Real) : d2Proc)) {
             const last = arr.length - 1; // セル内はswap-remove(順序不要なのでO(1))
             arr[i] = arr[last]; arr.pop();
             dormantCount--;

@@ -3,7 +3,7 @@
 ## 全体
 - `index.html`: HUD（CSS込み）と、スクリプトを順に読み込むだけのページ。ビルド工程はない。
 - `js/legacy/part1〜10.js`: ゲーム本体。ESモジュールではなくクラシックスクリプトで、トップレベルの let/const/function は全ファイル共有のグローバル。読み込み順に依存する（後のファイルで宣言される変数を、前のファイルの起動時処理から参照しないこと）。
-- `js/core/`: 独立した小さなモジュール。mode-registry（モード切替）、audio（環境音）、perf-hud（性能表示）、wake-lock（画面スリープ防止）、bldg-batch（建物のまとめ描画。部品はsceneではなく `BB_HOLDER` の子。解放は `p.parent.remove(p)`）、road-batch（道路と外形ポリゴンの建物のまとめ描画。部品は `RB_HOLDER` の子）、shop-signs（店名の看板）、vt（地図データ: ベクタータイル→Overpass形式の要素に変換。part8.jsのfetchOSMTileBatchが最初に呼ぶ）。
+- `js/core/`: 独立した小さなモジュール。mode-registry（モード切替）、audio（環境音）、perf-hud（性能表示）、wake-lock（画面スリープ防止）、bldg-batch（建物のまとめ描画。部品はsceneではなく `BB_HOLDER` の子。解放は `p.parent.remove(p)`）、road-batch（道路と外形ポリゴンの建物のまとめ描画。部品は `RB_HOLDER` の子）、shop-signs（店名の看板）、vt（地図データ: ベクタータイル→Overpass形式の要素に変換。part8.jsのfetchOSMTileBatchが最初に呼ぶ。変換本体は vt-worker.js のWorkerで動き、失敗時はメインで変換。`?vtworker=0` で切り戻し）。
 - `js/lib/pure.js`: DOMにもthree.jsにも依存しない純関数。`test/` でユニットテストする。
 - `server/server.js`: 静的配信（gzip＋ETag）と、外部APIのプロキシ兼キャッシュ（/api/overpass、/api/elevation、/api/nominatim）。
 - `scripts/check-syntax.js`, `test/`, `.github/workflows/ci.yml`: `npm test` と GitHub Actions。

@@ -36,7 +36,7 @@ const VT_LRU = 16, VT_LRU_BYTES = 6 * 1048576; // 変換済みタイルの保持
 const VT_AUX_MAX = 64;        // 隣接タイルの継ぎ目情報(建物断片・橋/トンネル断片だけ。小さい)の保持数
 const VT_BLDG_BUFFER = 64;    // OpenMapTiles(planetiler)のbuildingレイヤーのバッファ(4px=64/4096)
 const VT_LAYERS = new Set(['transportation', 'building', 'water', 'waterway', 'landcover', 'landuse', 'poi']);
-const vtStats = { batches: 0, tiles: 0, aux: 0, bytes: 0, fetchMs: 0, convMs: 0, fail: 0, retry: 0, fallback: 0, merged: 0, chains: 0, lastErr: '' };
+const vtStats = { batches: 0, tiles: 0, aux: 0, bytes: 0, fetchMs: 0, convMs: 0, fail: 0, retry: 0, fallback: 0, merged: 0, chains: 0, recvMs: 0, recvN: 0, lastErr: '' };
 let _vtDownUntil = 0, _vtFailStreak = 0;
 // 失敗したタイルはまずベクタータイルで取り直し、同じタイルで3回続けて失敗した時だけOverpassへ回す
 // (part8.js fetchOSMTileBatch)。Overpassは慢性的に混雑していて、すぐ切り替えるとかえって遅くなるため。
@@ -44,6 +44,16 @@ const _vtTileFails = new Map();
 function vtUsable() { return VT_ON && Date.now() >= _vtDownUntil; }
 function vtNoteFail(k) { const n = (_vtTileFails.get(k) || 0) + 1; _vtTileFails.set(k, n); if (_vtTileFails.size > 4000) _vtTileFails.clear(); return n; }
 function vtNoteOk(k) { _vtTileFails.delete(k); }
+
+// 【2026-11-12・段階4/P-4】変換(取得→デコード→Overpass形式への組み立て)はWeb Worker(vt-worker.js)で行う。
+// 1タイルの変換はメインスレッドで約0.1〜0.4秒(建物1万棟級)かかり、タイルが届くたびに画面が止まっていた。
+// 結果は小さく分けて送り(vt-worker.js)、メイン側の1回の受け取りを数msに抑える。Workerが使えない・壊れた時は
+// 同じ変換をメインスレッドで行う(失敗には数えない)。切り戻し: URLに ?vtworker=0。
+const VT_WORKER_WANT = VT_ON && typeof Worker !== 'undefined' && typeof document !== 'undefined' && !/[?&]vtworker=0/.test(location.search);
+const VT_WORKER_TIMEOUT_MS = 120000; // 1バッチの上限(中のfetchは各30秒で打ち切られる)
+let _vtWk = null, _vtWkDead = false, _vtWkSeq = 0;
+let _vtTplSaved = null; // Worker内でTileJSONを取り直した時、メインへlocalStorageへの保存を頼む関数(vt-worker.jsが設定)
+const _vtWkReq = new Map(); // 依頼id → { resolve, reject, els, timer }
 
 // ---------------------------------------------------------------- 取得
 let _vtTplP = null, _vtTplAt = 0;
@@ -72,6 +82,7 @@ function _vtTemplate(force) {
     if (!url) throw new Error('TileJSON: tiles missing');
     _vtTplAt = Date.now();
     try { localStorage.setItem(VT_TPL_KEY, JSON.stringify({ url, t: _vtTplAt })); } catch (e) {}
+    if (_vtTplSaved) _vtTplSaved(url, _vtTplAt); // Worker内にはlocalStorageが無い
     return url;
   })();
   _vtTplP = p;
@@ -851,57 +862,131 @@ async function _vtChains(out, union) {
   }
 }
 
+// 取得→変換→バッチの出力。失敗は例外のまま投げる(呼び出し元のvtLoadBatchと、Worker側のvt-worker.jsが扱う)
+async function _vtBatchCore(bboxes, kind) {
+  const boxes = bboxes.map(s => String(s).split(',').map(Number));
+  const keys = new Map();
+  for (const b of boxes) {
+    const x0 = _vtLon2X(b[1]), x1 = _vtLon2X(b[3]), y0 = _vtLat2Y(b[2]), y1 = _vtLat2Y(b[0]);
+    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) keys.set(x + '/' + y, [x, y]);
+  }
+  const union = new Map();
+  await Promise.all([...keys].map(async ([k, [x, y]]) => { union.set(k, await _vtFull(x, y)); }));
+  const out = [], seen = new Set();
+  for (const f of union.values()) for (const el of f.els) {
+    if (seen.has(el.id)) continue;
+    const isB = !!(el.tags && el.tags.building);
+    if ((kind === 'road' && isB) || (kind === 'building' && !isB)) continue;
+    const d = el.bounds, isCoast = el.tags && (el.tags.natural === 'coastline' || el.tags['vt:sea']);
+    // 海岸線・海面は範囲外でも全部渡す(海/陸の判定はこのバッチのz14タイルの海が全部揃っている前提。
+    // 受け側はIDで重複排除する。part4.js _vtSeaAt / processCoastlineFill)
+    if (!isCoast && !boxes.some(b => d.maxlat >= b[0] && d.minlat <= b[2] && d.maxlon >= b[1] && d.minlon <= b[3])) continue;
+    seen.add(el.id);
+    out.push(el);
+  }
+  // 海に面したタイルなら、周囲1枚ぶんのタイルの海岸線も渡す(タイル境界で切れた海岸線の先が欠けたまま
+  // 海の判定・海底の地形処理が行われないように)
+  if (kind !== 'building' && [...union.values()].some(f => f.T.hasSea)) {
+    const ring = new Set();
+    for (const k of union.keys()) {
+      const [x, y] = k.split('/').map(Number);
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) { const nk = (x + dx) + '/' + (y + dy); if (!union.has(nk)) ring.add(nk); }
+    }
+    const more = await Promise.all([...ring].map(k => { const [x, y] = k.split('/').map(Number); return _vtAuxOf(x, y).then(a => a.coast, () => []); }));
+    for (const arr of more) for (const el of arr) if (!seen.has(el.id)) { seen.add(el.id); out.push(el); }
+  }
+  await _vtChains(out, union);
+  return { elements: out, vt: true, z14: [...union.values()].map(f => f.T.x * VT_N + f.T.y) };
+}
+
+// ---------------------------------------------------------------- Worker(メイン側の窓口)
+function _vtWkKill(why) { // 以降はメインで変換する。待っていた依頼もメインでやり直させる(失敗には数えない)
+  _vtWkDead = true;
+  const w = _vtWk;
+  _vtWk = null;
+  try { if (w) w.terminate(); } catch (e) {}
+  for (const q of _vtWkReq.values()) {
+    clearTimeout(q.timer);
+    const e = new Error('vt worker: ' + why);
+    e.vtWkDead = true;
+    q.reject(e);
+  }
+  _vtWkReq.clear();
+  console.warn('[vt] Workerが使えないため、メインスレッドで変換します:', why);
+}
+function _vtWkStart() {
+  if (_vtWk || _vtWkDead) return _vtWk;
+  let w;
+  try { w = new Worker('js/core/vt-worker.js'); } catch (e) { _vtWkKill(String((e && e.message) || e)); return null; }
+  w.onerror = (ev) => { if (_vtWk === w) _vtWkKill(String((ev && ev.message) || 'script error')); };
+  w.onmessageerror = () => { if (_vtWk === w) _vtWkKill('messageerror'); };
+  w.onmessage = (ev) => {
+    const t0 = performance.now();
+    const m = ev.data; // 構造化複製の取り出しはここで行われる(HUDの「受取」に含める)
+    if (!m) return;
+    const q = _vtWkReq.get(m.id);
+    if (m.t === 'part') {
+      if (q) { const a = q.els, b = m.els; for (let i = 0; i < b.length; i++) a.push(b[i]); }
+    } else if (m.t === 'done' || m.t === 'err') {
+      if (m.stats) Object.assign(vtStats, m.stats);
+      if (q) {
+        _vtWkReq.delete(m.id);
+        clearTimeout(q.timer);
+        if (m.t === 'done') { vtStats.recvN++; q.resolve({ elements: q.els, vt: true, z14: m.z14 }); }
+        else { const e = new Error(m.message); e.name = m.name || 'Error'; q.reject(e); }
+      }
+    } else if (m.t === 'tpl') {
+      try { localStorage.setItem(VT_TPL_KEY, JSON.stringify({ url: m.url, t: m.at })); } catch (e) {}
+    }
+    vtStats.recvMs += performance.now() - t0;
+  };
+  let tpl = null; // タイルURLのテンプレートはlocalStorageにあるものをWorkerへ渡す(WorkerはlocalStorageを読めない)
+  try {
+    const c = JSON.parse(localStorage.getItem(VT_TPL_KEY) || 'null');
+    if (c && c.url && Date.now() - c.t < VT_TPL_TTL_MS) tpl = c;
+  } catch (e) {}
+  w.postMessage({ t: 'init', tpl });
+  _vtWk = w;
+  return w;
+}
+function _vtViaWorker(bboxes, kind) {
+  const w = _vtWkStart();
+  if (!w) { const e = new Error('vt worker unavailable'); e.vtWkDead = true; return Promise.reject(e); }
+  return new Promise((resolve, reject) => {
+    const id = ++_vtWkSeq;
+    const timer = setTimeout(() => { if (_vtWkReq.delete(id)) reject(new Error('vt worker timeout')); }, VT_WORKER_TIMEOUT_MS);
+    _vtWkReq.set(id, { resolve, reject, els: [], timer });
+    try { w.postMessage({ t: 'req', id, bboxes, kind }); } catch (e) { clearTimeout(timer); _vtWkReq.delete(id); reject(e); }
+  });
+}
+
 // ---------------------------------------------------------------- 公開API
 // bboxes: fetchOSMTileBatchの "minLat,minLon,maxLat,maxLon" 文字列の配列。kind: 'road'|'building'|undefined
 // → { elements } (Overpass応答と同じ形) / null(失敗。呼び出し元はOverpass経路へフォールバックする)
+function _vtNoteBatchFail(e) {
+  vtStats.fail++;
+  vtStats.lastErr = String((e && (e.name === 'AbortError' ? 'timeout' : e.message)) || e).slice(0, 60);
+  if (++_vtFailStreak >= 8) { // 配信元の障害とみなす(単発の失敗はタイル単位の取り直しで吸収する)
+    _vtDownUntil = Date.now() + 60 * 1000;
+    _vtFailStreak = 0;
+    console.warn('[vt] 8回連続で失敗したため1分間Overpassのみで取得します');
+  }
+  console.warn('[vt] ベクタータイル取得失敗 → Overpassへフォールバック', e);
+}
 async function vtLoadBatch(bboxes, kind) {
   if (!VT_ON || Date.now() < _vtDownUntil) return null;
   vtStats.batches++;
   try {
-    const boxes = bboxes.map(s => String(s).split(',').map(Number));
-    const keys = new Map();
-    for (const b of boxes) {
-      const x0 = _vtLon2X(b[1]), x1 = _vtLon2X(b[3]), y0 = _vtLat2Y(b[2]), y1 = _vtLat2Y(b[0]);
-      for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) keys.set(x + '/' + y, [x, y]);
-    }
-    const union = new Map();
-    await Promise.all([...keys].map(async ([k, [x, y]]) => { union.set(k, await _vtFull(x, y)); }));
-    const out = [], seen = new Set();
-    for (const f of union.values()) for (const el of f.els) {
-      if (seen.has(el.id)) continue;
-      const isB = !!(el.tags && el.tags.building);
-      if ((kind === 'road' && isB) || (kind === 'building' && !isB)) continue;
-      const d = el.bounds, isCoast = el.tags && (el.tags.natural === 'coastline' || el.tags['vt:sea']);
-      // 海岸線・海面は範囲外でも全部渡す(海/陸の判定はこのバッチのz14タイルの海が全部揃っている前提。
-      // 受け側はIDで重複排除する。part4.js _vtSeaAt / processCoastlineFill)
-      if (!isCoast && !boxes.some(b => d.maxlat >= b[0] && d.minlat <= b[2] && d.maxlon >= b[1] && d.minlon <= b[3])) continue;
-      seen.add(el.id);
-      out.push(el);
-    }
-    // 海に面したタイルなら、周囲1枚ぶんのタイルの海岸線も渡す(タイル境界で切れた海岸線の先が欠けたまま
-    // 海の判定・海底の地形処理が行われないように)
-    if (kind !== 'building' && [...union.values()].some(f => f.T.hasSea)) {
-      const ring = new Set();
-      for (const k of union.keys()) {
-        const [x, y] = k.split('/').map(Number);
-        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) { const nk = (x + dx) + '/' + (y + dy); if (!union.has(nk)) ring.add(nk); }
-      }
-      const more = await Promise.all([...ring].map(k => { const [x, y] = k.split('/').map(Number); return _vtAuxOf(x, y).then(a => a.coast, () => []); }));
-      for (const arr of more) for (const el of arr) if (!seen.has(el.id)) { seen.add(el.id); out.push(el); }
-    }
-    await _vtChains(out, union);
+    let r;
+    if (VT_WORKER_WANT && !_vtWkDead) {
+      try { r = await _vtViaWorker(bboxes, kind); }
+      catch (e) { if (e && e.vtWkDead) r = await _vtBatchCore(bboxes, kind); else throw e; } // Workerが使えなくなったらメインで続ける
+    } else r = await _vtBatchCore(bboxes, kind);
     _vtFailStreak = 0;
     _vtCredit();
-    return { elements: out, vt: true, z14: [...union.values()].map(f => f.T.x * VT_N + f.T.y) };
+    return r;
   } catch (e) {
-    vtStats.fail++;
-    vtStats.lastErr = String((e && (e.name === 'AbortError' ? 'timeout' : e.message)) || e).slice(0, 60);
-    if (++_vtFailStreak >= 8) { // 配信元の障害とみなす(単発の失敗はタイル単位の取り直しで吸収する)
-      _vtDownUntil = Date.now() + 60 * 1000;
-      _vtFailStreak = 0;
-      console.warn('[vt] 8回連続で失敗したため1分間Overpassのみで取得します');
-    }
-    console.warn('[vt] ベクタータイル取得失敗 → Overpassへフォールバック', e);
+    _vtNoteBatchFail(e);
     return null;
   }
 }
@@ -920,7 +1005,8 @@ function _vtCredit() {
 }
 function vtStatsText() { // 性能HUD(js/core/perf-hud.js)用
   if (!VT_ON) return 'vt off (Overpass)';
-  const s = vtStats, n = s.tiles || 1;
-  return `vt ${s.tiles}枚(+隣${s.aux}) ${(s.bytes / 1048576).toFixed(1)}MB 取得${(s.fetchMs / n).toFixed(0)}ms 変換${(s.convMs / n).toFixed(0)}ms` +
+  const s = vtStats, n = s.tiles || 1, wk = VT_WORKER_WANT && !_vtWkDead;
+  return `vt ${s.tiles}枚(+隣${s.aux}) ${(s.bytes / 1048576).toFixed(1)}MB 取得${(s.fetchMs / n).toFixed(0)}ms 変換${wk ? '(裏)' : ''}${(s.convMs / n).toFixed(0)}ms` +
+    (wk ? ` 受取${(s.recvMs / (s.recvN || 1)).toFixed(0)}ms/回` : '') +
     `  失敗${s.fail} 再試行${s.retry} Overpass${s.fallback} 合成${s.merged} 継ぎ目${s.chains}` + (s.lastErr ? `\nvt最後のエラー: ${s.lastErr}` : '');
 }
