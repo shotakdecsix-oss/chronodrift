@@ -77,3 +77,39 @@ test('idxPush / idxSwapRemove: O(1)で外し、詰めた要素の番号も更新
   assert.strictEqual(list.length, 0);
   assert.strictEqual(ctx.idxSwapRemove(list, {}), false); // 未追加(_hi無し)
 });
+
+test('sortTailByDistance: fromIdx以降だけ近い順に並べ、手前は触らない', () => {
+  const arr = [{ d: 9 }, { d: 5 }, { d: 3 }, { d: 1 }, { d: 2 }];
+  ctx.sortTailByDistance(arr, 2, o => o.d);
+  assert.deepStrictEqual(arr.map(o => o.d), [9, 5, 1, 2, 3]);
+});
+
+test('sortTailByDistance: 同じ距離は元の順を保つ(安定)・NaNは末尾・範囲外は端へ', () => {
+  const arr = [{ n: 'a', d: 7 }, { n: 'b', d: NaN }, { n: 'c', d: 7 }, { n: 'd', d: -5 }, { n: 'e', d: 1e9 }, { n: 'f', d: 7 }];
+  ctx.sortTailByDistance(arr, 0, o => o.d);
+  // 負は0扱いで先頭、7が3つはa→c→fの順、巨大値とNaNは末尾側(同順位なので元の順: b→e)
+  assert.deepStrictEqual(arr.map(o => o.n), ['d', 'a', 'c', 'f', 'b', 'e']);
+});
+
+test('sortTailByDistance: 1件以下・範囲外のfromIdxは何もしない/負のfromIdxは0扱い', () => {
+  const one = [{ d: 1 }];
+  ctx.sortTailByDistance(one, 0, () => { throw new Error('呼ばれない'); });
+  assert.strictEqual(one.length, 1);
+  const arr = [{ d: 2 }, { d: 1 }];
+  ctx.sortTailByDistance(arr, 5, () => { throw new Error('呼ばれない'); });
+  assert.deepStrictEqual(arr.map(o => o.d), [2, 1]);
+  ctx.sortTailByDistance(arr, -3, o => o.d);
+  assert.deepStrictEqual(arr.map(o => o.d), [1, 2]);
+});
+
+test('sortTailByDistance: 比較関数つきsort(安定)と同じ並びになり、距離関数は1要素1回だけ', () => {
+  let seed = 12345;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const arr = [];
+  for (let i = 0; i < 5000; i++) arr.push({ i, d: Math.floor(rnd() * 8000) / 2 }); // 0.5m刻み(同順位も多数)
+  const ref = arr.slice().sort((a, b) => a.d - b.d);
+  let calls = 0;
+  ctx.sortTailByDistance(arr, 0, o => { calls++; return o.d; });
+  assert.strictEqual(calls, 5000);
+  assert.deepStrictEqual(arr.map(o => o.i), ref.map(o => o.i));
+});

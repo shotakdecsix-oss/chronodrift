@@ -197,3 +197,21 @@ function idxSwapRemove(list, item) {
   item._hi = -1;
   return true;
 }
+
+// 配列のfromIdx以降を、距離(m)の近い順に並べ替える(part1.js sortNewEntriesByDistanceToPlayer用)。
+// 比較関数つきsortは数万件で数十msかかるため、距離を0.25m刻みの整数にして添字と1つの数値(q*2^32+添字)に
+// 詰め、ネイティブの数値ソートに任せる。同じ距離は元の順を保つ。NaNは末尾、範囲外の値は端(0〜約26万m)に寄せる。
+function sortTailByDistance(arr, fromIdx, distOf) {
+  if (fromIdx < 0) fromIdx = 0;
+  const n = arr.length - fromIdx;
+  if (n <= 1) return;
+  const keys = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    let q = Math.floor(distOf(arr[fromIdx + i]) * 4);
+    if (q !== q) q = 1048575; else if (q < 0) q = 0; else if (q > 1048575) q = 1048575;
+    keys[i] = q * 4294967296 + i;
+  }
+  keys.sort();
+  const tail = arr.slice(fromIdx);
+  for (let i = 0; i < n; i++) arr[fromIdx + i] = tail[keys[i] % 4294967296];
+}

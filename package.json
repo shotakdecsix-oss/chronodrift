@@ -5,7 +5,7 @@
   "description": "ChronoDrift - three.js browser game with Node proxy/cache server",
   "scripts": {
     "start": "node server/server.js",
-    "test": "node scripts/check-syntax.js && node --test test/pure.test.js test/vt-worker.test.js"
+    "test": "node scripts/check-syntax.js && node --test test/pure.test.js test/vt-worker.test.js test/slice-driver.test.js"
   },
   "engines": {
     "node": ">=18"

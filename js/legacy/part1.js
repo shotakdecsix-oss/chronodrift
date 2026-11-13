@@ -1159,16 +1159,10 @@ function priorityDist2(x, z) {
   const f = 1 - PRIORITY_FWD_BIAS * (dx * ux + dz * uz) / Math.sqrt(d2);
   return d2 * f * f;
 }
-// 【2026-11-10】比較のたびに座標オブジェクトを作っていた(要素数×logN回の生成)のを、
-// 要素ごとに1回だけ実効距離を計算してから並べ替える形にした(数万件の道路キューで重かった)。
+// 要素ごとに1回だけ実効距離を求め、js/lib/pure.jsのsortTailByDistance(数値キーのネイティブソート)で並べる。
+// 比較関数つきsortは待ち行列が数万件の時に1回数十msかかり、0.5秒ごとの全件並べ直しがカクつきの元だった。
 function sortNewEntriesByDistanceToPlayer(arr, fromIdx, getXZ) {
-  const n = arr.length - fromIdx;
-  if (n <= 1) return;
-  const keys = new Float64Array(n), idx = new Uint32Array(n);
-  for (let i = 0; i < n; i++) { const p = getXZ(arr[fromIdx + i]); keys[i] = priorityDist2(p.x, p.z); idx[i] = i; }
-  idx.sort((a, b) => keys[a] - keys[b]);
-  const tail = arr.slice(fromIdx);
-  for (let i = 0; i < n; i++) arr[fromIdx + i] = tail[idx[i]];
+  sortTailByDistance(arr, fromIdx, o => { const p = getXZ(o); return Math.sqrt(priorityDist2(p.x, p.z)); });
 }
 
 // ======= 道路メッシュ生成のフレーム分割 =======
@@ -1194,6 +1188,9 @@ const pendingRoadMeshes = [];
 // _commitWaterPoly直後にこれが跳ね上がれば「再キューは発火しているのに距離チェックで
 // 消えている」ことの直接証拠になる(IMPL_PROMPT_20260803_BRIDGE_WATER.md 5章の計器)。
 let _bridgeDirtyDropped = 0;
+// processTileDataSteps(part8.js)が道路ループの間だけ設定する溜め先。待ち行列の添字はスライスの合間に
+// ずれる(processRoadMeshQueueが前から削る)ため、ループが終わるまで別の配列に溜めてから渡す。
+let _roadMeshCollector = null;
 function queueRoadMesh(r) {
   // 【2026-08-28・B-1】そもそもメッシュを作らないレコード(トンネル)。呼び出し元は3箇所
   // (addRoad / unloadFarRoads / rebuildRoadsInBounds)あり、特にunloadFarRoadsは
@@ -1202,7 +1199,7 @@ function queueRoadMesh(r) {
   if (r._noMesh) return;
   if (r._q || r._dropped) return; // 二重投入防止 / 距離破棄済みレコード(evictFarRoads参照)は作らない
   r._q = true;
-  pendingRoadMeshes.push(r);
+  (_roadMeshCollector || pendingRoadMeshes).push(r);
 }
 function processRoadMeshQueue() {
   if (pendingRoadMeshes.length === 0) return;

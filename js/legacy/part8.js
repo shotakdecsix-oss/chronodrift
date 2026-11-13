@@ -371,16 +371,38 @@ const UNPAVED_SURFACES = new Set(['unpaved','dirt','earth','ground','gravel','fi
 // 鉄道・高速道路のトンネルは長さに関係なく常に非表示(下記 _alwaysHide)。
 const TUNNEL_SURFACE_MAX_M = 150;
 
+// タイル1バッチ分の処理は、密集地では同期のまま平均0.4秒・最大1.8秒メインスレッドを止めていた(移動中の
+// カクつきの最大の塊)。ジェネレーターにして、数msごとに描画へ制御を返す。駆動は_osmReadyDrain(_osmJob)。
+// キャッシュ・Overpass経路は従来どおり同期で最後まで回す(下のprocessTileData)。
+let _sliceDeadline = Infinity; // 今のスライスの締め切り(performance.now基準)。Infinityなら中断せず最後まで進める
 function processTileData(data, tileCount, tileList) {
+  _osmJobFinish(); // way IDの重複排除は「同時に1バッチだけ処理する」前提。途中の分があれば先に終わらせる
+  const prev = _sliceDeadline;
+  _sliceDeadline = Infinity;
+  try { const g = processTileDataSteps(data, tileCount, tileList); while (!g.next().done); }
+  finally { _sliceDeadline = prev; }
+}
+// スライスの切れ目。道路メッシュ・建物削除の溜め先(グローバル)は、中断中に他の処理が使うので外しておく。
+function* _tdBreak(td) {
+  td.acc += performance.now() - td.t;
+  const rc = _roadMeshCollector, rb = _roadBuildingRemoveBatch;
+  _roadMeshCollector = null; _roadBuildingRemoveBatch = null;
+  yield;
+  _roadMeshCollector = rc; _roadBuildingRemoveBatch = rb;
+  td.t = performance.now(); td.n++;
+}
+function* processTileDataSteps(data, tileCount, tileList) {
   if (!data || !data.elements) return;
   // 【2026-08-03・v3計測】完全同期のこの関数がフレームループをどれだけ止めているかを
   // 密集地で確認するための計測。P1(bbox早期脱出)前後で比較する(IMPL_PROMPT_20260803_
   // ROAD_FIDELITY_v3_PERF.md参照)。
-  const _tileDataT0 = performance.now();
+  const _TD = { acc: 0, t: performance.now(), n: 1 }; // 実際に処理した時間の累計(スライス間の待ちは含めない)と区切り数
+  let _ti = 0; // 中断判定を8要素に1回にするカウンタ
   // building=タグを持つrelation(マルチポリゴン)をway相当の疑似要素に変換し、既存のbuilding
   // 処理に合流させる(part2.js synthesizeBuildingRelationWays参照。地図上に見える
   // 大きな建物枠が生成システムに一切渡っていなかった不具合の対策)。
   const buildingElements8 = data.elements.concat(synthesizeBuildingRelationWays(data.elements, seenOSMRelations));
+  if (performance.now() >= _sliceDeadline) yield* _tdBreak(_TD);
   // 国別プロファイル(タグ実測値が無い箇所のフォールバックにのみ使う)。
   // 【2026-07-17】ここでのbuildingElements8全体の被覆率判定(local density override)は
   // 撤去済み(part2.js localDensityProfileAt参照。実測タグの忠実度向上により不要と判断)。
@@ -389,15 +411,17 @@ function processTileData(data, tileCount, tileList) {
   // 駅ノードはグローバルに(タイル取得バッチをまたいで)蓄積する
   // (part2.js registerStationPoints参照。東京・NY等の対策)。
   if (MODE === 'real') registerStationPoints(data.elements);
+  if (performance.now() >= _sliceDeadline) yield* _tdBreak(_TD);
   // 駅ランドマーク(初期範囲の外にある駅も、タイルが届いた時点でここで拾う)
   processStationNodes(data.elements);
+  if (performance.now() >= _sliceDeadline) yield* _tdBreak(_TD);
   // Roads
-  const _roadMeshStart8 = pendingRoadMeshes.length; // このバッチで新規投入する分の開始位置(近傍優先ソート用)
+  const _rmc = []; // このバッチの道路メッシュ。待ち行列の添字はスライスの合間にずれるので、ループが終わるまで別の配列に溜める
   // 【2026-08-27・A-1修正(CODE_REVIEW_20260826_PERF_AND_CRASH.md)】このタイルの道路ループが
   // 終わるまでremoveBuildingsOverlappingRoad(part1.js)に削除bidをバッチへ蓄積させ、
   // removeBuildingsByIds(全走査+空間グリッド3本の完全再構築)をタイル1つにつき1回にまとめる。
   // 以前はセグメント1本ごとに走っていた(密集タイルで数百〜数千回)。
-  _roadBuildingRemoveBatch = new Set();
+  // (削除候補を溜めるSetはtryの直前で作る。前段で例外が出ても、グローバルに残して以後の削除を止めないため)
   // 【2026-08-28・B-1 Phase2】トンネル坑口の判定用の前段スキャン。
   // 真の坑口の条件は2つ:
   //   (1) その端点で終わるトンネルwayがこの1本だけ = 分割されたトンネル同士の継ぎ目ではない。
@@ -414,6 +438,7 @@ function processTileData(data, tileCount, tileList) {
                                (el.tags.highway || el.tags.railway === 'rail'))) {
     _tEndCnt = new Map(); _sEndCnt = new Map();
     for (const el of data.elements) {
+      if ((++_ti & 7) === 0 && performance.now() >= _sliceDeadline) yield* _tdBreak(_TD);
       if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) continue;
       const _t = el.tags || {};
       if (!_t.highway && _t.railway !== 'rail') continue;
@@ -424,10 +449,13 @@ function processTileData(data, tileCount, tileList) {
       }
     }
   }
+  _roadBuildingRemoveBatch = new Set();
+  _roadMeshCollector = _rmc;
   try {
-  data.elements.forEach(el => {
-    if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) return;
-    if (seenOSMWays.has(el.id)) return; // 隣接タイル/初期ロードで処理済み
+  for (const el of data.elements) {
+    if ((++_ti & 7) === 0 && performance.now() >= _sliceDeadline) yield* _tdBreak(_TD);
+    if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) continue;
+    if (seenOSMWays.has(el.id)) continue; // 隣接タイル/初期ロードで処理済み
     const tags = el.tags || {};
     // 【2026-08-28・B-1(CODE_REVIEW_20260826_REALISM.md)】tunnel の判定はway単位で1回だけ行い、
     // 下の道路/線路/水路の各ループへ同じ結果を渡す。
@@ -481,8 +509,8 @@ function processTileData(data, tileCount, tileList) {
       const width = hw==='trunk'||hw==='primary' ? 8 : hw==='secondary' ? 6 : hw==='tertiary'||hw==='residential' ? 4 : 2.5;
       let type = hw==='motorway' ? 'motorway' : hw==='motorway_link' ? 'trunk'
                  : (hw==='trunk'||hw==='primary'||hw==='secondary'||hw==='tertiary') ? hw : 'road';
-      if (USES_MEIJI_LANDUSE && (type === 'road' || type === 'motorway')) return; // 明治・江戸: 細街路も高速道路もない
-      if (MODE === 'space' && (type === 'road' || type === 'tertiary' || type === 'secondary')) return; // 宇宙: 鉄道・高速道路・国道(幹線)以外の小さな道路は出さない
+      if (USES_MEIJI_LANDUSE && (type === 'road' || type === 'motorway')) continue; // 明治・江戸: 細街路も高速道路もない
+      if (MODE === 'space' && (type === 'road' || type === 'tertiary' || type === 'secondary')) continue; // 宇宙: 鉄道・高速道路・国道(幹線)以外の小さな道路は出さない
       // 細街路のみ舗装/未舗装を見た目に反映(幹線級は現実にほぼ全て舗装のため対象外)。
       // surfaceタグがあればそれに従い、無ければhighway=track/pathのみ未舗装と推定する。
       if (type === 'road') {
@@ -552,30 +580,34 @@ function processTileData(data, tileCount, tileList) {
         addRoad(a.x, a.z, b.x, b.z, ww, 'water', null, el.id, _tunnelInfo);
       }
     }
-  });
+  }
   } finally {
+    _roadMeshCollector = null;
+    // このバッチの道路メッシュを近い順に並べて待ち行列の末尾へ渡す。例外でも途中までの分を落とさないようfinallyで行う
+    sortNewEntriesByDistanceToPlayer(_rmc, 0, r => ({ x: (r.x1 + r.x2) / 2, z: (r.z1 + r.z2) / 2 }));
+    for (let i = 0; i < _rmc.length; i++) pendingRoadMeshes.push(_rmc[i]);
     removeBuildingsByIds(_roadBuildingRemoveBatch);
     _roadBuildingRemoveBatch = null;
   }
-  // このバッチで新規に積んだ道路メッシュだけ、プレイヤー位置を中心とした近い順へ並べ替える
-  // (part1.js sortNewEntriesByDistanceToPlayer参照)。
-  sortNewEntriesByDistanceToPlayer(pendingRoadMeshes, _roadMeshStart8, r => ({ x: (r.x1 + r.x2) / 2, z: (r.z1 + r.z2) / 2 }));
   // 公園・水域・田畑・森 + multipolygon水面
-  data.elements.forEach(el => {
-    if (el.type === 'relation') { processWaterRelation(el); return; } // 重複はrel側のSetで防止
-    if (el.type === 'way' && el.id && seenOSMWays.has(el.id)) return;
+  for (const el of data.elements) {
+    if ((++_ti & 7) === 0 && performance.now() >= _sliceDeadline) yield* _tdBreak(_TD);
+    if (el.type === 'relation') { processWaterRelation(el); continue; } // 重複はrel側のSetで防止
+    if (el.type === 'way' && el.id && seenOSMWays.has(el.id)) continue;
     handleAreaFeature(el);
-  });
+  }
   // 海(natural=coastline)。川ポリゴンと違いwayが多数のタイルを跨ぐため、way単位ではなく
   // タイル単位(tileList=このバッチが対象にした{tx,tz}群)で1回ずつ塗る(part4.js参照)。
   if (data.z14 && typeof vtNoteZ14 === 'function') vtNoteZ14(data.z14); // ベクタータイルの海面で海/陸を判定できる範囲(part4.js)
   if (typeof processCoastlineFill === 'function') processCoastlineFill(data.elements, tileList, !!data.vt);
   // Buildings — 直接生成せずキューに積み、フレーム分割して生成する
   // (以前は1タイル分の建物を1フレームで同期生成し、大きなカクつきの原因だった)
-  const _buildingStart8 = pendingBuildings.length; // このバッチで新規投入する分の開始位置(近傍優先ソート用)
-  buildingElements8.forEach(el => {
-    if (el.type !== 'way' || !el.geometry || el.geometry.length < 4) return;
-    if (seenOSMWays.has(el.id)) return;
+  const _bld8 = []; // このバッチの建物。道路と同じ理由で、ループが終わるまで別の配列に溜める
+  try {
+  for (const el of buildingElements8) {
+    if ((++_ti & 7) === 0 && performance.now() >= _sliceDeadline) yield* _tdBreak(_TD);
+    if (el.type !== 'way' || !el.geometry || el.geometry.length < 4) continue;
+    if (seenOSMWays.has(el.id)) continue;
     const tags = el.tags || {};
     // 学校・大学・病院は、校舎そのものにbuildingタグが無く敷地全体(amenity)しか
     // マッピングされていないケースが多い。その場合も敷地の中心に代表的な校舎を1棟建てる。
@@ -586,11 +618,11 @@ function processTileData(data, tileCount, tileList) {
     // 丸ごと取りこぼしていた(part2.jsのsynthesizeBuildingRelationWaysの緩和と対になる)。
     const isStadiumOnly = !USES_MEIJI_LANDUSE && !tags.building &&
       (tags.leisure === 'stadium' || tags.amenity === 'stadium');
-    if (!tags.building && !isCampusOnly && !isStadiumOnly) return;
+    if (!tags.building && !isCampusOnly && !isStadiumOnly) continue;
     // 【2026-07-16】駅舎は生成しない(ユーザー要望)。線路またぎ建物のdrop(fitRealBuildingToRoads)
     // だけでは線路脇に建つ駅舎が残るため、タグで明示的に除外する。
     if (tags.building === 'train_station' || tags.building === 'station' ||
-        tags.railway === 'station' || tags.public_transport === 'station') return;
+        tags.railway === 'station' || tags.public_transport === 'station') continue;
     if (USES_MEIJI_LANDUSE && tags.building) {
       // 実際には描画しないが、密度ヒントとして棟数だけ数えておく(フィルタで捨てる前に)
       const p0 = latLonToXZ(el.geometry[0].lat, el.geometry[0].lon);
@@ -598,7 +630,7 @@ function processTileData(data, tileCount, tileList) {
     }
     if (USES_MEIJI_LANDUSE) { // 明治・江戸: 神社仏閣以外のOSM建物は出さない(手続き生成に任せる)
       const st = getBuildingStyle(tags);
-      if (!st || (st.type !== 'shrine' && st.type !== 'temple')) return;
+      if (!st || (st.type !== 'shrine' && st.type !== 'temple')) continue;
     }
     const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
     // 【重要・2026-07-16】以前は「頂点平均の重心+軸平行の外接矩形(maxDx*2×maxDz*2)」で、
@@ -630,7 +662,7 @@ function processTileData(data, tileCount, tileList) {
     const _poly = (MODE === 'real' && !isCampusOnly && !isStadiumOnly) ? h1Footprint(pts, w * d) : null;
     if (isCampusOnly) { w = Math.min(w, 34); d = Math.min(d, 22); } // 敷地全体でなく校舎サイズに収める
     let style = getBuildingStyle(tags);
-    if (MODE === 'edo' && shouldSkipEdoBuilding(style)) return; // 江戸: 現代の建物密度をそのまま使わず間引く
+    if (MODE === 'edo' && shouldSkipEdoBuilding(style)) continue; // 江戸: 現代の建物密度をそのまま使わず間引く
     const resolvedH = resolveBuildingHeight(tags);
     // 国プロファイルの階数フォールバック・最低階数floor。
     const cprofH8 = localDensityProfileAt(cprofH8Base, cx, cz);
@@ -688,7 +720,7 @@ function processTileData(data, tileCount, tileList) {
     if (worldPosSettled && _pbdx * _pbdx + _pbdz * _pbdz > _pbLim * _pbLim) {
       dormantAdd(realRec);
     } else {
-      pendingBuildings.push(realRec);
+      _bld8.push(realRec);
     }
     // 【重要・2026-07-15】以前はbuildingGrid(hasRealBuildingNearby/hasRealHouseNearbyが参照する、
     // 「本物のOSM建物がここにある」という手続き生成の裏付け判定用インデックス)への登録が、
@@ -702,28 +734,32 @@ function processTileData(data, tileCount, tileList) {
     // しておくことで、実際の描画完了を待たずに手続き生成側が正しく「ここは本物の建物がある」
     // と認識できるようにする。
     realBuildingIndexAdd(realRec);
-  });
-  // このバッチで新規に積んだ建物だけ、プレイヤー位置を中心とした近い順へ並べ替える
-  // (part1.js sortNewEntriesByDistanceToPlayer参照)。
-  sortNewEntriesByDistanceToPlayer(pendingBuildings, _buildingStart8, b => ({ x: b.x, z: b.z }));
+  }
+  } finally {
+    // このバッチの建物を近い順に並べて待ち行列の末尾へ渡す。例外でも途中までの分を落とさないようfinallyで行う
+    sortNewEntriesByDistanceToPlayer(_bld8, 0, b => ({ x: b.x, z: b.z }));
+    for (let i = 0; i < _bld8.length; i++) pendingBuildings.push(_bld8[i]);
+  }
   // Landuse polygons for chunk system
-  data.elements.forEach(el => {
-    if (el.type !== 'way' || !el.geometry || el.geometry.length < 4) return;
-    if (seenOSMWays.has(el.id)) return;
+  for (const el of data.elements) {
+    if ((++_ti & 7) === 0 && performance.now() >= _sliceDeadline) yield* _tdBreak(_TD);
+    if (el.type !== 'way' || !el.geometry || el.geometry.length < 4) continue;
+    if (seenOSMWays.has(el.id)) continue;
     const tags = el.tags || {};
     const lu = tags.landuse;
-    if (!lu || !['residential','commercial','industrial','retail','mixed_use'].includes(lu)) return;
+    if (!lu || !['residential','commercial','industrial','retail','mixed_use'].includes(lu)) continue;
     const pts = el.geometry.map(g => latLonToXZ(g.lat, g.lon));
     let minX=Infinity, maxX=-Infinity, minZ=Infinity, maxZ=-Infinity;
     pts.forEach(p => { minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minZ=Math.min(minZ,p.z); maxZ=Math.max(maxZ,p.z); });
     const _luEntry = { pts, lu, minX, maxX, minZ, maxZ };
     landusePolygons.push(_luEntry);
     polyGridAdd(landuseGrid, _luEntry);
-  });
+  }
   // 最後にway IDを記録(カテゴリ別の3パスが終わってから)
   // 【2026-07-28】どのタイルのwayかも一緒に覚える(resetTileForRefetchで消せるようにするため)。
   // 所属タイルは要求元ではなくway自身の座標で決める(タイルをまたぐwayは代表点側に属させる)。
-  data.elements.forEach(el => {
+  for (const el of data.elements) {
+    if ((++_ti & 7) === 0 && performance.now() >= _sliceDeadline) yield* _tdBreak(_TD);
     // relation(building/stadiumのマルチポリゴン、水域のmultipolygon等)も所属タイルを覚えておく。
     // 【2026-08-03・修正A追補】以前はbounds中心(または代表点)1つだけに帰属させていた。
     // 相模川のような大きな水域relationは複数タイルにまたがるため、これだと「帰属タイル」
@@ -755,9 +791,9 @@ function processTileData(data, tileCount, tileList) {
           ra.push(el.id);
         }
       }
-      return;
+      continue;
     }
-    if (el.type !== 'way' || el.id == null) return;
+    if (el.type !== 'way' || el.id == null) continue;
     seenOSMWays.add(el.id);
     // 【2026-08-03・修正A(way帰属のotk化)】以前は「最初のノードのタイル」1つだけに
     // 帰属させていた。線路・幹線道路のように複数タイルにまたがるwayは、その帰属タイル
@@ -808,16 +844,16 @@ function processTileData(data, tileCount, tileList) {
     } else {
       // フォールバック(geometryを持たない要素。従来通り代表点1つ)
       const g = el.bounds ? { lat: (el.bounds.minlat + el.bounds.maxlat) / 2, lon: (el.bounds.minlon + el.bounds.maxlon) / 2 } : null;
-      if (!g) return;
+      if (!g) continue;
       const pxz = latLonToXZ(g.lat, g.lon);
       const k = osmTileKeyOfXZ(pxz.x, pxz.z);
       let arr = tileWays.get(k);
       if (!arr) { arr = []; tileWays.set(k, arr); }
       arr.push(el.id);
     }
-  });
-  const _tileDataMs = performance.now() - _tileDataT0;
-  if (_tileDataMs > 20) console.log('[tileData] ' + _tileDataMs.toFixed(1) + 'ms elems=' + data.elements.length);
+  }
+  _TD.acc += performance.now() - _TD.t;
+  if (_TD.acc > 20) console.log('[tileData] ' + _TD.acc.toFixed(1) + 'ms elems=' + data.elements.length + (_TD.n > 1 ? ' slices=' + _TD.n : ''));
 }
 
 // キューに空きワーカー枠がある限り、並行してタイルを取得していく
@@ -833,22 +869,53 @@ function osmReadyPush(batch, epoch, apply) {
   _osmReady.push({ batch, epoch, apply });
   if (!_osmReadyTimer) _osmReadyTimer = setTimeout(_osmReadyDrain, 0);
 }
+// 処理中のタイルバッチ(ジェネレーター)。1回のタスクで数msぶんだけ進め、続きは次のタスクへ回す。
+let _osmJob = null, _osmJobEpoch = 0, _osmJobRunning = false;
+const OSM_SLICE_ON = !/[?&]slice=0/.test(location.search); // ?slice=0 で従来の一括処理に戻す(比較用)
+function _osmSliceMs() {
+  if (!OSM_SLICE_ON || document.hidden) return Infinity; // 裏タブは描画が無く、タイマーも間引かれるので一気に終わらせる
+  if (_osmJobEpoch !== osmEpoch) return 24;               // ジャンプ前の場所の分は見えないので急いで終わらせる
+  return (performance.now() < 30000 || _curTileRush) ? 12 : 6; // 起動直後・現在地タイル待ちの間は少し太く
+}
+function _osmJobStep() {
+  _sliceDeadline = performance.now() + _osmSliceMs();
+  _osmJobRunning = true;
+  try { if (_osmJob.next().done) _osmJob = null; }
+  catch (e) { console.error('[osm] タイルデータの処理に失敗', e); _osmJob = null; }
+  finally { _osmJobRunning = false; _sliceDeadline = Infinity; }
+}
+// 同期呼び出し(processTileData)の前に、途中の分を最後まで進める。処理中のコードからの再入は何もしない。
+function _osmJobFinish() {
+  if (!_osmJob || _osmJobRunning) return;
+  const prev = _sliceDeadline;
+  _sliceDeadline = Infinity;
+  _osmJobRunning = true;
+  try { while (!_osmJob.next().done); }
+  catch (e) { console.error('[osm] タイルデータの処理に失敗', e); }
+  finally { _osmJob = null; _osmJobRunning = false; _sliceDeadline = prev; }
+}
 function _osmReadyDrain() {
   _osmReadyTimer = 0;
-  for (let i = _osmReady.length - 1; i >= 0; i--) if (_osmReady[i].epoch !== osmEpoch) _osmReady.splice(i, 1); // ジャンプ前の分は捨てる
-  let bi = -1, bd = Infinity;
-  for (let i = 0; i < _osmReady.length; i++) {
-    for (const t of _osmReady[i].batch) {
-      const d = priorityDist2((t.tx + 0.5) * OSM_TILE_M, (t.tz + 0.5) * OSM_TILE_M);
-      if (d < bd) { bd = d; bi = i; }
+  if (!_osmJob) {
+    for (let i = _osmReady.length - 1; i >= 0; i--) if (_osmReady[i].epoch !== osmEpoch) _osmReady.splice(i, 1); // ジャンプ前の分は捨てる
+    let bi = -1, bd = Infinity;
+    for (let i = 0; i < _osmReady.length; i++) {
+      for (const t of _osmReady[i].batch) {
+        const d = priorityDist2((t.tx + 0.5) * OSM_TILE_M, (t.tz + 0.5) * OSM_TILE_M);
+        if (d < bd) { bd = d; bi = i; }
+      }
+    }
+    if (bi >= 0) {
+      const it = _osmReady.splice(bi, 1)[0];
+      try {
+        const g = it.apply(); // ジェネレーターを返す処理は下のスライス実行へ。それ以外はここで完了する
+        if (g && typeof g.next === 'function') { _osmJob = g; _osmJobEpoch = it.epoch; }
+      } catch (e) { console.error('[osm] タイルデータの処理に失敗', e); }
     }
   }
-  if (bi >= 0) {
-    const it = _osmReady.splice(bi, 1)[0];
-    try { it.apply(); } catch (e) { console.error('[osm] タイルデータの処理に失敗', e); }
-  }
-  if (_osmReady.length) _osmReadyTimer = setTimeout(_osmReadyDrain, 0);
-  processOSMTileQueue();
+  if (_osmJob) _osmJobStep();
+  if (_osmJob || _osmReady.length) _osmReadyTimer = setTimeout(_osmReadyDrain, 0);
+  if (!_osmJob) processOSMTileQueue(); // 処理中は新規取得の再開を後回し(終わった時にまとめて)
 }
 function processOSMTileQueue() {
   if (_osmReady.length >= OSM_READY_MAX) return; // 処理待ちが溜まっている間は新規取得を控える(_osmReadyDrainが再開する)
@@ -1508,9 +1575,10 @@ async function fetchOSMTileBatch(opts) {
         // バッチから1つずつ処理する(osmReadyPush)。同時に複数届いた時に遠いタイルの処理で足元が
         // 待たされず、1バッチごとに描画フレームを挟めるのでカクつきも減る。
         // await中にマップジャンプしていたら捨てる(キャッシュヒット経路と同じ)。
-        if (myEpoch === osmEpoch) osmReadyPush(batch, myEpoch, () => {
+        // 数msずつ進めるためジェネレーター(processTileDataSteps)。_osmReadyDrainが駆動する
+        if (myEpoch === osmEpoch) osmReadyPush(batch, myEpoch, function* () {
           try {
-            processTileData(_vt, batch.length, batch.map(t => ({ tx: t.tx, tz: t.tz, kind: batchKind })));
+            yield* processTileDataSteps(_vt, batch.length, batch.map(t => ({ tx: t.tx, tz: t.tz, kind: batchKind })));
           } finally { // 例外でも取得済みにする(未処理のまま「取得中」で止まり続けないように)
             for (let i = 0; i < batch.length; i++) markTileSuccess(keys[i], stateKeys[i], batchKind);
           }
